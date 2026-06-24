@@ -226,6 +226,9 @@ if "analysis_done" not in st.session_state:
 if "erosion_area" not in st.session_state:
     st.session_state["erosion_area"] = 0.0
 
+if "online_rainfall" not in st.session_state:
+    st.session_state["online_rainfall"] = None
+
 if "sedimentation_area" not in st.session_state:
     st.session_state["sedimentation_area"] = 0.0
 
