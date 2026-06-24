@@ -33,6 +33,7 @@ from reportlab.platypus import (
     TableStyle
 )
 
+
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
 
