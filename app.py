@@ -85,6 +85,7 @@ if st.session_state.home_page:
         box-shadow:0 0 40px rgba(0,255,150,0.12);
     }
 
+
     .hero-title{
         font-size:70px;
         font-weight:900;
