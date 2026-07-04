@@ -248,6 +248,45 @@ def load_css():
         font-family: 'Segoe UI', sans-serif;
     }
 
+    .stApp::before {
+
+        content:"";
+
+        position:fixed;
+        inset:0;
+
+        background:
+        url("https://www.transparenttextures.com/patterns/topography.png");
+
+        background-size:900px;
+
+        opacity:0.12;
+
+        pointer-events:none;
+
+        mix-blend-mode:screen;
+    }
+    .stApp {
+        background:
+        radial-gradient(circle at top left,
+            rgba(0,255,150,0.12),
+            transparent 35%),
+
+        radial-gradient(circle at bottom right,
+            rgba(149,191,71,0.10),
+            transparent 40%),
+
+        linear-gradient(
+            135deg,
+            #031A1A 0%,
+            #022424 30%,
+            #001515 70%,
+            #000E0E 100%
+        );
+
+        color: white;
+    }
+
     /* ===== HEADER ===== */
     .header {
         background: rgba(0, 128, 96, 0.15);
@@ -259,6 +298,7 @@ def load_css():
     }
 
     /* ===== BUTTON ===== */
+
     .stButton>button {
         background: linear-gradient(135deg, #008060, #5E8E3E);
         color: white;
@@ -272,6 +312,28 @@ def load_css():
     .stButton>button:hover {
         transform: scale(1.05);
         box-shadow: 0 0 20px rgba(149,191,71,0.5);
+    }
+
+    [data-testid="stFileUploader"] {
+
+        border:2px dashed rgba(0,255,170,0.35);
+
+        border-radius:18px;
+
+        background:
+        rgba(255,255,255,0.03);
+
+        backdrop-filter: blur(15px);
+
+        padding:10px;
+    }
+
+    [data-testid="stFileUploader"]:hover {
+
+        border-color:#00E0A8;
+
+        background:
+        rgba(0,255,170,0.05);
     }
 
     /* ===== INPUT ===== */
@@ -299,6 +361,7 @@ def load_css():
         margin-bottom: 10px;
         border-left: 4px solid #008060;
     }
+    
 
     /* ===== METRIC ===== */
     [data-testid="metric-container"] {
@@ -308,14 +371,67 @@ def load_css():
         border: 1px solid rgba(149,191,71,0.2);
     }
 
+    [data-testid="stFileUploader"] {
+
+    border:2px dashed rgba(0,255,170,0.35);
+
+    border-radius:18px;
+
+    background:
+    rgba(255,255,255,0.03);
+
+    backdrop-filter: blur(15px);
+
+    padding:10px;
+}
+
+[data-testid="stFileUploader"]:hover {
+
+    border-color:#00E0A8;
+
+    background:
+    rgba(0,255,170,0.05);
+}
+
     /* ===== TAB ===== */
-    .stTabs [role="tab"] {
-        color: #95BF47;
-        font-weight: 600;
+
+    .stTabs [role="tab"]{
+
+        background:rgba(255,255,255,0.04);
+
+        border-radius:14px;
+
+        margin-right:8px;
+
+        padding:10px 22px;
+
+        font-weight:600;
+
+        transition:0.3s;
+
+        color:#95BF47;
     }
 
-    .stTabs [aria-selected="true"] {
-        border-bottom: 3px solid #008060;
+    .stTabs [role="tab"]:hover{
+
+        background:rgba(0,255,170,0.08);
+
+        color:white;
+    }
+
+    .stTabs [aria-selected="true"]{
+
+        background:
+        linear-gradient(
+            135deg,
+            #00C896,
+            #008060
+        );
+
+        color:white;
+
+        box-shadow:
+        0 8px 25px rgba(0,200,150,0.30);
     }
 
     /* ===== ANIMATION ===== */
