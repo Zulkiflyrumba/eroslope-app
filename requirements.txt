@@ -18,3 +18,5 @@ python-docx
 sentence-transformers
 faiss-cpu
 xgboost
+rasterio
+PyMuPDF
