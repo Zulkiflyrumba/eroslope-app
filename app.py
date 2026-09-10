@@ -1667,7 +1667,7 @@ with tab1:
 
             with colh1:
                 st.text_input(
-                    "Nama Segmen / Lokasi",
+                    _t("Nama Segmen / Lokasi", "Segment Name / Location"),
                     value=default_name,
                     key=f"seg_name_{sid}"
                 )
@@ -1680,7 +1680,7 @@ with tab1:
                         st.rerun()
 
             st.radio(
-                "Jenis Kondisi Segmen Ini",
+                _t("Jenis Kondisi Segmen Ini", "Type of Condition for This Segment"),
                 ["Desain Baru", "Eksisting (Rekonstruksi)"],
                 key=f"design_type_{sid}",
                 horizontal=True,
@@ -1705,7 +1705,7 @@ with tab1:
 
                 with cold2:
                     st.file_uploader(
-                        "Upload Boundary DXF (sub-area, wajib untuk sub-segmen)",
+                        _t("Upload Boundary DXF (sub-area, wajib untuk sub-segmen)", "Upload Boundary DXF (sub-area, required for sub-segments)"),
                         type=["dxf"],
                         key=f"boundary_dxf_{sid}"
                     )
@@ -1715,21 +1715,21 @@ with tab1:
 
                 with cold1:
                     st.file_uploader(
-                        "Upload Kontur DXF",
+                        _t("Upload Kontur DXF", "Upload Contour DXF"),
                         type=["dxf"],
                         key=f"kontur_dxf_{sid}"
                     )
 
                 with cold2:
                     st.file_uploader(
-                        "Upload Boundary DXF (opsional)",
+                        _t("Upload Boundary DXF (opsional)", "Upload Boundary DXF (optional)"),
                         type=["dxf"],
                         key=f"boundary_dxf_{sid}"
                     )
 
             if not is_sub_segment:
                 st.file_uploader(
-                    "Upload Orthophoto (opsional) — .ecw / .tif / .tiff / .jp2",
+                    _t("Upload Orthophoto (opsional) — .ecw / .tif / .tiff / .jp2", "Upload Orthophoto (optional) — .ecw / .tif / .tiff / .jp2"),
                     type=["ecw", "tif", "tiff", "jp2", "jp2000"],
                     key=f"orthophoto_{sid}",
                     help=(
@@ -1743,7 +1743,7 @@ with tab1:
                     )
                 )
 
-            st.markdown("**Parameter Flow & Sedimen (khusus segmen ini)**")
+            st.markdown("**" + _t("Parameter Flow & Sedimen (khusus segmen ini)", "Flow & Sediment Parameters (specific to this segment)") + "**")
 
             main_sid = st.session_state["segments"][0]
 
@@ -1802,7 +1802,7 @@ with tab1:
                 )
 
                 colsd2.number_input(
-                    "Density Water (kg/m3)", 1000, 1200, 1000,
+                    _t("Density Water (kg/m3)", "Density Water (kg/m3)"), 1000, 1200, 1000,
                     key=f"rho_water_{sid}"
                 )
 
@@ -1812,7 +1812,7 @@ with tab1:
                 )
 
                 st.number_input(
-                    "Asumsi Kedalaman Aliran / Flow Depth (m)", 0.01, 10.0, 0.30,
+                    _t("Asumsi Kedalaman Aliran / Flow Depth (m)", "Assumed Flow Depth (m)"), 0.01, 10.0, 0.30,
                     key=f"flow_depth_{sid}",
                     help=(
                         "Dipakai untuk menghitung tegangan geser dasar τ = ρw·g·h·S "
@@ -1849,15 +1849,15 @@ with tab1:
                 )
 
                 st.number_input(
-                    "Density Water (kg/m3)", 1000, 1200, 1000,
+                    _t("Density Water (kg/m3)", "Density Water (kg/m3)"), 1000, 1200, 1000,
                     key=f"rho_water_{sid}"
                 )
 
             if not is_sub_segment:
-                st.markdown("**Skenario Sumber Aliran (khusus segmen ini)**")
+                st.markdown("**" + _t("Skenario Sumber Aliran (khusus segmen ini)", "Flow Source Scenario (specific to this segment)") + "**")
 
                 source_type_seg = st.selectbox(
-                    "Pilih sumber aliran",
+                    _t("Pilih sumber aliran", "Select flow source"),
                     ["Hujan (Uniform)", "Satu Titik (Point Source)"],
                     key=f"source_type_{sid}"
                 )
@@ -1865,7 +1865,7 @@ with tab1:
                 if source_type_seg == "Satu Titik (Point Source)":
 
                     point_method_seg = st.radio(
-                        "Cara menentukan titik aliran",
+                        _t("Cara menentukan titik aliran", "Method to determine flow point"),
                         ["Ketik Koordinat Manual", "Klik di Peta Desain"],
                         key=f"point_method_{sid}",
                         horizontal=True,
@@ -1891,7 +1891,7 @@ with tab1:
                             st.caption(f"Titik terpilih saat ini: X = {_cx:.3f}, Y = {_cy:.3f}")
 
                     st.number_input(
-                        "Kedalaman/Ketebalan Air Awal di Titik Hulu (m)",
+                        _t("Kedalaman/Ketebalan Air Awal di Titik Hulu (m)", "Initial Water Depth/Thickness at Upstream Point (m)"),
                         min_value=0.01, max_value=10.0, value=0.20, step=0.01,
                         key=f"point_depth_{sid}",
                         help=(
@@ -1904,7 +1904,7 @@ with tab1:
                         )
                     )
 
-                st.markdown("**Hidrologi & Hidrolika (opsional — Rational Method + Manning's Equation)**")
+                st.markdown("**" + _t("Hidrologi & Hidrolika (opsional — Rational Method + Manning's Equation)", "Hydrology & Hydraulics (optional — Rational Method + Manning's Equation)") + "**")
 
                 _ui_caption(
                     "Jika diaktifkan, kecepatan & kedalaman aliran TIDAK lagi diambil dari input manual "
@@ -1915,7 +1915,7 @@ with tab1:
                 )
 
                 use_hydraulics = st.checkbox(
-                    "Aktifkan perhitungan Rational Method + Manning's Equation",
+                    _t("Aktifkan perhitungan Rational Method + Manning's Equation", "Enable Rational Method + Manning's Equation calculation"),
                     key=f"use_hydraulics_{sid}",
                     value=False
                 )
@@ -1987,7 +1987,7 @@ with tab1:
                     )
 
                     st.number_input(
-                        "Tinggi Total Channel/Tanggul (m) — untuk cek freeboard",
+                        _t("Tinggi Total Channel/Tanggul (m) — untuk cek freeboard", "Total Channel/Embankment Height (m) — for freeboard check"),
                         0.1, 30.0, 1.5,
                         key=f"channel_h_total_{sid}"
                     )
@@ -2154,7 +2154,7 @@ with tab1:
     _sub_header(_t("Sumber Data Hujan Online", "Online Rainfall Data Source"))
 
     rain_source_choice = st.selectbox(
-        "Pilih sumber data hujan",
+        _t("Pilih sumber data hujan", "Select rainfall data source"),
         list(_RAIN_SOURCES.keys()),
         help=(
             "'Otomatis' akan mencoba Open-Meteo Archive dulu, lalu NASA POWER, lalu Open-Meteo "
@@ -2164,7 +2164,7 @@ with tab1:
     )
 
     rain_stat_choice = st.radio(
-        "Statistik hujan yang dipakai untuk analisis",
+        _t("Statistik hujan yang dipakai untuk analisis", "Rainfall statistic used for analysis"),
         ["Rata-rata harian (kondisi umum)", "Hujan harian maksimum (kejadian kritis/ekstrem)"],
         horizontal=True,
         help="Untuk analisis erosi/sedimentasi, hujan harian MAKSIMUM dalam periode biasanya lebih "
@@ -2235,7 +2235,7 @@ with tab1:
         )
 
     manual_rainfall_override = st.number_input(
-        "Atau masukkan hujan desain manual (mm/hari) — mengosongkan/0 berarti pakai hasil online",
+        _t("Atau masukkan hujan desain manual (mm/hari) — mengosongkan/0 berarti pakai hasil online", "Or enter manual design rainfall (mm/day) — leave empty/0 to use the online result"),
         min_value=0.0, value=0.0, step=1.0,
         help="Isi ini kalau Anda punya data BMKG/stasiun lokal yang lebih akurat untuk DAS ini, "
              "atau kalau semua sumber online gagal."
@@ -3866,7 +3866,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
     # diklik (atau file PNG-nya belum pernah ada) -- rerun lain tinggal pakai
     # file PNG yang sudah ada, sehingga jauh lebih cepat.
     st.selectbox(
-        "Sumber AI untuk narasi & rekomendasi rekayasa",
+        _t("Sumber AI untuk narasi & rekomendasi rekayasa", "AI source for narrative & engineering recommendations"),
         list(_AI_PROVIDERS.keys()),
         key="ai_source_choice",
         help=(
@@ -3995,45 +3995,48 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                 continue
 
             # ================= DIAGNOSTIK KONTUR (verifikasi sebelum surface dibangun) =================
-            with st.expander(f"Diagnostik pembacaan DXF — {seg_label}", expanded=contour_diag["all_z_zero"] or contour_diag["n_blunder_points"] > 0):
-                dcol1, dcol2, dcol3 = st.columns(3)
-                dcol1.metric("Titik terbaca", f"{contour_diag['n_raw_points']:,}")
-                dcol2.metric("Duplikat dibuang", f"{contour_diag['n_duplicate_points']:,}")
-                dcol3.metric("Titik blunder (Z beda di XY sama)", f"{contour_diag['n_blunder_points']:,}")
+            # Hanya ditampilkan utk admin -- utk user surveyor tampilan dibuat simpel,
+            # tanpa panel diagnostik teknis/error yang berpotensi membingungkan.
+            if _is_admin:
+                with st.expander(f"Diagnostik pembacaan DXF — {seg_label}", expanded=contour_diag["all_z_zero"] or contour_diag["n_blunder_points"] > 0):
+                    dcol1, dcol2, dcol3 = st.columns(3)
+                    dcol1.metric("Titik terbaca", f"{contour_diag['n_raw_points']:,}")
+                    dcol2.metric("Duplikat dibuang", f"{contour_diag['n_duplicate_points']:,}")
+                    dcol3.metric("Titik blunder (Z beda di XY sama)", f"{contour_diag['n_blunder_points']:,}")
 
-                if contour_diag.get("n_points_added_densify", 0) > 0:
-                    _ui_caption(
-                        f"+{contour_diag['n_points_added_densify']:,} titik tambahan disisipkan otomatis "
-                        f"di sepanjang segmen polyline yang panjangnya > "
-                        f"{contour_diag.get('densify_max_seg_len', 0):.2f} m (garis DXF ikut dimodelkan "
-                        "penuh, bukan cuma vertex-nya, supaya area di antara vertex yang jarang tidak "
-                        "kosong/berlubang pada surface 3D)."
+                    if contour_diag.get("n_points_added_densify", 0) > 0:
+                        _ui_caption(
+                            f"+{contour_diag['n_points_added_densify']:,} titik tambahan disisipkan otomatis "
+                            f"di sepanjang segmen polyline yang panjangnya > "
+                            f"{contour_diag.get('densify_max_seg_len', 0):.2f} m (garis DXF ikut dimodelkan "
+                            "penuh, bukan cuma vertex-nya, supaya area di antara vertex yang jarang tidak "
+                            "kosong/berlubang pada surface 3D)."
                     )
 
-                st.write("**Entity terpakai:**", contour_diag["n_entities_used"] or "—")
-                if contour_diag["n_entities_skipped"]:
-                    st.write("**Entity dilewati (tipe tidak didukung):**", contour_diag["n_entities_skipped"])
+                    st.write("**Entity terpakai:**", contour_diag["n_entities_used"] or "—")
+                    if contour_diag["n_entities_skipped"]:
+                        st.write("**Entity dilewati (tipe tidak didukung):**", contour_diag["n_entities_skipped"])
 
-                if contour_diag["all_z_zero"]:
-                    st.error(
-                        "Semua titik punya elevasi Z = 0. DXF ini kemungkinan kontur 2D murni "
-                        "(elevasi disimpan di layer/atribut, bukan di geometri). Surface 3D TIDAK akan akurat. "
-                        "Export ulang dari sumber (Civil3D/AutoCAD) sebagai 3D Polyline dengan Z asli, "
-                        "atau gunakan opsi 'ambil elevasi dari nama layer' jika layer Anda mengikuti konvensi penamaan angka."
-                    )
-                elif contour_diag["n_layer_elevation_fallback"] > 0:
-                    _ui_warning(
-                        f"{contour_diag['n_layer_elevation_fallback']} entity elevasinya diambil dari nama layer "
-                        f"(bukan dari geometri Z). Contoh: {contour_diag['layer_elevation_hints'][:5]}. "
-                        "Mohon cross-check apakah ini benar sebelum melanjutkan."
-                    )
+                    if contour_diag["all_z_zero"]:
+                        st.error(
+                            "Semua titik punya elevasi Z = 0. DXF ini kemungkinan kontur 2D murni "
+                            "(elevasi disimpan di layer/atribut, bukan di geometri). Surface 3D TIDAK akan akurat. "
+                            "Export ulang dari sumber (Civil3D/AutoCAD) sebagai 3D Polyline dengan Z asli, "
+                            "atau gunakan opsi 'ambil elevasi dari nama layer' jika layer Anda mengikuti konvensi penamaan angka."
+                        )
+                    elif contour_diag["n_layer_elevation_fallback"] > 0:
+                        _ui_warning(
+                            f"{contour_diag['n_layer_elevation_fallback']} entity elevasinya diambil dari nama layer "
+                            f"(bukan dari geometri Z). Contoh: {contour_diag['layer_elevation_hints'][:5]}. "
+                            "Mohon cross-check apakah ini benar sebelum melanjutkan."
+                        )
 
-                if contour_diag["n_blunder_points"] > 0:
-                    _ui_warning(
-                        f"Ditemukan {contour_diag['n_blunder_points']} titik dengan koordinat X,Y hampir sama "
-                        "tetapi elevasi Z berbeda >1cm — indikasi kesalahan digitasi/duplikasi layer kontur. "
-                        f"Contoh (x, y, z1, z2): {contour_diag['blunder_sample']}"
-                    )
+                    if contour_diag["n_blunder_points"] > 0:
+                        _ui_warning(
+                            f"Ditemukan {contour_diag['n_blunder_points']} titik dengan koordinat X,Y hampir sama "
+                            "tetapi elevasi Z berbeda >1cm — indikasi kesalahan digitasi/duplikasi layer kontur. "
+                            f"Contoh (x, y, z1, z2): {contour_diag['blunder_sample']}"
+                        )
 
             # ================= AUTO BOUNDARY (scale-aware alpha-shape) =================
 
@@ -4159,19 +4162,19 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
 
             with st.expander(f"Pengaturan surface (resolusi grid & smoothing) — {seg_label}", expanded=False):
                 grid_res = st.slider(
-                    "Resolusi grid (titik per sisi)", 150, 1200, value=_suggested_res, step=50,
+                    _t("Resolusi grid (titik per sisi)", "Grid resolution (points per side)"), 150, 1200, value=_suggested_res, step=50,
                     key=f"grid_res_{sid}",
                     help="Disarankan otomatis berdasar kerapatan titik kontur asli. Naikkan untuk detail lebih "
                          "tinggi (lebih lambat), turunkan jika terlalu berat."
                 )
                 smooth_sigma = st.slider(
-                    "Smoothing permukaan (sigma gaussian)", 0.0, 2.0, value=0.0, step=0.1,
+                    _t("Smoothing permukaan (sigma gaussian)", "Surface smoothing (gaussian sigma)"), 0.0, 2.0, value=0.0, step=0.1,
                     key=f"smooth_sigma_{sid}",
                     help="0 = permukaan mengikuti TIN/interpolasi linear apa adanya (paling akurat terhadap kontur "
                          "asli, direkomendasikan). Nilai >0 menghaluskan tapi bisa mengaburkan breakline/tebing tajam."
                 )
                 show_dxf_overlay_3d = st.checkbox(
-                    "Tampilkan overlay garis DXF asli di atas surface 3D", value=True,
+                    _t("Tampilkan overlay garis DXF asli di atas surface 3D", "Show original DXF line overlay on top of the 3D surface"), value=True,
                     key=f"dxf_overlay_3d_{sid}",
                     help="Menggambar ulang polyline/kontur DXF mentah (sebelum diinterpolasi) sebagai garis di "
                          "atas permukaan 3D hasil model, untuk memverifikasi visual apakah surface sudah "
@@ -4346,7 +4349,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                         velocity_hulu = hydraulics_result["v_normal_ms"]
                         flow_depth = hydraulics_result["h_normal_m"]
 
-                        st.markdown("#### Hasil Rational Method + Manning's Equation")
+                        st.markdown("#### " + _t("Hasil Rational Method + Manning's Equation", "Rational Method + Manning's Equation Results"))
                         colhy1, colhy2, colhy3, colhy4 = st.columns(4)
                         colhy1.metric("Intensitas Hujan (Mononobe)", f"{hydraulics_result['intensity_mm_hr']:.1f} mm/jam")
                         colhy2.metric("Debit Rencana Q", f"{hydraulics_result['q_design_m3s']:.3f} m³/s")
@@ -4528,9 +4531,14 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                 if point_method == "Klik di Peta Desain":
                     st.markdown(f"**Pilih Titik Aliran di Peta — {seg_label}**")
                     st.caption(
-                        "Klik satu titik di peta di bawah ini untuk menentukan lokasi awal air "
-                        "mulai mengalir (titik hulu / point source). Garis hitam = kontur/garis "
-                        "DXF asli, garis magenta = boundary area kajian."
+                        _t(
+                            "Klik satu titik di peta di bawah ini untuk menentukan lokasi awal air "
+                            "mulai mengalir (titik hulu / point source). Garis hitam = kontur/garis "
+                            "DXF asli, garis magenta = boundary area kajian.",
+                            "Click a point on the map below to set the starting location where water "
+                            "begins to flow (upstream point / point source). Black line = original DXF "
+                            "contour/line, magenta line = study area boundary."
+                        )
                     )
 
                     fig_pick = go.Figure()
@@ -4694,7 +4702,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                 # kalau ada jalur yang berhenti karena "sink/cekungan" atau "NaN" jauh
                 # sebelum benar2 mencapai tepi boundary, itu langsung kelihatan di sini
                 # -- bukan cuma dugaan dari tampilan visual saja.
-                if flow_stop_reasons:
+                if flow_stop_reasons and _is_admin:
                     _n_boundary = sum(
                         1 for r in flow_stop_reasons
                         if r["reason"].startswith("keluar")
@@ -5113,7 +5121,13 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
             top10.insert(1, "ID_Titik", [f"{_seg_prefix}-{i:02d}" for i in top10["Rank"]])
             top10.insert(2, "Segmen", seg_label)
 
-            st.markdown("**Sepuluh Titik Prioritas Mitigasi (setara Tabel 8 makalah acuan)**")
+            _mitigasi_title = (
+                _t("Sepuluh Titik Prioritas Mitigasi (setara Tabel 8 makalah acuan)",
+                   "Ten Priority Mitigation Points (equivalent to Table 8 of the reference paper)")
+                if _is_admin else
+                _t("Sepuluh Titik Prioritas Mitigasi", "Ten Priority Mitigation Points")
+            )
+            st.markdown("**" + _mitigasi_title + "**")
             _ui_caption(
                 "Jenis risiko dominan diklasifikasi otomatis dari kombinasi: probabilitas deposisi "
                 "(Sedimentasi), flow density × risk score (Overflow), dan kemiringan lokal (Erosi "
@@ -5474,7 +5488,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                 )
 
             # ================= SIMULASI ALIRAN AIR (ANIMASI 3D) =================
-            st.markdown("#### Simulasi Aliran Air (Animasi)")
+            st.markdown("#### " + _t("Simulasi Aliran Air (Animasi)", "Water Flow Simulation (Animation)"))
             _ui_caption(
                 "Animasi ini memutar ulang jalur aliran (streamline steepest-descent) "
                 "yang sama dengan hasil 'Numerical Modelling' di atas — bukan simulasi "
@@ -5492,7 +5506,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
             if run_animation and len(flow_paths) > 0:
 
                 n_frames = st.slider(
-                    "Jumlah frame animasi", 15, 80, 30, 5,
+                    _t("Jumlah frame animasi", "Number of animation frames"), 15, 80, 30, 5,
                     key=f"anim_frames_{sid}",
                     help="Makin banyak frame = animasi makin halus, tapi makin berat dibangun."
                 )
@@ -5609,13 +5623,15 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                     )
 
                     st.plotly_chart(fig_anim, width="stretch")
-                    st.caption(
+                    st.caption(_t(
                         "Tekan ▶ Play untuk menjalankan animasi, atau geser slider untuk "
-                        "melihat progres aliran pada frame tertentu."
-                    )
+                        "melihat progres aliran pada frame tertentu.",
+                        "Press ▶ Play to run the animation, or drag the slider to "
+                        "see the flow progress at a specific frame."
+                    ))
 
             # ================= SIMULASI HUJAN (ANIMASI: TETES JATUH + ALIRAN MULTI-TITIK) =================
-            st.markdown("#### Simulasi Hujan (Animasi Tetes Jatuh + Aliran Multi-Titik)")
+            st.markdown("#### " + _t("Simulasi Hujan (Animasi Tetes Jatuh + Aliran Multi-Titik)", "Rainfall Simulation (Falling Drop + Multi-Point Flow Animation)"))
             _ui_caption(
                 "Berbeda dari animasi di atas (yang cuma mengikuti 1 titik hulu), simulasi ini "
                 "mengambil beberapa titik ACAK tersebar di seluruh area kajian untuk mewakili "
@@ -5641,7 +5657,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                     help="Makin banyak titik = representasi hujan makin rapat, tapi makin berat dibangun."
                 )
                 n_frames_rain = colra2.slider(
-                    "Jumlah frame animasi", 15, 80, 35, 5,
+                    _t("Jumlah frame animasi", "Number of animation frames"), 15, 80, 35, 5,
                     key=f"rain_anim_frames_{sid}"
                 )
                 rain_fall_height = colra3.number_input(
@@ -6158,7 +6174,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
             )
 
             st.metric(
-                "Area Potensi Erosi (%)",
+                _t("Area Potensi Erosi (%)", "Erosion Potential Area (%)"),
                 f"{erosion_ratio*100:.1f}%"
             )
             
@@ -6226,7 +6242,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                 ai_source=st.session_state.get("ai_source_choice", "GPT (OpenAI)")
             )
 
-            st.markdown("#### Rekayasa & Rekomendasi Geoteknik")
+            st.markdown("#### " + _t("Rekayasa & Rekomendasi Geoteknik", "Geotechnical Engineering & Recommendations"))
 
             badge_color = {
                 "red": "#4d0000",
@@ -6272,7 +6288,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
             # otomatis "terkoneksi" dengan angka-angka tsb, tidak perlu ubah apa pun
             # lagi di sini. Instruksi di bawah mengikuti sumber AI yang SEDANG
             # dipilih di dropdown "Sumber AI" (bisa GPT/Gemini/Groq).
-            if ai_reco["source"].startswith("rule-based"):
+            if ai_reco["source"].startswith("rule-based") and _is_admin:
                 _sel_source = st.session_state.get("ai_source_choice", "GPT (OpenAI)")
                 _setup_info = {
                     "GPT (OpenAI)": {
@@ -6326,12 +6342,12 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                         "(mis. saldo habis, model tidak tersedia, rate limit)."
                     )
 
-            if rekomendasi["notes"]:
-                with st.expander("Lihat indikator teknis pendukung"):
+            if rekomendasi["notes"] and _is_admin:
+                with st.expander(_t("Lihat indikator teknis pendukung", "View supporting technical indicators")):
                     for n in rekomendasi["notes"]:
                         st.markdown(f"- {n}")
 
-            st.markdown("**Rekomendasi rekayasa:**")
+            st.markdown("**" + _t("Rekomendasi rekayasa:", "Engineering recommendations:") + "**")
             for r in ai_reco["recommendations"]:
                 st.markdown(f"- {r}")
 
@@ -6516,7 +6532,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
             # ini murni pengaturan TAMPILAN Scene 3D Gabungan, bukan parameter
             # analisis segmen manapun.
             _transition_width = st.slider(
-                "Lebar transisi warna antar segmen di Scene 3D Gabungan (m)",
+                _t("Lebar transisi warna antar segmen di Scene 3D Gabungan (m)", "Colour transition width between segments in Combined 3D Scene (m)"),
                 0.0, 20.0, 3.0, 0.5,
                 key="combo_color_transition_width",
                 help=(
@@ -6797,16 +6813,18 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
             _total_sediment = sum(v["sedimentation_area"] for v in _seg_results_now.values())
             _total_overflow = sum(v["overflow_count"] for v in _seg_results_now.values())
 
-            st.markdown("**Ringkasan Gabungan (Semua Segmen)**")
+            st.markdown("**" + _t("Ringkasan Gabungan (Semua Segmen)", "Combined Summary (All Segments)") + "**")
             colcm1, colcm2, colcm3, colcm4 = st.columns(4)
             colcm1.metric("Jumlah Segmen", _n_seg)
             colcm2.metric("Total Area Erosi", f"{_total_erosion:.1f} m²")
             colcm3.metric("Total Area Sedimentasi", f"{_total_sediment:.1f} m²")
             colcm4.metric("Total Titik Overflow Risk", int(_total_overflow))
-            st.caption(
+            st.caption(_t(
                 "Detail lengkap per segmen (peta risiko 2D, hidrolika, rekomendasi rekayasa, "
-                "PDF report) tetap tersedia di bawah, per bagian masing-masing segmen."
-            )
+                "PDF report) tetap tersedia di bawah, per bagian masing-masing segmen.",
+                "Full detail per segment (2D risk map, hydraulics, engineering recommendations, "
+                "PDF report) remains available below, under each segment's own section."
+            ))
 
 
     # =====================================================
@@ -6823,7 +6841,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
         if seg_results:
             seg_options = {v["label"]: k for k, v in seg_results.items()}
             picked_label = st.selectbox(
-                "Pilih segmen untuk Cross Section & Report",
+                _t("Pilih segmen untuk Cross Section & Report", "Select segment for Cross Section & Report"),
                 list(seg_options.keys())
             )
             picked_sid = seg_options[picked_label]
@@ -6903,7 +6921,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
         else:
 
             section_dxf = st.file_uploader(
-                "Upload Polyline Section DXF",
+                _t("Upload Polyline Section DXF", "Upload Polyline Section DXF"),
                 type=["dxf"],
                 key="section_polyline"
             )
@@ -7153,7 +7171,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                 y_true, y_pred, labels=RISK_CLASSES, zero_division=0
             )
 
-            st.markdown("#### Hasil Validasi")
+            st.markdown("#### " + _t("Hasil Validasi", "Validation Results"))
             vcol1, vcol2, vcol3 = st.columns(3)
             vcol1.metric("Overall Accuracy", f"{overall_acc*100:.1f}%")
             vcol2.metric("Cohen's Kappa (κ)", f"{kappa:.2f}")
@@ -7161,12 +7179,12 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
             if extra_metric:
                 _ui_caption(extra_metric)
 
-            st.markdown("**Confusion Matrix** (baris = observasi lapangan, kolom = prediksi model)")
+            st.markdown("**" + _t("Confusion Matrix", "Confusion Matrix") + "** (" + _t("baris = observasi lapangan, kolom = prediksi model", "rows = field observation, columns = model prediction") + ")")
             cm_df = pd.DataFrame(cm, index=RISK_CLASSES, columns=RISK_CLASSES)
             cm_df["Total"] = cm_df.sum(axis=1)
             st.dataframe(cm_df, width="stretch")
 
-            st.markdown("**Precision, Recall, F1-Score per kelas**")
+            st.markdown("**Precision, Recall, F1-Score " + _t("per kelas", "per class") + "**")
             prfs_df = pd.DataFrame({
                 "Kelas": RISK_CLASSES,
                 "Precision": np.round(precision, 3),
@@ -7191,7 +7209,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
         else:
             val_seg_options = {v["label"]: k for k, v in seg_results_val.items()}
             val_picked_label = st.selectbox(
-                "Segmen yang divalidasi",
+                _t("Segmen yang divalidasi", "Segment being validated"),
                 list(val_seg_options.keys()),
                 key="val_segment_picker"
             )
@@ -7205,7 +7223,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
             )
 
             gt_mode = st.radio(
-                "Sumber data observasi lapangan (ground-truth)",
+                _t("Sumber data observasi lapangan (ground-truth)", "Field observation (ground-truth) data source"),
                 ["Titik Sampel (Tabel / CSV)", "Boundary Erosi Aktual (DXF)"],
                 key=f"gt_mode_{val_sid}",
                 horizontal=True,
@@ -7245,7 +7263,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                 st.session_state[gt_key] = edited_gt
 
                 gt_csv_upload = st.file_uploader(
-                    "Atau upload CSV titik sampel (kolom: ID_Titik, X, Y, Kelas_Observasi)",
+                    _t("Atau upload CSV titik sampel (kolom: ID_Titik, X, Y, Kelas_Observasi)", "Or upload sample point CSV (columns: ID_Titik, X, Y, Kelas_Observasi)"),
                     type=["csv"], key=f"gt_csv_{val_sid}"
                 )
                 if gt_csv_upload is not None:
@@ -7262,7 +7280,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                         st.error(_t(f"Gagal membaca CSV: {e}", f"Failed to read CSV: {e}"))
 
                 block_radius_m = st.number_input(
-                    "Radius blok representasi per titik sampel (m)",
+                    _t("Radius blok representasi per titik sampel (m)", "Representative block radius per sample point (m)"),
                     min_value=0.0, value=5.0, step=1.0,
                     key=f"gt_block_radius_{val_sid}",
                     help="1 titik sampel dianggap mewakili KONDISI SATU BLOK/AREA di sekitarnya, bukan "
@@ -7336,7 +7354,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                     else:
                         overall_acc, kappa, cm_df, prfs_df = _show_validation_result(y_true, y_pred)
 
-                        st.markdown("**Detail per titik sampel**")
+                        st.markdown("**" + _t("Detail per titik sampel", "Detail per sample point") + "**")
                         st.dataframe(pd.DataFrame(detail_rows), width="stretch")
 
                         # simpan hasil ke segment untuk disertakan di report PDF
@@ -7360,7 +7378,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                     "lapangan yang menandai batas area yang BENAR-BENAR tererosi di lokasi ini."
                 )
                 gt_dxf_upload = st.file_uploader(
-                    "Upload DXF Boundary Erosi Aktual",
+                    _t("Upload DXF Boundary Erosi Aktual", "Upload Actual Erosion Boundary DXF"),
                     type=["dxf"], key=f"gt_dxf_{val_sid}"
                 )
                 _ui_caption(
@@ -7449,7 +7467,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
 
             # ================= BANDINGKAN KETIGA METODE (Hjulström vs Shields vs Partheniades) =================
             st.markdown("---")
-            st.markdown("#### Bandingkan Ketiga Metode Erosion Assessment")
+            st.markdown("#### " + _t("Bandingkan Ketiga Metode Erosion Assessment", "Compare the Three Erosion Assessment Methods"))
             _ui_caption(
                 "Menjalankan Hjulström, Shields, dan Partheniades+Flow Accumulation sekaligus pada segmen "
                 "yang sama, lalu membandingkan akurasi klasifikasi masing-masing terhadap titik sampel "
@@ -7546,7 +7564,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                         })
 
                     comp_df = pd.DataFrame(comparison_rows)
-                    st.markdown("**Tabel Perbandingan (Tabel 5-equivalent)**")
+                    st.markdown("**" + _t("Tabel Perbandingan (Tabel 5-equivalent)", "Comparison Table (Table 5-equivalent)") + "**")
                     st.dataframe(comp_df, width="stretch")
 
                     fig_cmp = go.Figure()
@@ -7929,19 +7947,21 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
         # tercantum di dalam PDF final -- bukan ditempel manual setelah PDF jadi.
         st.markdown("---")
         _sub_header(_t("Lembar Pengesahan (Reviewer)", "Approval Sheet (Reviewer)"))
-        st.caption(
+        st.caption(_t(
             "Opsional -- isi data reviewer dan unggah gambar tanda tangan (PNG/JPG, sebaiknya "
-            "latar transparan) untuk disertakan di halaman pengesahan laporan PDF, sebelum diunduh."
-        )
+            "latar transparan) untuk disertakan di halaman pengesahan laporan PDF, sebelum diunduh.",
+            "Optional -- fill in reviewer details and upload a signature image (PNG/JPG, preferably "
+            "transparent background) to include on the PDF report approval page before downloading."
+        ))
         sign_col1, sign_col2 = st.columns(2)
         with sign_col1:
-            reviewer_name = st.text_input("Nama Reviewer", key="reviewer_name")
-            reviewer_role = st.text_input("Jabatan / Peran", key="reviewer_role",
+            reviewer_name = st.text_input(_t("Nama Reviewer", "Reviewer Name"), key="reviewer_name")
+            reviewer_role = st.text_input(_t("Jabatan / Peran", "Position / Role"), key="reviewer_role",
                                            placeholder="mis. Ahli Geoteknik Bersertifikat")
         with sign_col2:
             reviewer_date = st.date_input("Tanggal Review", key="reviewer_date", value=pd.Timestamp.now())
             reviewer_signature_file = st.file_uploader(
-                "Unggah Tanda Tangan (PNG/JPG)", type=["png", "jpg", "jpeg"], key="reviewer_signature_file"
+                _t("Unggah Tanda Tangan (PNG/JPG)", "Upload Signature (PNG/JPG)"), type=["png", "jpg", "jpeg"], key="reviewer_signature_file"
             )
 
         reviewer_signature_path = None
@@ -8658,8 +8678,8 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                     story.append(Spacer(1, 4))
                     sign_rows = [
                         ["Item", "Keterangan"],
-                        ["Nama Reviewer", reviewer_name or "-"],
-                        ["Jabatan / Peran", reviewer_role or "-"],
+                        [_t("Nama Reviewer", "Reviewer Name"), reviewer_name or "-"],
+                        [_t("Jabatan / Peran", "Position / Role"), reviewer_role or "-"],
                         ["Tanggal Review", reviewer_date.strftime("%d %B %Y") if reviewer_date else "-"],
                     ]
                     story.append(_build_table(sign_rows, col_widths=[CONTENT_W * 0.35, CONTENT_W * 0.65]))
@@ -11091,7 +11111,7 @@ with tab5:
                 )
             with _pc3:
                 _n_frames_sim = st.slider(
-                    "Jumlah frame animasi", 10, 50, 24, key=f"sim3d_nframes_{_sim_sid}",
+                    _t("Jumlah frame animasi", "Number of animation frames"), 10, 50, 24, key=f"sim3d_nframes_{_sim_sid}",
                 )
                 _sec_per_frame = st.number_input(
                     "Durasi tersimulasi per frame (detik)", min_value=0.5, value=3.0, step=0.5,
@@ -11338,7 +11358,7 @@ with tab5:
                 )
             with _fc3:
                 _flood_nframes = st.slider(
-                    "Jumlah frame animasi", 10, 60, 30, key=f"flood_nframes_{_sim_sid}",
+                    _t("Jumlah frame animasi", "Number of animation frames"), 10, 60, 30, key=f"flood_nframes_{_sim_sid}",
                 )
                 _flood_secpf = st.number_input(
                     "Durasi tersimulasi per frame (detik)", min_value=1.0, value=10.0, step=1.0,
