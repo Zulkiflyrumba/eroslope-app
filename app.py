@@ -4,6 +4,7 @@ import pandas as pd
 import ezdxf
 import tempfile
 import time
+import io
 from shapely.geometry import Polygon, Point, LineString
 from shapely.validation import make_valid
 from shapely import vectorized
@@ -13,9 +14,11 @@ import os
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 import plotly.graph_objects as go
+import plotly.io as pio
 from skimage import measure
 from scipy.interpolate import griddata
-from scipy.ndimage import gaussian_filter, binary_dilation
+from scipy.ndimage import gaussian_filter, binary_dilation, binary_erosion
+import heapq
 from scipy.spatial import Delaunay
 from scipy.optimize import brentq
 import alphashape
@@ -113,23 +116,160 @@ def _load_user_db():
 
 USER_DB = _load_user_db()
 
+
+def _is_admin_user():
+    """True hanya untuk role admin. Dipakai untuk menyembunyikan tab/catatan
+    teknis dari user surveyor supaya tampilan yang dipublikasikan tetap
+    ringkas & profesional untuk pengguna lapangan."""
+    return st.session_state.get("auth_role") == "admin"
+
+
+def _ui_info(*args, **kwargs):
+    """Pengganti st.info() -- disembunyikan sepenuhnya untuk user surveyor."""
+    if _is_admin_user():
+        st.info(*args, **kwargs)
+
+
+def _ui_warning(*args, **kwargs):
+    """Pengganti st.warning() -- disembunyikan sepenuhnya untuk user surveyor
+    (biasanya berisi catatan teknis/keterbatasan model, bukan hal yang perlu
+    diketahui pengguna lapangan)."""
+    if _is_admin_user():
+        st.warning(*args, **kwargs)
+
+
+def _ui_caption(*args, **kwargs):
+    """Pengganti st.caption() KHUSUS untuk catatan metodologi/teknis/disclaimer
+    (bukan instruksi cara pakai) -- disembunyikan untuk user surveyor supaya
+    tampilan yang dipakai di lapangan tetap ringkas & profesional."""
+    if _is_admin_user():
+        st.caption(*args, **kwargs)
+
+
+def _t(text_id, text_en):
+    """Helper i18n sederhana: kembalikan versi Indonesia atau Inggris sesuai
+    toggle bahasa (tombol ID/EN di header). Dipakai bertahap di seluruh app --
+    saat ini aktif penuh di tab 'Hub & Intro' dan 'Workflow'; tab analisis
+    lain menyusul secara bertahap."""
+    return text_en if st.session_state.get("app_lang", "id") == "en" else text_id
+
+
+# Palet warna untuk header sub-bab (dari colour palette yang diberikan user).
+_SUBHDR_PALETTE = ["#178C9C", "#3DBF8C", "#D3D95C"]
+_SUBHDR_GRADIENTS = [
+    (_SUBHDR_PALETTE[0], _SUBHDR_PALETTE[1]),
+    (_SUBHDR_PALETTE[1], _SUBHDR_PALETTE[2]),
+    (_SUBHDR_PALETTE[2], _SUBHDR_PALETTE[0]),
+]
+
+
+def _hex_to_rgb(hex_color):
+    hex_color = hex_color.lstrip("#")
+    return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def _relative_luminance(hex_color):
+    """Estimasi kecerahan warna (0=gelap, 255=terang) pakai bobot persepsi
+    manusia thd RGB -- dipakai utk memilih warna teks (putih/gelap) otomatis
+    sesuai kecerahan background gradien, bukan di-hardcode manual per kasus."""
+    r, g, b = _hex_to_rgb(hex_color)
+    return 0.299 * r + 0.587 * g + 0.114 * b
+
+
+def _text_color_for_gradient(hex1, hex2, threshold=150):
+    """Kembalikan ('#fff', shadow_gelap) kalau gradien cenderung gelap, atau
+    (warna_teks_gelap, tanpa_shadow) kalau gradien cenderung terang -- dipakai
+    di semua header bergradien (sub-bab & kartu modul) supaya kontras teks
+    selalu terjaga otomatis, bukan diatur manual tiap tempat."""
+    avg_lum = (_relative_luminance(hex1) + _relative_luminance(hex2)) / 2
+    if avg_lum > threshold:
+        return "#152018", "none"  # gradien terang -> teks gelap, tanpa text-shadow
+    return "#ffffff", "0 1px 3px rgba(0,0,0,0.35)"  # gradien gelap -> teks putih + shadow
+
+
+def _sub_header(text):
+    """Render judul sub-bab dengan latar gradien warna (dari colour palette
+    yang sama dengan header halaman awal modul). Warnanya konsisten untuk
+    judul yang sama (hash teksnya sendiri, bukan urutan render) -- dipakai
+    sebagai pengganti st.subheader() / st.markdown('#####...') di semua tab
+    supaya tiap sub-bab tampil beda warna. Warna teks (putih/gelap) otomatis
+    menyesuaikan kecerahan gradien masing-masing (lihat _text_color_for_gradient)."""
+    import zlib
+    _idx = zlib.crc32(text.encode("utf-8")) % len(_SUBHDR_GRADIENTS)
+    _c1, _c2 = _SUBHDR_GRADIENTS[_idx]
+    _txt_color, _txt_shadow = _text_color_for_gradient(_c1, _c2)
+    st.markdown(
+        f'<div class="mwm-subhdr" style="background:linear-gradient(120deg,{_c1},{_c2}); '
+        f'color:{_txt_color}; text-shadow:{_txt_shadow};">{text}</div>',
+        unsafe_allow_html=True,
+    )
+
+
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
     st.session_state["auth_username"] = None
     st.session_state["auth_name"] = None
     st.session_state["auth_role"] = None
 
+# ---- Rate limiting / lockout percobaan login ----
+# 5x gagal berturut-turut (per username) -> terkunci 5 menit sebelum bisa
+# coba lagi. Disimpan di session_state, jadi lockout ini per sesi browser
+# (bukan proteksi brute-force terdistribusi lintas-IP/sesi -- untuk itu
+# butuh penyimpanan sisi-server/database, di luar cakupan app single-file
+# ini). Cukup utk mencegah percobaan berulang cepat dari satu jendela browser.
+_MAX_LOGIN_ATTEMPTS = 5
+_LOGIN_LOCKOUT_SECONDS = 5 * 60
+
+if "login_attempts" not in st.session_state:
+    st.session_state["login_attempts"] = {}
+
+
+def _get_login_state(username):
+    return st.session_state["login_attempts"].setdefault(
+        username, {"count": 0, "locked_until": None}
+    )
+
+
+def _check_lockout(username):
+    """Kembalikan (is_locked: bool, seconds_remaining: float). Kalau waktu
+    lockout sudah lewat, otomatis reset counter supaya user bisa coba lagi."""
+    state = _get_login_state(username)
+    if state["locked_until"] is not None:
+        remaining = state["locked_until"] - time.time()
+        if remaining > 0:
+            return True, remaining
+        state["count"] = 0
+        state["locked_until"] = None
+    return False, 0.0
+
+
+def _register_failed_attempt(username):
+    state = _get_login_state(username)
+    state["count"] += 1
+    if state["count"] >= _MAX_LOGIN_ATTEMPTS:
+        state["locked_until"] = time.time() + _LOGIN_LOCKOUT_SECONDS
+
+
+def _register_successful_login(username):
+    state = _get_login_state(username)
+    state["count"] = 0
+    state["locked_until"] = None
+
+
 def _attempt_login(username, password):
     user = USER_DB.get(username)
     if not user:
+        _register_failed_attempt(username)
         return False
     computed = _hash_password(password, user["salt"])
     if hmac.compare_digest(computed, user["password_hash"]):
+        _register_successful_login(username)
         st.session_state["authenticated"] = True
         st.session_state["auth_username"] = username
         st.session_state["auth_name"] = user.get("name", username)
         st.session_state["auth_role"] = user.get("role", "user")
         return True
+    _register_failed_attempt(username)
     return False
 
 if not st.session_state["authenticated"]:
@@ -397,7 +537,7 @@ if not st.session_state["authenticated"]:
 
     st.markdown("<div style='height:44px'></div>", unsafe_allow_html=True)
     st.markdown(
-        '<div class="mwm-title">⛏ EROSLOPE — MINE WATER &amp; EROSION CONTROL</div>'
+        '<div class="mwm-title">EROSLOPE — MINE WATER &amp; EROSION CONTROL</div>'
         '<div class="mwm-subtitle">Digital Terrain · Hydrological Modelling · Erosion, Sedimentation &amp; Rehabilitation Management</div>',
         unsafe_allow_html=True
     )
@@ -417,28 +557,44 @@ if not st.session_state["authenticated"]:
         with st.container(key="mwm_login_card"):
             st.markdown('<div class="mwm-label">Masuk ke Sistem</div>', unsafe_allow_html=True)
 
+            _typed_username = st.session_state.get("_login_last_username", "").strip()
+            _is_locked, _remaining = _check_lockout(_typed_username) if _typed_username else (False, 0.0)
+
+            if _is_locked:
+                _mm, _ss = divmod(int(_remaining) + 1, 60)
+                st.error(
+                    f"Terlalu banyak percobaan gagal untuk username '{_typed_username}'. "
+                    f"Coba lagi dalam {_mm} menit {_ss} detik."
+                )
+
             with st.form("login_form"):
                 login_username = st.text_input("Username")
                 login_password = st.text_input("Password", type="password")
-                submitted = st.form_submit_button("Masuk", use_container_width=True)
+                submitted = st.form_submit_button(
+                    "Masuk", width="stretch", disabled=_is_locked,
+                )
 
             if submitted:
-                if _attempt_login(login_username.strip(), login_password):
+                st.session_state["_login_last_username"] = login_username.strip()
+                _locked_now, _remaining_now = _check_lockout(login_username.strip())
+                if _locked_now:
+                    _mm, _ss = divmod(int(_remaining_now) + 1, 60)
+                    st.error(
+                        f"Terlalu banyak percobaan gagal. Coba lagi dalam {_mm} menit {_ss} detik."
+                    )
+                elif _attempt_login(login_username.strip(), login_password):
                     st.success(f"Berhasil masuk — {st.session_state['auth_name']} ({st.session_state['auth_role']})")
                     st.rerun()
                 else:
-                    st.error("Username atau password salah.")
-
-        with st.expander("⚙ Kredensial demo (WAJIB diganti untuk pemakaian nyata)"):
-            st.code(
-                "admin    / admin123      (role: admin)\n"
-                "surveyor / surveyor123   (role: user)",
-                language="text"
-            )
-            st.caption(
-                "Ganti lewat Streamlit Secrets (st.secrets['auth_users']) sebelum deploy ke lapangan. "
-                "Jangan pakai password default ini untuk data proyek nyata."
-            )
+                    _state_now = _get_login_state(login_username.strip())
+                    _sisa = max(_MAX_LOGIN_ATTEMPTS - _state_now["count"], 0)
+                    if _sisa > 0:
+                        st.error(f"Username atau password salah. Sisa percobaan: {_sisa} kali.")
+                    else:
+                        st.error(
+                            f"Username atau password salah. Akun terkunci "
+                            f"{_LOGIN_LOCKOUT_SECONDS // 60} menit karena terlalu banyak percobaan gagal."
+                        )
 
         st.markdown('<div class="mwm-footer">Mine Site Drainage · Sediment Control · Slope Rehabilitation Monitoring</div>', unsafe_allow_html=True)
 
@@ -496,6 +652,34 @@ st.markdown(
 
 with st.sidebar:
 
+    st.markdown("""
+    <style>
+    .st-key-lang_toggle_btn button {
+        background: transparent !important;
+        border: 1px solid rgba(255,255,255,0.25) !important;
+        color: rgba(255,255,255,0.85) !important;
+        font-size: 11.5px !important;
+        font-weight: 600 !important;
+        padding: 2px 10px !important;
+        min-height: 26px !important;
+        border-radius: 20px !important;
+        width: auto !important;
+    }
+    .st-key-lang_toggle_btn button:hover {
+        border-color: rgba(255,255,255,0.55) !important;
+        color: #fff !important;
+    }
+    .st-key-lang_toggle_btn { display:flex; justify-content:flex-end; margin-bottom:6px; }
+    </style>
+    """, unsafe_allow_html=True)
+    _lang_now = st.session_state.get("app_lang", "id")
+    _lang_next = "en" if _lang_now == "id" else "id"
+    _lang_label = "🌐 " + _lang_next.upper()
+    _lang_help = "Switch to English" if _lang_next == "en" else "Ganti ke Bahasa Indonesia"
+    if st.button(_lang_label, key="lang_toggle_btn", help=_lang_help):
+        st.session_state["app_lang"] = _lang_next
+        st.rerun()
+
     st.markdown(
         f"""<div class="mwm-user-card">
                 <div class="name">{st.session_state['auth_name']}</div>
@@ -504,7 +688,7 @@ with st.sidebar:
         unsafe_allow_html=True
     )
 
-    if st.button("Logout", use_container_width=True):
+    if st.button("Logout", width="stretch"):
         st.session_state["authenticated"] = False
         st.session_state["auth_username"] = None
         st.session_state["auth_name"] = None
@@ -548,7 +732,7 @@ with st.sidebar:
     # ---- Quick tools untuk engineer geoteknik lapangan ----
     st.markdown('<div class="mwm-side-heading">Quick Tools</div>', unsafe_allow_html=True)
 
-    if st.button("Reset Data Hujan Online", use_container_width=True,
+    if st.button("Reset Data Hujan Online", width="stretch",
                  help="Hapus cache data hujan tersimpan agar bisa diambil ulang dari sumber terbaru."):
         st.session_state["online_rainfall"] = None
         st.session_state["online_rainfall_meta"] = None
@@ -569,6 +753,85 @@ with st.sidebar:
         st.latex(r"V = \frac{1}{n} R^{2/3} S^{1/2} \quad \text{(Manning)}")
         st.latex(r"\theta = \frac{\tau_0}{(\rho_s-\rho_w) g D_{50}} \quad \text{(Shields)}")
         st.latex(r"E = M\left(\frac{\tau_0}{\tau_c}-1\right) \quad \text{(Partheniades)}")
+
+    # ---- Info & alur kerja (hanya muncul setelah masuk ke layar analisis/tab) ----
+    if not st.session_state.get("home_page", True):
+        st.markdown('<div class="mwm-side-heading">ℹ️ Info &amp; Alur Kerja</div>', unsafe_allow_html=True)
+        with st.expander(_t("Cara pakai tiap modul", "How to use each module")):
+
+            st.markdown(f"""
+            <div style="margin-bottom:18px;">
+                <h2 style="color:#fff; margin-bottom:4px;">{_t('Alur Kerja Penggunaan Aplikasi', 'Application Workflow')}</h2>
+                <p style="color:rgba(255,255,255,0.6); font-size:14.5px;">
+                    {_t('Urutan langkah yang disarankan di tiap modul, dari input data sampai laporan/simulasi akhir.', 'Recommended step sequence for each module, from data input to the final report/simulation.')}
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
+
+            with st.expander(_t("Modul 01 — Erosion Mapping", "Module 01 — Erosion Mapping"), expanded=True):
+                st.markdown(_t(
+                    "1. Buat/tambah segmen (sekat/channel) di bagian A.\n"
+                    "2. Upload DXF kontur & boundary untuk tiap segmen.\n"
+                    "3. Isi parameter hidrologi-hidrolika (hujan, Manning's n, geometri channel), atau aktifkan mode otomatis berbasis hujan.\n"
+                    "4. Isi parameter tambahan (ukuran butir, dsb) sesuai kondisi segmen.\n"
+                    "5. Jalankan RUN ANALYSIS untuk menghasilkan peta risiko 2D/3D dan rekomendasi.\n"
+                    "6. Aktifkan narasi AI (opsional) untuk rekomendasi naratif per segmen.\n"
+                    "7. Isi data reviewer (opsional) lalu unduh laporan PDF / PPTX.",
+                    "1. Create/add a segment (check-dam/channel) in section A.\n"
+                    "2. Upload the contour & boundary DXF for each segment.\n"
+                    "3. Fill in hydrology-hydraulics parameters (rainfall, Manning's n, channel geometry), or enable rainfall-based automatic mode.\n"
+                    "4. Fill in additional parameters (grain size, etc.) matching the segment's conditions.\n"
+                    "5. Run RUN ANALYSIS to generate the 2D/3D risk map and recommendations.\n"
+                    "6. Enable the AI narrative (optional) for a per-segment recommendation narrative.\n"
+                    "7. Fill in reviewer data (optional) then download the PDF / PPTX report."
+                ))
+
+            with st.expander(_t("Modul 02 — Back Analysis", "Module 02 — Back Analysis")):
+                st.markdown(_t(
+                    "1. Pastikan analisis desain (Erosion Mapping) pada segmen terkait sudah dijalankan (RUN ANALYSIS).\n"
+                    "2. Pilih segmen yang mengalami kejadian erosi/sedimentasi di lapangan.\n"
+                    "3. Tandai lokasi kejadian: klik satu titik di peta risiko, ATAU upload DXF boundary area yang tererosi.\n"
+                    "4. Lihat ranking faktor risiko yang paling menyimpang di lokasi tersebut (Mode A).\n"
+                    "5. Kalau ada data ukur lapangan (kedalaman scour / volume sedimentasi), isi di Mode B untuk hitung mundur parameter efektif.\n"
+                    "6. Bandingkan hasil hitung mundur terhadap asumsi desain awal untuk menentukan penyebab paling mungkin.",
+                    "1. Make sure the design analysis (Erosion Mapping) for the relevant segment has been run (RUN ANALYSIS).\n"
+                    "2. Select the segment where the erosion/sedimentation event occurred in the field.\n"
+                    "3. Mark the event location: click a point on the risk map, OR upload a DXF boundary of the eroded area.\n"
+                    "4. Review the ranking of risk factors that deviate most at that location (Mode A).\n"
+                    "5. If field measurement data is available (scour depth / sediment volume), fill it in Mode B to back-calculate the effective parameter.\n"
+                    "6. Compare the back-calculated result against the original design assumption to identify the most likely cause."
+                ))
+
+            with st.expander(_t("Modul 03 — Machine Learning", "Module 03 — Machine Learning")):
+                st.markdown(_t(
+                    "1. Pastikan analisis desain (Erosion Mapping) pada segmen terkait sudah dijalankan.\n"
+                    "2. Pilih segmen yang akan divalidasi.\n"
+                    "3. Masukkan data observasi lapangan: tabel titik sampel (3 kelas risiko), ATAU boundary erosi aktual (DXF, 2 kelas).\n"
+                    "4. Lihat hasil Confusion Matrix, Overall Accuracy, dan Cohen's Kappa.\n"
+                    "5. (Opsional) Jalankan perbandingan metode Hjulström vs Shields vs Partheniades+Flow Accumulation untuk segmen yang sama.",
+                    "1. Make sure the design analysis (Erosion Mapping) for the relevant segment has been run.\n"
+                    "2. Select the segment to validate.\n"
+                    "3. Enter field observation data: a sample-point table (3 risk classes), OR an actual erosion boundary (DXF, 2 classes).\n"
+                    "4. Review the Confusion Matrix, Overall Accuracy, and Cohen's Kappa results.\n"
+                    "5. (Optional) Run the Hjulström vs Shields vs Partheniades+Flow Accumulation method comparison for the same segment."
+                ))
+
+            with st.expander(_t("Modul 04 — Simulasi Aliran 3D", "Module 04 — 3D Flow Simulation")):
+                st.markdown(_t(
+                    "1. Pastikan analisis desain (Erosion Mapping) pada segmen terkait sudah dijalankan (sumber DEM-nya dari sini).\n"
+                    "2. Pilih segmen & jenis simulasi (Debris/Longsoran atau Genangan Banjir).\n"
+                    "3. Tandai titik sumber: klik langsung di peta DEM, atau input koordinat manual.\n"
+                    "4. Isi parameter simulasi (radius sumber, Manning's n, jumlah frame, eksagerasi vertikal, dsb).\n"
+                    "5. Tekan tombol Jalankan Simulasi.\n"
+                    "6. Putar animasi hasil (Play/Pause/slider) dan tinjau kedalaman maksimum, volume, serta titik limpasan (untuk genangan).",
+                    "1. Make sure the design analysis (Erosion Mapping) for the relevant segment has been run (it supplies the DEM source).\n"
+                    "2. Select the segment & simulation type (Debris/Landslide or Flood Inundation).\n"
+                    "3. Mark the source point: click directly on the DEM map, or enter coordinates manually.\n"
+                    "4. Fill in the simulation parameters (source radius, Manning's n, frame count, vertical exaggeration, etc.).\n"
+                    "5. Press the Run Simulation button.\n"
+                    "6. Play back the animation (Play/Pause/slider) and review the maximum depth, volume, and overflow points (for flood)."
+                ))
+
 
     st.markdown('<hr class="mwm-side-divider"/>', unsafe_allow_html=True)
     st.caption(f"Sesi berjalan sejak login · {pd.Timestamp.now().strftime('%H:%M, %d %b %Y')}")
@@ -621,6 +884,73 @@ if st.session_state.home_page:
         line-height:1.7;
     }
 
+    /* ===== HUB & INTRO -- kartu modul (dipindah ke sini spy ke-load di landing page) ===== */
+    .mwm-hub-card {
+        background: rgba(255,255,255,0.03);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 14px;
+        padding: 0 22px 18px 22px;
+        height: 100%;
+        margin-bottom: 18px;
+        overflow: hidden;
+    }
+    .mwm-hub-header {
+        margin: 0 -22px 18px -22px;
+        padding: 18px 22px 16px 22px;
+        border-radius: 14px 14px 0 0;
+    }
+    .mwm-hub-header .mwm-hub-subtitle { color: rgba(255,255,255,0.88); margin-bottom: 0; }
+    .mwm-hub-header .mwm-hub-title { text-shadow: 0 1px 3px rgba(0,0,0,0.35); }
+    .mwm-hub-header.dark-text .mwm-hub-title { color: #12241f; text-shadow: none; }
+    .mwm-hub-header.dark-text .mwm-hub-subtitle { color: rgba(15,30,25,0.78); }
+    .mwm-hub-header.dark-text .mwm-hub-format { color: rgba(15,30,25,0.60); }
+    .mwm-hub-header.dark-text .mwm-hub-badge.green { background: rgba(15,30,25,0.14); color: #0f4d3a; }
+    .mwm-hub-header.dark-text .mwm-hub-badge.amber { background: rgba(15,30,25,0.14); color: #7a4a06; }
+    .mwm-hub-badge {
+        display: inline-block;
+        font-size: 11.5px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        padding: 4px 12px;
+        border-radius: 20px;
+        margin-bottom: 10px;
+    }
+    .mwm-hub-badge.green { background: rgba(0,200,150,0.16); color: #4ee6b8; }
+    .mwm-hub-badge.amber { background: rgba(230,170,40,0.16); color: #f0b93d; }
+    .mwm-hub-format {
+        float: right;
+        font-size: 11.5px;
+        color: rgba(255,255,255,0.45);
+    }
+    .mwm-hub-title { font-size: 21px; font-weight: 700; color: #fff; margin: 6px 0 4px 0; }
+    .mwm-hub-subtitle { font-size: 13.5px; color: rgba(255,255,255,0.6); margin-bottom: 14px; line-height: 1.5; }
+    .mwm-hub-section-label {
+        font-size: 11.5px; font-weight: 700; letter-spacing: 0.05em;
+        color: rgba(255,255,255,0.5); text-transform: uppercase;
+        margin: 16px 0 6px 0;
+    }
+    .mwm-hub-body { font-size: 13.5px; color: rgba(255,255,255,0.8); line-height: 1.55; }
+    .mwm-hub-feature { font-size: 13.5px; color: rgba(255,255,255,0.85); line-height: 1.55; margin-bottom: 6px; }
+    .mwm-hub-feature .chk { color: #4ee6b8; margin-right: 6px; }
+    .mwm-hub-tagbox {
+        background: rgba(255,255,255,0.04);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 10px;
+        padding: 10px 14px;
+        margin-top: 16px;
+    }
+    .mwm-hub-tagbox-label { font-size: 12px; font-weight: 700; color: rgba(255,255,255,0.65); margin-bottom: 8px; }
+    .mwm-hub-tag {
+        display: inline-block;
+        background: rgba(78,230,184,0.12);
+        color: #4ee6b8;
+        border: 1px solid rgba(78,230,184,0.3);
+        border-radius: 6px;
+        font-size: 12px;
+        padding: 3px 10px;
+        margin: 0 6px 6px 0;
+    }
+
     .hero-tag{
         display:inline-block;
         margin-top:20px;
@@ -633,6 +963,27 @@ if st.session_state.home_page:
     }
 
     </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown(f"""
+    <div style="
+        width:100%; padding:16px 26px; margin-bottom:18px; border-radius:16px;
+        background:rgba(0,0,0,0.30); border:1px solid rgba(143,217,196,0.30);
+        display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:14px;
+    ">
+        <div style="color:rgba(255,255,255,0.85); font-size:13.5px; max-width:340px;">
+            {_t("Platform terintegrasi 4 modul analisis geoteknik & manajemen air tambang.", "Integrated platform with 4 connected geotechnical &amp; mine water analysis modules.")}
+        </div>
+        <div style="display:flex; gap:10px; flex-wrap:wrap; font-size:12.5px; color:#EAF6EE;">
+            <span style="background:rgba(63,169,160,0.18); border:1px solid rgba(143,217,196,0.30); border-radius:20px; padding:6px 14px;">1. {_t("Upload DXF/Data", "Upload DXF/Data")}</span>
+            <span style="color:rgba(255,255,255,0.35);">&#8594;</span>
+            <span style="background:rgba(63,169,160,0.18); border:1px solid rgba(143,217,196,0.30); border-radius:20px; padding:6px 14px;">2. {_t("Jalankan Analisis", "Run Analysis")}</span>
+            <span style="color:rgba(255,255,255,0.35);">&#8594;</span>
+            <span style="background:rgba(63,169,160,0.18); border:1px solid rgba(143,217,196,0.30); border-radius:20px; padding:6px 14px;">3. {_t("Tinjau Hasil &amp; Simulasi", "Review Results &amp; Simulation")}</span>
+            <span style="color:rgba(255,255,255,0.35);">&#8594;</span>
+            <span style="background:rgba(63,169,160,0.18); border:1px solid rgba(143,217,196,0.30); border-radius:20px; padding:6px 14px;">4. {_t("Unduh Laporan", "Download Report")}</span>
+        </div>
+    </div>
     """, unsafe_allow_html=True)
 
     left, right = st.columns([1.2, 2])
@@ -677,7 +1028,7 @@ if st.session_state.home_page:
 
         for col, (img_path, emoji_fallback, title) in zip([c1, c2, c3], feat_images):
             with col:
-                if not _safe_image(img_path, use_container_width=True):
+                if not _safe_image(img_path, width="stretch"):
                     st.markdown(
                         f"""
                         <div style="
@@ -698,10 +1049,259 @@ if st.session_state.home_page:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
+    with st.expander(_t("📖 Lihat detail 4 modul & alur kerja penggunaan", "📖 View module details & usage workflow"), expanded=False):
+
+        st.markdown(f"""
+        <div style="margin-bottom:22px;">
+            <h2 style="color:#fff; margin-bottom:4px;">{_t('Platform Terintegrasi Analisis Geoteknik & Manajemen Air Tambang', 'Integrated Platform for Mine Water &amp; Geotechnical Analysis')}</h2>
+            <p style="color:rgba(255,255,255,0.6); font-size:14.5px;">
+                {_t('4 modul analisis yang saling terhubung — mulai dari pemetaan risiko desain sampai simulasi aliran 3D.', 'Four connected analysis modules — from design risk mapping to 3D flow simulation.')}
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        def _render_hub_card(badge_text, badge_color, fmt_text, title, subtitle,
+                              intro_label, intro_text, feat_label, features,
+                              tag_label, tags, header_gradient):
+            _feat_html = "".join(
+                f'<div class="mwm-hub-feature"><span class="chk">&#10003;</span>'
+                f'<b>{f_title}:</b> {f_desc}</div>'
+                for f_title, f_desc in features
+            )
+            _tag_html = "".join(f'<span class="mwm-hub-tag">{tg}</span>' for tg in tags)
+            # warna teks header (putih/gelap) otomatis dari kecerahan gradiennya --
+            # ambil 2 kode hex pertama&terakhir yg ada di string CSS gradient-nya
+            import re as _re_hub
+            _hex_codes = _re_hub.findall(r"#[0-9A-Fa-f]{6}", header_gradient)
+            if len(_hex_codes) >= 2:
+                _txt_color, _txt_shadow = _text_color_for_gradient(_hex_codes[0], _hex_codes[-1])
+            else:
+                _txt_color, _txt_shadow = "#ffffff", "0 1px 3px rgba(0,0,0,0.35)"
+            _header_dark_text = _txt_color != "#ffffff"
+            _header_class = "mwm-hub-header dark-text" if _header_dark_text else "mwm-hub-header"
+            _scrim = "" if _header_dark_text else "linear-gradient(rgba(8,12,10,0.42), rgba(8,12,10,0.42)), "
+            st.markdown(f"""
+            <div class="mwm-hub-card">
+                <div class="{_header_class}" style="background: {_scrim}{header_gradient};">
+                    <span class="mwm-hub-format">{fmt_text}</span>
+                    <span class="mwm-hub-badge {badge_color}">{badge_text}</span>
+                    <div class="mwm-hub-title" style="color:{_txt_color}; text-shadow:{_txt_shadow};">{title}</div>
+                    <div class="mwm-hub-subtitle">{subtitle}</div>
+                </div>
+                <div class="mwm-hub-section-label">{intro_label}</div>
+                <div class="mwm-hub-body">{intro_text}</div>
+                <div class="mwm-hub-section-label">{feat_label}</div>
+                {_feat_html}
+                <div class="mwm-hub-tagbox">
+                    <div class="mwm-hub-tagbox-label">{tag_label}</div>
+                    {_tag_html}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        _hub_row1_c1, _hub_row1_c2 = st.columns(2)
+
+        with _hub_row1_c1:
+            _render_hub_card(
+                header_gradient="linear-gradient(135deg, #4FB783 0%, #034561 100%)",
+                badge_text=_t("MODUL 01: PEMETAAN RISIKO", "MODULE 01: RISK MAPPING"),
+                badge_color="green",
+                fmt_text="DXF / PDF / PPTX",
+                title=_t("Erosion Mapping", "Erosion Mapping"),
+                subtitle=_t(
+                    "Prediksi risiko erosi & sedimentasi dari desain kontur/boundary DXF, lengkap hidrologi-hidrolika dan rekomendasi rekayasa.",
+                    "Predicts erosion & sedimentation risk from DXF contour/boundary design, complete with hydrology-hydraulics and engineering recommendations."
+                ),
+                intro_label=_t("TUJUAN UTAMA", "MAIN OBJECTIVE"),
+                intro_text=_t(
+                    "Modul ini memakai data DXF kontur & boundary tiap segmen sekat/channel untuk menghitung debit rencana (metode Rasional + Mononobe), "
+                    "kecepatan aliran (Manning), lalu mengklasifikasikan risiko erosi/sedimentasi per segmen sebelum menghasilkan rekomendasi & laporan.",
+                    "This module uses DXF contour & boundary data per segment to compute design discharge (Rational + Mononobe method), flow velocity "
+                    "(Manning), then classifies erosion/sedimentation risk per segment before generating recommendations & a report."
+                ),
+                feat_label=_t("FITUR & KAPABILITAS", "FEATURES &amp; CAPABILITIES"),
+                features=[
+                    (_t("Multi-Segmen", "Multi-Segment"), _t("Setiap sekat/channel dianalisis sebagai segmen terpisah dengan DXF & parameter sendiri.", "Each check-dam/channel is analyzed as a separate segment with its own DXF & parameters.")),
+                    (_t("Hidrologi Otomatis", "Automated Hydrology"), _t("Debit rencana dari data hujan (Rasional + Mononobe), bisa juga input manual.", "Design discharge from rainfall data (Rational + Mononobe), manual input also supported.")),
+                    (_t("Peta Risiko 2D/3D", "2D/3D Risk Map"), _t("Visualisasi risiko erosi/sedimentasi di atas medan 3D hasil DXF.", "Erosion/sedimentation risk visualized over the 3D terrain from DXF.")),
+                    (_t("Laporan PDF & AI", "PDF Report & AI"), _t("Ekspor laporan PDF siap cetak, dengan opsi narasi rekomendasi berbasis AI.", "Export a print-ready PDF report, with an optional AI-generated recommendation narrative.")),
+                ],
+                tag_label=_t("Parameter Kunci:", "Key Parameters:"),
+                tags=["Manning's n", "R24 (mm)", _t("Ukuran Butir", "Grain Size"), _t("Kemiringan", "Slope")],
+            )
+
+        with _hub_row1_c2:
+            _render_hub_card(
+                header_gradient="linear-gradient(135deg, #409D9B 0%, #034561 100%)",
+                badge_text=_t("MODUL 02: DIAGNOSIS LAPANGAN", "MODULE 02: FIELD DIAGNOSIS"),
+                badge_color="amber",
+                fmt_text=_t("Titik / DXF", "Point / DXF"),
+                title=_t("Back Analysis", "Back Analysis"),
+                subtitle=_t(
+                    "Melacak balik penyebab paling mungkin dari erosi/sedimentasi yang SUDAH terjadi di lapangan, berbasis hasil analisis desain.",
+                    "Traces back the most likely cause of erosion/sedimentation that has ALREADY occurred in the field, based on the design analysis results."
+                ),
+                intro_label=_t("TUJUAN UTAMA", "MAIN OBJECTIVE"),
+                intro_text=_t(
+                    "Dipakai SETELAH kejadian nyata di lapangan (bukan prediksi ke depan). Titik/area kejadian dibandingkan ke seluruh faktor risiko "
+                    "yang sudah dihitung Erosion Mapping, lalu diranking untuk menemukan faktor mana yang paling menyimpang dari kondisi normal.",
+                    "Used AFTER a real field event (not a forward prediction). The event point/area is compared against every risk factor already "
+                    "computed by Erosion Mapping, then ranked to find which factor deviates most from normal conditions."
+                ),
+                feat_label=_t("FITUR & KAPABILITAS", "FEATURES &amp; CAPABILITIES"),
+                features=[
+                    (_t("Klik Peta / Koordinat", "Map Click / Coordinates"), _t("Tandai lokasi kejadian lewat klik peta atau input X,Y hasil ukur lapangan.", "Mark the event location by clicking the map or entering surveyed X,Y coordinates.")),
+                    (_t("Ranking Faktor", "Factor Ranking"), _t("Persentil tiap faktor risiko di titik tsb dibanding seluruh segmen.", "Percentile of each risk factor at that point compared to the whole segment.")),
+                    (_t("Hitung Mundur Parameter", "Reverse Parameter Calc"), _t("Dari kedalaman scour/volume sedimentasi terukur, dihitung parameter efektif yang diperlukan.", "From measured scour depth/sediment volume, back-calculates the effective parameter required.")),
+                    (_t("Boundary Erosi Aktual", "Actual Erosion Boundary"), _t("Bisa juga input via DXF area yang benar-benar tererosi di lapangan.", "Can also take a DXF of the area actually eroded in the field.")),
+                ],
+                tag_label=_t("Parameter Kunci:", "Key Parameters:"),
+                tags=[_t("Kecepatan Aliran", "Flow Velocity"), _t("Kemiringan", "Slope"), _t("Skor Overflow", "Overflow Score")],
+            )
+
+        _hub_row2_c1, _hub_row2_c2 = st.columns(2)
+
+        with _hub_row2_c1:
+            _render_hub_card(
+                header_gradient="linear-gradient(135deg, #FEEB97 0%, #409D9B 100%)",
+                badge_text=_t("MODUL 03: VALIDASI MODEL", "MODULE 03: MODEL VALIDATION"),
+                badge_color="green",
+                fmt_text=_t("Titik Sampel / DXF", "Sample Points / DXF"),
+                title=_t("Machine Learning", "Machine Learning"),
+                subtitle=_t(
+                    "Menguji akurasi klasifikasi risiko model terhadap kondisi aktual lapangan, membandingkan beberapa metode sekaligus.",
+                    "Tests the model's risk classification accuracy against actual field conditions, comparing multiple methods at once."
+                ),
+                intro_label=_t("TUJUAN UTAMA", "MAIN OBJECTIVE"),
+                intro_text=_t(
+                    "Data observasi lapangan (titik sampel atau boundary erosi aktual) dibandingkan ke prediksi model lewat confusion matrix & "
+                    "Cohen's Kappa, sekaligus membandingkan akurasi metode Hjulström, Shields, dan Partheniades+Flow Accumulation.",
+                    "Field observation data (sample points or actual erosion boundary) is compared against the model's prediction via a confusion "
+                    "matrix & Cohen's Kappa, while also comparing the accuracy of the Hjulström, Shields, and Partheniades+Flow Accumulation methods."
+                ),
+                feat_label=_t("FITUR & KAPABILITAS", "FEATURES &amp; CAPABILITIES"),
+                features=[
+                    (_t("Confusion Matrix", "Confusion Matrix"), _t("Akurasi klasifikasi risiko per kelas (Rendah/Sedang/Tinggi).", "Per-class risk classification accuracy (Low/Medium/High).")),
+                    (_t("Cohen's Kappa", "Cohen's Kappa"), _t("Interpretasi kesesuaian model mengikuti Landis & Koch (1977).", "Model agreement interpretation following Landis & Koch (1977).")),
+                    (_t("2 Mode Input", "2 Input Modes"), _t("Titik sampel (tabel/CSV) atau boundary erosi aktual (DXF).", "Sample points (table/CSV) or actual erosion boundary (DXF).")),
+                    (_t("Bandingkan Metode", "Method Comparison"), _t("Hjulström vs Shields vs Partheniades+Flow Accumulation.", "Hjulström vs Shields vs Partheniades+Flow Accumulation.")),
+                ],
+                tag_label=_t("Parameter Kunci:", "Key Parameters:"),
+                tags=[_t("Akurasi", "Accuracy"), "Cohen's Kappa", _t("Kelas Risiko", "Risk Class")],
+            )
+
+        with _hub_row2_c2:
+            _render_hub_card(
+                header_gradient="linear-gradient(135deg, #FEEB97 0%, #4FB783 100%)",
+                badge_text=_t("MODUL 04: SIMULASI 3D", "MODULE 04: 3D SIMULATION"),
+                badge_color="amber",
+                fmt_text=_t("Animasi 3D", "3D Animation"),
+                title=_t("Simulasi Aliran 3D", "3D Flow Simulation"),
+                subtitle=_t(
+                    "Simulasi penjalaran debris/longsoran dan genangan banjir menuruni medan 3D hasil DEM segmen, lengkap animasi waktu.",
+                    "Simulates debris/landslide flow and flood inundation across the segment's 3D DEM terrain, with time-based animation."
+                ),
+                intro_label=_t("TUJUAN UTAMA", "MAIN OBJECTIVE"),
+                intro_text=_t(
+                    "Dari titik sumber yang ditandai di peta (klik langsung di peta interaktif), modul ini menjalankan simulasi cellular-automaton "
+                    "(debris/longsoran) atau shallow-water diffusive-wave (genangan banjir) di atas medan 3D hasil DEM, divisualisasikan sebagai animasi.",
+                    "From a source point marked on an interactive map (click directly on the map), this module runs a cellular-automaton simulation "
+                    "(debris/landslide) or shallow-water diffusive-wave simulation (flood) over the segment's 3D DEM terrain, visualized as an animation."
+                ),
+                feat_label=_t("FITUR & KAPABILITAS", "FEATURES &amp; CAPABILITIES"),
+                features=[
+                    (_t("Klik Peta Interaktif", "Interactive Map Click"), _t("Tandai titik sumber langsung di peta DEM ber-citra satelit.", "Mark the source point directly on the satellite-imagery DEM map.")),
+                    (_t("Simulasi Debris/Longsoran", "Debris/Landslide Simulation"), _t("Model cellular-automaton penyebaran material berbasis kemiringan.", "Slope-based cellular-automaton material spreading model.")),
+                    (_t("Simulasi Genangan Banjir", "Flood Inundation Simulation"), _t("Model shallow-water diffusive-wave, menjalar mengikuti kontur.", "Shallow-water diffusive-wave model, propagating along terrain contours.")),
+                    (_t("Animasi 3D + Citra Satelit", "3D Animation + Satellite Imagery"), _t("Playback animasi waktu di atas medan 3D dengan konteks citra satelit.", "Time-based animation playback over the 3D terrain with satellite imagery context.")),
+                ],
+                tag_label=_t("Parameter Kunci:", "Key Parameters:"),
+                tags=["Manning's n", _t("Radius Sumber", "Source Radius"), _t("Eksagerasi Vertikal", "Vertical Exaggeration")],
+            )
+
+
+
+        st.markdown(f"""
+        <div style="margin-bottom:18px;">
+            <h2 style="color:#fff; margin-bottom:4px;">{_t('Alur Kerja Penggunaan Aplikasi', 'Application Workflow')}</h2>
+            <p style="color:rgba(255,255,255,0.6); font-size:14.5px;">
+                {_t('Urutan langkah yang disarankan di tiap modul, dari input data sampai laporan/simulasi akhir.', 'Recommended step sequence for each module, from data input to the final report/simulation.')}
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        with st.expander(_t("Modul 01 — Erosion Mapping", "Module 01 — Erosion Mapping"), expanded=True):
+            st.markdown(_t(
+                "1. Buat/tambah segmen (sekat/channel) di bagian A.\n"
+                "2. Upload DXF kontur & boundary untuk tiap segmen.\n"
+                "3. Isi parameter hidrologi-hidrolika (hujan, Manning's n, geometri channel), atau aktifkan mode otomatis berbasis hujan.\n"
+                "4. Isi parameter tambahan (ukuran butir, dsb) sesuai kondisi segmen.\n"
+                "5. Jalankan RUN ANALYSIS untuk menghasilkan peta risiko 2D/3D dan rekomendasi.\n"
+                "6. Aktifkan narasi AI (opsional) untuk rekomendasi naratif per segmen.\n"
+                "7. Isi data reviewer (opsional) lalu unduh laporan PDF / PPTX.",
+                "1. Create/add a segment (check-dam/channel) in section A.\n"
+                "2. Upload the contour & boundary DXF for each segment.\n"
+                "3. Fill in hydrology-hydraulics parameters (rainfall, Manning's n, channel geometry), or enable rainfall-based automatic mode.\n"
+                "4. Fill in additional parameters (grain size, etc.) matching the segment's conditions.\n"
+                "5. Run RUN ANALYSIS to generate the 2D/3D risk map and recommendations.\n"
+                "6. Enable the AI narrative (optional) for a per-segment recommendation narrative.\n"
+                "7. Fill in reviewer data (optional) then download the PDF / PPTX report."
+            ))
+
+        with st.expander(_t("Modul 02 — Back Analysis", "Module 02 — Back Analysis")):
+            st.markdown(_t(
+                "1. Pastikan analisis desain (Erosion Mapping) pada segmen terkait sudah dijalankan (RUN ANALYSIS).\n"
+                "2. Pilih segmen yang mengalami kejadian erosi/sedimentasi di lapangan.\n"
+                "3. Tandai lokasi kejadian: klik satu titik di peta risiko, ATAU upload DXF boundary area yang tererosi.\n"
+                "4. Lihat ranking faktor risiko yang paling menyimpang di lokasi tersebut (Mode A).\n"
+                "5. Kalau ada data ukur lapangan (kedalaman scour / volume sedimentasi), isi di Mode B untuk hitung mundur parameter efektif.\n"
+                "6. Bandingkan hasil hitung mundur terhadap asumsi desain awal untuk menentukan penyebab paling mungkin.",
+                "1. Make sure the design analysis (Erosion Mapping) for the relevant segment has been run (RUN ANALYSIS).\n"
+                "2. Select the segment where the erosion/sedimentation event occurred in the field.\n"
+                "3. Mark the event location: click a point on the risk map, OR upload a DXF boundary of the eroded area.\n"
+                "4. Review the ranking of risk factors that deviate most at that location (Mode A).\n"
+                "5. If field measurement data is available (scour depth / sediment volume), fill it in Mode B to back-calculate the effective parameter.\n"
+                "6. Compare the back-calculated result against the original design assumption to identify the most likely cause."
+            ))
+
+        with st.expander(_t("Modul 03 — Machine Learning", "Module 03 — Machine Learning")):
+            st.markdown(_t(
+                "1. Pastikan analisis desain (Erosion Mapping) pada segmen terkait sudah dijalankan.\n"
+                "2. Pilih segmen yang akan divalidasi.\n"
+                "3. Masukkan data observasi lapangan: tabel titik sampel (3 kelas risiko), ATAU boundary erosi aktual (DXF, 2 kelas).\n"
+                "4. Lihat hasil Confusion Matrix, Overall Accuracy, dan Cohen's Kappa.\n"
+                "5. (Opsional) Jalankan perbandingan metode Hjulström vs Shields vs Partheniades+Flow Accumulation untuk segmen yang sama.",
+                "1. Make sure the design analysis (Erosion Mapping) for the relevant segment has been run.\n"
+                "2. Select the segment to validate.\n"
+                "3. Enter field observation data: a sample-point table (3 risk classes), OR an actual erosion boundary (DXF, 2 classes).\n"
+                "4. Review the Confusion Matrix, Overall Accuracy, and Cohen's Kappa results.\n"
+                "5. (Optional) Run the Hjulström vs Shields vs Partheniades+Flow Accumulation method comparison for the same segment."
+            ))
+
+        with st.expander(_t("Modul 04 — Simulasi Aliran 3D", "Module 04 — 3D Flow Simulation")):
+            st.markdown(_t(
+                "1. Pastikan analisis desain (Erosion Mapping) pada segmen terkait sudah dijalankan (sumber DEM-nya dari sini).\n"
+                "2. Pilih segmen & jenis simulasi (Debris/Longsoran atau Genangan Banjir).\n"
+                "3. Tandai titik sumber: klik langsung di peta DEM, atau input koordinat manual.\n"
+                "4. Isi parameter simulasi (radius sumber, Manning's n, jumlah frame, eksagerasi vertikal, dsb).\n"
+                "5. Tekan tombol Jalankan Simulasi.\n"
+                "6. Putar animasi hasil (Play/Pause/slider) dan tinjau kedalaman maksimum, volume, serta titik limpasan (untuk genangan).",
+                "1. Make sure the design analysis (Erosion Mapping) for the relevant segment has been run (it supplies the DEM source).\n"
+                "2. Select the segment & simulation type (Debris/Landslide or Flood Inundation).\n"
+                "3. Mark the source point: click directly on the DEM map, or enter coordinates manually.\n"
+                "4. Fill in the simulation parameters (source radius, Manning's n, frame count, vertical exaggeration, etc.).\n"
+                "5. Press the Run Simulation button.\n"
+                "6. Play back the animation (Play/Pause/slider) and review the maximum depth, volume, and overflow points (for flood)."
+            ))
+
+
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
     c1, c2, c3 = st.columns([2, 1, 2])
 
     with c2:
-        if st.button("▶︎ START ANALYSIS", use_container_width=True):
+        if st.button("▶︎ START ANALYSIS", width="stretch"):
             st.session_state.home_page = False
             st.rerun()
 
@@ -901,6 +1501,72 @@ def load_css():
         backdrop-filter: blur(10px);
     }
 
+    /* ===== HUB & INTRO -- kartu modul ===== */
+    .mwm-hub-card {
+        background: rgba(255,255,255,0.03);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 14px;
+        padding: 22px 22px 18px 22px;
+        height: 100%;
+        margin-bottom: 18px;
+    }
+    .mwm-hub-badge {
+        display: inline-block;
+        font-size: 11.5px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        padding: 4px 12px;
+        border-radius: 20px;
+        margin-bottom: 10px;
+    }
+    .mwm-hub-badge.green { background: rgba(0,200,150,0.16); color: #4ee6b8; }
+    .mwm-hub-badge.amber { background: rgba(230,170,40,0.16); color: #f0b93d; }
+    .mwm-hub-format {
+        float: right;
+        font-size: 11.5px;
+        color: rgba(255,255,255,0.45);
+    }
+    .mwm-hub-title { font-size: 21px; font-weight: 700; color: #fff; margin: 6px 0 4px 0; }
+    .mwm-hub-subtitle { font-size: 13.5px; color: rgba(255,255,255,0.6); margin-bottom: 14px; line-height: 1.5; }
+    .mwm-hub-section-label {
+        font-size: 11.5px; font-weight: 700; letter-spacing: 0.05em;
+        color: rgba(255,255,255,0.5); text-transform: uppercase;
+        margin: 16px 0 6px 0;
+    }
+    .mwm-hub-body { font-size: 13.5px; color: rgba(255,255,255,0.8); line-height: 1.55; }
+    .mwm-hub-feature { font-size: 13.5px; color: rgba(255,255,255,0.85); line-height: 1.55; margin-bottom: 6px; }
+    .mwm-hub-feature .chk { color: #4ee6b8; margin-right: 6px; }
+    .mwm-hub-tagbox {
+        background: rgba(255,255,255,0.04);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 10px;
+        padding: 10px 14px;
+        margin-top: 16px;
+    }
+    .mwm-hub-tagbox-label { font-size: 12px; font-weight: 700; color: rgba(255,255,255,0.65); margin-bottom: 8px; }
+    .mwm-hub-tag {
+        display: inline-block;
+        background: rgba(78,230,184,0.12);
+        color: #4ee6b8;
+        border: 1px solid rgba(78,230,184,0.3);
+        border-radius: 6px;
+        font-size: 12px;
+        padding: 3px 10px;
+        margin: 0 6px 6px 0;
+    }
+
+    /* ===== Header sub-bab bergradien (colour palette custom) ===== */
+    .mwm-subhdr {
+        color: #fff;
+        font-size: 17px;
+        font-weight: 700;
+        padding: 10px 18px;
+        border-radius: 10px;
+        margin: 18px 0 14px 0;
+        box-shadow: 0 4px 14px rgba(0,0,0,0.25);
+        text-shadow: 0 1px 3px rgba(0,0,0,0.35);
+    }
+
     </style>
     """, unsafe_allow_html=True)
 
@@ -909,7 +1575,7 @@ load_css()
 # ================= HEADER =================
 header_container = st.container()
 with header_container:
-    _safe_image("header.png", use_container_width=True)
+    _safe_image("header.png", width="stretch")
 
 # NOTE: dulu dibuka lewat st.markdown('<div class="header">') lalu ditutup
 # PERBAIKAN: dulu dibuka lewat st.markdown('<div class="header">') lalu ditutup
@@ -927,13 +1593,13 @@ with col1:
         st.markdown("<div style='font-size:34px;'></div>", unsafe_allow_html=True)
 
 with col2:
-    st.markdown("""
+    st.markdown(f"""
     <div style="text-align:center;">
         <h1 style="color:white; margin-bottom:0;">
-            EroSlope &amp; Machine Learning
+            {_t('Platform Terintegrasi Analisis Risiko Erosi, Diagnosis Lapangan, dan Simulasi Aliran', 'Integrated Platform for Erosion Risk Assessment, Field Diagnosis, and Flow Simulation')}
         </h1>
         <p style="color:rgba(255,255,255,0.7); font-size:14px;">
-            Advanced Geotechnical Analysis for Erosion, Stability, and Predictive Modeling
+            {_t('Analisis Geoteknik Lanjutan untuk Erosi, Stabilitas, dan Pemodelan Prediktif', 'Advanced Geotechnical Analysis for Erosion, Stability, and Predictive Modeling')}
         </p>
     </div>
     """, unsafe_allow_html=True)
@@ -941,18 +1607,35 @@ with col2:
 with col3:
     if not _safe_image("logo_2.png", width=120):
         st.markdown("<div style='font-size:34px; text-align:right;'></div>", unsafe_allow_html=True)
+    # toggle bahasa ID/EN dipindah ke sidebar (di atas kartu user)
+    if "app_lang" not in st.session_state:
+        st.session_state["app_lang"] = "id"
 
 
-tab1, tab2, tab3 = st.tabs(["Erosion Mapping", "Machine Learning", "Monitoring Deviation"])
+_is_admin = st.session_state.get("auth_role") == "admin"
 
-# =========================================================
-# =================== TAB 1: EROSION ======================
-# =========================================================
+_tab_labels = [
+    _t("Erosion Mapping", "Erosion Mapping"),
+    _t("Back Analysis", "Back Analysis"),
+    _t("Machine Learning", "Machine Learning"),
+]
+if _is_admin:
+    _tab_labels.append(_t("Monitoring Deviation", "Monitoring Deviation"))
+_tab_labels.append(_t("Simulasi Aliran 3D", "3D Flow Simulation"))
+
+if _is_admin:
+    tab1, tab4, tab2, tab3, tab5 = st.tabs(_tab_labels)
+else:
+    # User surveyor tidak menampilkan tab "Monitoring Deviation" sama sekali.
+    tab1, tab4, tab2, tab5 = st.tabs(_tab_labels)
+    tab3 = None
+
+# (tab_hub & tab_workflow dipindah ke landing page -- lihat blok "if st.session_state.home_page:")
 with tab1:
 
-    st.subheader("A. Input DXF & Segmen Sekat/Channel")
+    _sub_header(_t("A. Input DXF & Segmen Sekat/Channel", "A. DXF Input & Sekat/Channel Segments"))
 
-    st.caption(
+    _ui_caption(
         "Tiap segmen = 1 lokasi sekat/channel dengan DXF (kontur & boundary) "
         "dan parameter sendiri-sendiri. Properti tidak digeneralisir ke segmen lain."
     )
@@ -992,7 +1675,7 @@ with tab1:
             with colh2:
                 st.write("")
                 if len(st.session_state["segments"]) > 1:
-                    if st.button("Hapus", key=f"del_{sid}"):
+                    if st.button(_t("Hapus", "Delete"), key=f"del_{sid}"):
                         _remove_segment(sid)
                         st.rerun()
 
@@ -1012,7 +1695,7 @@ with tab1:
             is_sub_segment = (idx > 0)
 
             if is_sub_segment:
-                st.info(
+                _ui_info(
                     "Sub-boundary — memakai kontur/DXF terrain yang SAMA dengan **Segmen 1 (Main)**. "
                     "Anda hanya perlu mengunggah boundary sub-area di bawah ini (garis batas yang lebih "
                     "kecil, ada DI DALAM boundary utama), bukan DXF kontur baru."
@@ -1198,7 +1881,7 @@ with tab1:
                         colp3.number_input("Koordinat X Hulu", key=f"point_x_{sid}")
                         colp4.number_input("Koordinat Y Hulu", key=f"point_y_{sid}")
                     else:
-                        st.info(
+                        _ui_info(
                             "Mode klik-peta aktif — scroll ke bagian **'Pilih Titik Aliran di Peta'** "
                             "(muncul setelah DXF segmen ini selesai diproses di bawah) untuk klik titik "
                             "awal aliran secara langsung di atas desain."
@@ -1223,7 +1906,7 @@ with tab1:
 
                 st.markdown("**Hidrologi & Hidrolika (opsional — Rational Method + Manning's Equation)**")
 
-                st.caption(
+                _ui_caption(
                     "Jika diaktifkan, kecepatan & kedalaman aliran TIDAK lagi diambil dari input manual "
                     "di atas, melainkan dihitung dari debit rencana hasil hujan (metode Rasional + rumus "
                     "Mononobe untuk intensitas, umum dipakai di Indonesia) dan geometri channel via "
@@ -1309,12 +1992,12 @@ with tab1:
                         key=f"channel_h_total_{sid}"
                     )
 
-    st.button("Tambah Segmen (DXF Lain)", on_click=_add_segment)
+    st.button(_t("Tambah Segmen (DXF Lain)", "Add Segment (Other DXF)"), on_click=_add_segment)
 
     st.markdown("---")
-    st.subheader("B. Parameter Umum (berlaku untuk semua segmen)")
+    _sub_header(_t("B. Parameter Umum (berlaku untuk semua segmen)", "B. General Parameters (applies to all segments)"))
 
-    st.subheader("Visualisasi")
+    _sub_header(_t("Visualisasi", "Visualization"))
 
     colv1, colv2 = st.columns(2)
 
@@ -1468,7 +2151,7 @@ with tab1:
         0.5
     )
 
-    st.subheader("Sumber Data Hujan Online")
+    _sub_header(_t("Sumber Data Hujan Online", "Online Rainfall Data Source"))
 
     rain_source_choice = st.selectbox(
         "Pilih sumber data hujan",
@@ -1508,7 +2191,7 @@ with tab1:
             "Tanggal akhir", value=date.today() - timedelta(days=1)
         )
 
-    if st.button("Ambil Data Hujan Online"):
+    if st.button(_t("Ambil Data Hujan Online", "Fetch Online Rainfall Data")):
 
         with st.spinner("Mengambil data hujan dari sumber online..."):
             result, errors = get_online_rainfall_v2(
@@ -1543,10 +2226,10 @@ with tab1:
         )
 
     else:
-        st.error("Gagal mengambil data hujan online dari semua sumber yang dicoba.")
+        st.error(_t("Gagal mengambil data hujan online dari semua sumber yang dicoba.", "Failed to fetch online rainfall data from all attempted sources."))
         for err in st.session_state.get("online_rainfall_errors", []):
             st.caption(f"• {err}")
-        st.info(
+        _ui_info(
             "Anda tetap bisa lanjut dengan memasukkan nilai hujan desain secara manual di parameter "
             "segmen (mis. dari data BMKG lokal / stasiun pos hujan setempat)."
         )
@@ -1596,62 +2279,164 @@ with tab1:
     from shapely.ops import linemerge, polygonize
     from shapely.geometry import LineString
 
-    def read_boundary_polygon(uploaded_dxf):
+    def _iter_boundary_rings(geom):
+        """Iterasi semua exterior ring dari sebuah boundary, baik berupa
+        Polygon tunggal maupun MultiPolygon (beberapa boundary terpisah dalam
+        satu DXF -- mis. beberapa spot area pasir yang tidak menyatu). Dengan
+        ini SEMUA boundary ikut digambar/dipakai, bukan cuma satu yang pertama."""
+        if geom is None or geom.is_empty:
+            return
+        if geom.geom_type == "Polygon":
+            yield geom.exterior.xy
+        elif geom.geom_type in ("MultiPolygon", "GeometryCollection"):
+            for g in geom.geoms:
+                yield from _iter_boundary_rings(g)
+
+    def _boundary_xy_flat(geom):
+        """Gabungkan semua exterior ring (Polygon/MultiPolygon) jadi satu
+        pasang list x,y dengan pemisah None di antaranya, supaya bisa
+        digambar sebagai satu trace Plotly (garis putus antar-spot) tapi
+        tetap menampilkan SEMUA boundary/spot yang ada."""
+        xs, ys = [], []
+        for bx_r, by_r in _iter_boundary_rings(geom):
+            if xs:
+                xs.append(None)
+                ys.append(None)
+            xs.extend(bx_r)
+            ys.extend(by_r)
+        return xs, ys
+
+    def read_boundary_polygon(uploaded_dxf, debug_label=None):
         path = save_uploaded_dxf(uploaded_dxf)
         doc = ezdxf.readfile(path)
 
+        polygons = []
         lines = []
+        _n_skipped = 0
 
-        for e in doc.modelspace():
+        def _explode(entities):
+            """'Bongkar' entity INSERT (block reference) supaya polyline/garis/
+            circle di DALAM block ikut terbaca -- banyak DXF menaruh tiap
+            'spot' sebagai block reference terpisah, bukan geometri langsung
+            di modelspace, sehingga tanpa ini spot2 itu tidak pernah terlihat."""
+            for e in entities:
+                if e.dxftype() == "INSERT":
+                    try:
+                        yield from _explode(e.virtual_entities())
+                    except Exception:
+                        continue
+                else:
+                    yield e
 
-            # ===== polyline langsung jadi polygon =====
-            if e.dxftype() == "LWPOLYLINE" and e.closed:
-                pts = [(p[0], p[1]) for p in e.get_points()]
-                return fix_geom(Polygon(pts))
+        for e in _explode(doc.modelspace()):
+            etype = e.dxftype()
 
-            elif e.dxftype() == "POLYLINE" and e.is_closed:
-                pts = [(v.dxf.location.x, v.dxf.location.y) for v in e.vertices]
-                return fix_geom(Polygon(pts))
+            try:
+                # ===== polyline tertutup langsung jadi polygon =====
+                if etype == "LWPOLYLINE" and e.closed:
+                    pts = [(p[0], p[1]) for p in e.get_points()]
+                    poly = fix_geom(Polygon(pts))
+                    if poly is not None and not poly.is_empty:
+                        polygons.append(poly)
 
-            # ===== kumpulin semua garis =====
-            elif e.dxftype() == "LINE":
-                start = (e.dxf.start.x, e.dxf.start.y)
-                end = (e.dxf.end.x, e.dxf.end.y)
-                lines.append(LineString([start, end]))
+                elif etype == "POLYLINE" and e.is_closed:
+                    pts = [(v.dxf.location.x, v.dxf.location.y) for v in e.vertices]
+                    poly = fix_geom(Polygon(pts))
+                    if poly is not None and not poly.is_empty:
+                        polygons.append(poly)
 
-            elif e.dxftype() == "LWPOLYLINE" and not e.closed:
-                pts = [(p[0], p[1]) for p in e.get_points()]
-                lines.append(LineString(pts))
+                # ===== CIRCLE / ELLIPSE penuh -- tertutup secara alami, sering
+                # dipakai untuk menandai tiap "spot" (mis. spot pasir bulat) =====
+                elif etype == "CIRCLE":
+                    poly = fix_geom(Point(e.dxf.center.x, e.dxf.center.y).buffer(e.dxf.radius, resolution=32))
+                    if poly is not None and not poly.is_empty:
+                        polygons.append(poly)
 
-            elif e.dxftype() == "POLYLINE" and not e.is_closed:
-                pts = [(v.dxf.location.x, v.dxf.location.y) for v in e.vertices]
-                lines.append(LineString(pts))
+                elif etype == "ELLIPSE":
+                    pts = [(p[0], p[1]) for p in e.flattening(0.05)]
+                    if len(pts) >= 3:
+                        poly = fix_geom(Polygon(pts))
+                        if poly is not None and not poly.is_empty:
+                            polygons.append(poly)
 
-        if len(lines) == 0:
-            return None
+                # ===== SPLINE tertutup =====
+                elif etype == "SPLINE" and getattr(e, "closed", False):
+                    pts = [(p[0], p[1]) for p in e.flattening(0.05)]
+                    if len(pts) >= 3:
+                        poly = fix_geom(Polygon(pts))
+                        if poly is not None and not poly.is_empty:
+                            polygons.append(poly)
 
-        # ===== gabung garis =====
-        merged = linemerge(lines)
+                # ===== kumpulin semua garis/kurva yang TIDAK tertutup =====
+                elif etype == "LINE":
+                    lines.append(LineString([(e.dxf.start.x, e.dxf.start.y), (e.dxf.end.x, e.dxf.end.y)]))
 
-        # ===== coba jadi polygon otomatis =====
-        polygons = list(polygonize(merged))
-        if len(polygons) > 0:
-            return fix_geom(polygons[0])
+                elif etype == "LWPOLYLINE" and not e.closed:
+                    pts = [(p[0], p[1]) for p in e.get_points()]
+                    lines.append(LineString(pts))
 
-        # ===== fallback: paksa tutup =====
-        coords = []
-        for line in lines:
-            coords.extend(list(line.coords))
+                elif etype == "POLYLINE" and not e.is_closed:
+                    pts = [(v.dxf.location.x, v.dxf.location.y) for v in e.vertices]
+                    lines.append(LineString(pts))
 
-        coords = list(dict.fromkeys(coords))
+                elif etype == "ARC":
+                    pts = [(p[0], p[1]) for p in e.flattening(0.05)]
+                    if len(pts) >= 2:
+                        lines.append(LineString(pts))
 
-        if len(coords) < 3:
-            return None
+                elif etype == "SPLINE":
+                    pts = [(p[0], p[1]) for p in e.flattening(0.05)]
+                    if len(pts) >= 2:
+                        lines.append(LineString(pts))
 
-        if coords[0] != coords[-1]:
-            coords.append(coords[0])
+                else:
+                    _n_skipped += 1
 
-        return fix_geom(Polygon(coords))
+            except Exception:
+                _n_skipped += 1
+                continue
+
+        # ===== garis lepas yang kalau digabung membentuk loop tertutup juga
+        # dihitung sebagai boundary tambahan (mis. spot digambar dari garis,
+        # bukan polyline tertutup) =====
+        if lines:
+            merged = linemerge(lines)
+            for poly in polygonize(merged):
+                poly = fix_geom(poly)
+                if poly is not None and not poly.is_empty:
+                    polygons.append(poly)
+
+        if debug_label:
+            st.caption(
+                f"[{debug_label}] Terbaca {len(polygons)} boundary/poligon tertutup "
+                f"dari DXF ini" + (f" ({_n_skipped} entity lain dilewati/tidak dikenali)." if _n_skipped else ".")
+            )
+
+        if len(polygons) == 0:
+            # ===== fallback lama: paksa tutup dari titik-titik garis yang ada =====
+            coords = []
+            for line in lines:
+                coords.extend(list(line.coords))
+
+            coords = list(dict.fromkeys(coords))
+
+            if len(coords) < 3:
+                return None
+
+            if coords[0] != coords[-1]:
+                coords.append(coords[0])
+
+            return fix_geom(Polygon(coords))
+
+        if len(polygons) == 1:
+            return polygons[0]
+
+        # ===== lebih dari satu boundary tertutup ditemukan di DXF ini
+        # (mis. beberapa spot area pasir yang terpisah-pisah) -> gabungkan
+        # jadi satu geometri (akan otomatis jadi MultiPolygon kalau memang
+        # tidak saling bersentuhan), supaya SEMUA spot ikut terpakai, bukan
+        # cuma boundary pertama yang ditemukan =====
+        return fix_geom(unary_union(polygons))
 
     import re as _re_contour
 
@@ -1763,6 +2548,132 @@ with tab1:
             out.append(pts[i])
         return out
 
+    # ================= KONVERSI KOORDINAT: LOKAL <-> UTM <-> LAT/LON (WGS84) =================
+    # Parameter Helmert 2D (scale + rotasi + translasi) diambil dari referensi
+    # "Konversi_Blok_Lokal_ke_Global.xlsx" milik tim (sel C3=alpha, C4=beta, C5=dE, C6=dN).
+    # PENTING: rotasi antara grid Lokal dan UTM di sini signifikan (~57 derajat) --
+    # bukan cuma translasi. Karena itu overlay citra satelit (yang selalu "north-up")
+    # TIDAK bisa langsung ditumpuk di atas koordinat Lokal mentah -- geometri desain
+    # (kontur DXF, boundary, grid risiko) harus ditransformasi dulu ke UTM baru
+    # ditumpuk di atas citra satelit.
+    #
+    # Asumsi orientasi sumbu: X (DXF) = e (easting-lokal), Y (DXF) = n (northing-lokal).
+    # Kalau ternyata terbalik di proyek lain, tinggal tukar argumen saat memanggil.
+    _COORD_ALPHA = 0.540773
+    _COORD_BETA = -0.841086
+    _COORD_DE = 324945.0629
+    _COORD_DN = 9755584.111
+    _COORD_DET = _COORD_ALPHA ** 2 + _COORD_BETA ** 2
+    _COORD_UTM_EPSG = "EPSG:32750"  # UTM Zone 50S (WGS84) -- ganti ke EPSG:32749 kalau proyek di zona 49S
+
+    def _lokal_to_utm_xy(x_local, y_local):
+        """Vektor (array numpy atau skalar) X,Y Lokal (DXF) -> Easting,Northing UTM.
+        X diasumsikan = e-lokal, Y diasumsikan = n-lokal (lihat catatan di atas)."""
+        e = np.asarray(x_local, dtype=float)
+        n = np.asarray(y_local, dtype=float)
+        E = _COORD_DE + _COORD_ALPHA * e - _COORD_BETA * n
+        N = _COORD_DN + _COORD_BETA * e + _COORD_ALPHA * n
+        return E, N
+
+    def _utm_to_lokal_xy(E, N):
+        """Easting,Northing UTM -> X,Y Lokal (DXF)."""
+        E = np.asarray(E, dtype=float)
+        N = np.asarray(N, dtype=float)
+        e = (_COORD_ALPHA * (E - _COORD_DE) + _COORD_BETA * (N - _COORD_DN)) / _COORD_DET
+        n = (-_COORD_BETA * (E - _COORD_DE) + _COORD_ALPHA * (N - _COORD_DN)) / _COORD_DET
+        return e, n
+
+    @st.cache_resource
+    def _get_coord_transformers():
+        from pyproj import Transformer
+        to_latlon = Transformer.from_crs(_COORD_UTM_EPSG, "EPSG:4326", always_xy=True)
+        to_utm = Transformer.from_crs("EPSG:4326", _COORD_UTM_EPSG, always_xy=True)
+        return to_latlon, to_utm
+
+    def _utm_to_latlon(E, N):
+        to_latlon, _ = _get_coord_transformers()
+        lon, lat = to_latlon.transform(E, N)
+        return lat, lon
+
+    def _latlon_to_utm(lat, lon):
+        _, to_utm = _get_coord_transformers()
+        E, N = to_utm.transform(lon, lat)
+        return E, N
+
+    def _contours_lokal_to_utm(contours_list):
+        """Transformasi list kontur DXF [(x,y,z), ...] dari Lokal ke UTM. Elevasi (z) tidak berubah."""
+        out = []
+        for c in contours_list:
+            if len(c) == 0:
+                out.append(c)
+                continue
+            arr = np.asarray(c, dtype=float)
+            E, N = _lokal_to_utm_xy(arr[:, 0], arr[:, 1])
+            out.append(list(zip(E, N, arr[:, 2])))
+        return out
+
+    def _ring_lokal_to_utm(bx, by):
+        """Transformasi satu ring boundary (array x, array y) dari Lokal ke UTM."""
+        return _lokal_to_utm_xy(np.asarray(bx, dtype=float), np.asarray(by, dtype=float))
+
+    def _grid_lokal_to_utm(gx, gy):
+        """Transformasi meshgrid 2D (grid_x, grid_y) dari Lokal ke UTM. Karena transformasinya
+        murni affine (skala+rotasi+translasi, tanpa shear), hasilnya tetap grid quad valid
+        untuk contourf/pcolormesh meskipun sudah tidak axis-aligned lagi (miring ~57 derajat)."""
+        return _lokal_to_utm_xy(gx, gy)
+
+    def _fetch_satellite_basemap_utm(utm_extent, out_size=1024, pad_frac=0.06):
+        """Ambil citra satelit terbaru (Esri World Imagery, gratis tanpa API key) untuk
+        bounding box UTM tertentu, lewat REST 'export' ArcGIS -- request-nya sudah minta
+        bboxSR & imageSR = UTM Zone 50S langsung, jadi hasilnya SUDAH georeferenced pas di
+        extent UTM yang diminta (tidak perlu reprojection manual lagi di sisi kita).
+
+        utm_extent: (xmin, xmax, ymin, ymax) dalam meter UTM.
+        Return dict {"rgb":..., "extent":...} -- format sama seperti _load_orthophoto()
+        supaya bisa dipakai lewat kode overlay yang sama.
+        """
+        xmin, xmax, ymin, ymax = utm_extent
+        pad_x = (xmax - xmin) * pad_frac
+        pad_y = (ymax - ymin) * pad_frac
+        xmin, xmax = xmin - pad_x, xmax + pad_x
+        ymin, ymax = ymin - pad_y, ymax + pad_y
+
+        aspect = (xmax - xmin) / max(ymax - ymin, 1e-6)
+        if aspect >= 1:
+            w = out_size
+            h = max(64, int(out_size / aspect))
+        else:
+            h = out_size
+            w = max(64, int(out_size * aspect))
+
+        epsg_code = _COORD_UTM_EPSG.split(":")[1]
+        url = (
+            "https://services.arcgisonline.com/arcgis/rest/services/"
+            "World_Imagery/MapServer/export"
+        )
+        params = {
+            "bbox": f"{xmin},{ymin},{xmax},{ymax}",
+            "bboxSR": epsg_code,
+            "imageSR": epsg_code,
+            "size": f"{w},{h}",
+            "format": "png32",
+            "transparent": "false",
+            "f": "image",
+        }
+        try:
+            resp = requests.get(url, params=params, timeout=30)
+            resp.raise_for_status()
+            img = PILImage.open(io.BytesIO(resp.content)).convert("RGB")
+            rgb = np.array(img)
+            return {"rgb": rgb, "extent": (xmin, xmax, ymin, ymax)}
+        except Exception as e:
+            st.error(
+                f"Gagal mengambil citra satelit online (Esri World Imagery): {e}. "
+                "Cek koneksi internet server, atau domain "
+                "'services.arcgisonline.com' mungkin diblokir jaringan/firewall."
+            )
+            return None
+
     def _load_orthophoto(uploaded_ortho):
         """Baca orthophoto georeferenced (ECW/GeoTIFF/JP2) via rasterio dan kembalikan
         array RGB (uint8, HxWx3) + extent (xmin,xmax,ymin,ymax) dalam koordinat aslinya.
@@ -1826,7 +2737,7 @@ with tab1:
                     "terpengaruh, fitur ini murni opsional."
                 )
             else:
-                st.error(f"Gagal membaca orthophoto: {e}")
+                st.error(_t(f"Gagal membaca orthophoto: {e}", f"Failed to read orthophoto: {e}"))
             return None
 
     def _plot_dxf_overlay_2d(ax, contours_list, color="black", linewidth=0.5, alpha=0.9):
@@ -2162,6 +3073,86 @@ with tab1:
             "wetted_area_m2": A
         }
 
+    def fill_depressions(grid_z, inside):
+        """Depression filling (priority-flood, Barnes dkk. 2014 -- teknik yang sama
+        dipakai ArcGIS 'Fill'/WhiteboxTools/QGIS 'Fill Sinks'): menghilangkan SINK
+        LOKAL PALSU (cekungan kecil hasil artefak interpolasi griddata linear di
+        area data jarang, BUKAN cekungan asli di lapangan) dengan menaikkan
+        elevasinya sampai setinggi "pour point" (titik keluar terendah dari
+        cekungan tsb) -- supaya D8 routing bisa tetap mengalir melewatinya alih2
+        berhenti persis di dasar cekungan kecil itu.
+
+        PENTING: hasil fungsi ini (`filled`) HANYA dipakai untuk MENENTUKAN ARAH
+        aliran (D8 receivers) -- elevasi ASLI (grid_z, tidak di-filled) tetap
+        dipakai apa adanya untuk ditampilkan di path_z/hover & mesh 3D, supaya
+        angka elevasi yang dilihat user tetap akurat sesuai data asli.
+
+        Sel di TEPI DOMAIN VALID (yaitu sel `inside` yang bertetangga langsung
+        dengan sel `outside`/tepi boundary) dianggap OUTLET ASLI dan TIDAK ikut
+        dinaikkan -- jadi cekungan yang genuinely terbuka ke tepi area kajian
+        (bukan tertutup rapat di tengah) tetap diperlakukan sebagai jalan keluar
+        yang sah, bukan cekungan yang perlu diisi.
+        """
+        ny, nx = grid_z.shape
+        finite = np.isfinite(grid_z) & inside
+
+        # sel "outlet asli": bagian dari `inside` yang bertetangga (8-conn) dengan
+        # sel `outside` (termasuk tepi array) -- ini yang jadi titik keluar sah
+        core = binary_erosion(
+            inside, structure=np.ones((3, 3), dtype=bool), border_value=0
+        )
+        is_outlet_seed = finite & ~core
+
+        filled = np.where(finite, np.inf, grid_z)
+        visited = np.zeros((ny, nx), dtype=bool)
+        heap = []
+
+        seed_r, seed_c = np.where(is_outlet_seed)
+        for r, c in zip(seed_r, seed_c):
+            filled[r, c] = grid_z[r, c]
+            visited[r, c] = True
+            heapq.heappush(heap, (float(grid_z[r, c]), int(r), int(c)))
+
+        neighbor_offsets = [
+            (-1, -1), (-1, 0), (-1, 1),
+            (0, -1), (0, 1),
+            (1, -1), (1, 0), (1, 1),
+        ]
+
+        # PERBAIKAN ("flat area problem"): kalau elevasi cekungan cuma dinaikkan
+        # PERSIS sampai setinggi pour point (tetangga rim terendah), hasilnya sel
+        # itu jadi SAMA TINGGI (rata) dengan tetangganya -- compute_d8_receivers
+        # butuh tetangga yang STRICTLY lebih rendah, jadi sel yang baru di-fill
+        # tetap dianggap "tidak ada tetangga lebih rendah" alias sink lagi! Untuk
+        # menghindari ini, tiap kali menjalar dari sel yang sudah diproses ke
+        # tetangganya, elevasi target dinaikkan sedikit (epsilon sangat kecil,
+        # dampaknya cuma dipakai utk MENENTUKAN ARAH, elevasi asli tidak berubah)
+        # supaya selalu ada gradien menurun yang jelas menuju outlet -- teknik
+        # standar "epsilon filling" pada algoritma priority-flood.
+        _epsilon = 1e-4
+
+        while heap:
+            z, r, c = heapq.heappop(heap)
+            for dr, dc in neighbor_offsets:
+                nr, nc = r + dr, c + dc
+                if (
+                    0 <= nr < ny and 0 <= nc < nx
+                    and finite[nr, nc] and not visited[nr, nc]
+                ):
+                    visited[nr, nc] = True
+                    new_z = max(float(grid_z[nr, nc]), z + _epsilon)
+                    filled[nr, nc] = new_z
+                    heapq.heappush(heap, (new_z, nr, nc))
+
+        # sel `inside` yang entah kenapa tidak terjangkau (mis. domain terputus,
+        # tidak terhubung ke tepi manapun) -- fallback pakai elevasi asli supaya
+        # tidak jadi inf/NaN yang bisa merusak perhitungan slope di tempat lain
+        unreached = finite & ~visited
+        filled[unreached] = grid_z[unreached]
+
+        return filled
+
+
     def compute_d8_receivers(grid_z, dx, dy, inside):
         """Tentukan sel tujuan aliran (receiver) untuk tiap sel via steepest-descent D8
         (8 tetangga). Return (receiver_row, receiver_col, has_receiver) — has_receiver
@@ -2200,7 +3191,13 @@ with tab1:
         jumlah sel) yang alirannya melewati sel tersebut, dengan memproses seluruh sel valid
         terurut dari elevasi TERTINGGI ke TERENDAH (topological order, aman dari siklus karena
         receiver selalu lebih rendah dari sender). Ini menggantikan pendekatan lama yang hanya
-        menelusuri ~20 garis dari 1 titik dan menghasilkan flow_count nol di mode Hujan (Uniform)."""
+        menelusuri ~20 garis dari 1 titik dan menghasilkan flow_count nol di mode Hujan (Uniform).
+
+        Sekarang juga mengembalikan (receiver_r, receiver_c, has_receiver) -- dipakai ulang
+        oleh trace_multiple_flow() untuk menelusuri jalur individual dengan metode D8
+        cell-stepping yang SAMA PERSIS dengan yang membentuk flow_acc ini, supaya jalur
+        individual dijamin konsisten & tidak pernah berputar-putar (setiap langkah wajib
+        menuju sel yang elevasinya strictly lebih rendah)."""
         ny, nx = grid_z.shape
         recv_r, recv_c, has_recv = compute_d8_receivers(grid_z, dx, dy, inside)
 
@@ -2216,7 +3213,7 @@ with tab1:
             if r >= 0:
                 acc[r] += acc[i]
 
-        return acc.reshape(ny, nx)
+        return acc.reshape(ny, nx), recv_r, recv_c, has_recv
 
     def _find_downhill_escape(x, y, grid_x, grid_y, grid_z, inside, max_radius_cells=None):
         """Kalau steepest-descent 'macet' (gradien lokal ~0), cari sel terdekat
@@ -2262,8 +3259,24 @@ with tab1:
                 candidate = valid & (sub_z < z_here - 1e-6)
                 if candidate.any():
                     rel_r, rel_c = np.where(candidate)
-                    zs = sub_z[rel_r, rel_c]
-                    best = np.argmin(zs)
+                    # PERBAIKAN ("aliran Point Source loncat keluar jalur channel saat
+                    # escape dari plateau, jadi tidak menyusuri channel sampai selesai"):
+                    # sebelumnya kandidat escape dipilih berdasarkan ELEVASI TERENDAH
+                    # (np.argmin(zs)) di antara semua sel valid dalam kotak radius ini --
+                    # itu bisa saja sel yang jauh di sudut/tepi kotak radius (misalnya
+                    # radius 40 sel = kotak 81x81), yang letaknya menyimpang jauh dari
+                    # arah channel yang sedang ditelusuri, bukan lanjutan alami jalur
+                    # yang sama. Akibatnya trace "meloncat" keluar dari channel menuju
+                    # titik rendah tak terkait, sehingga sebagian besar jalur channel
+                    # yang sebenarnya tidak pernah ikut ditelusuri/ditampilkan.
+                    # Sekarang dipilih sel VALID-TERDEKAT (jarak Euclidean terkecil ke
+                    # posisi sekarang), bukan yang paling rendah -- meniru air asli yang
+                    # mengalir ke sel tetangga terdekat yang lebih rendah dulu, baru
+                    # lanjut mencari lebih jauh kalau masih plateau, sehingga escape-nya
+                    # tetap berupa langkah kecil yang wajar menyusuri channel, bukan
+                    # lompatan jauh ke area lain.
+                    dist2 = (rel_r - (ix - r0)) ** 2 + (rel_c - (iy - c0)) ** 2
+                    best = np.argmin(dist2)
                     best_r = r0 + rel_r[best]
                     best_c = c0 + rel_c[best]
                     return float(grid_x[best_r, 0]), float(grid_y[0, best_c])
@@ -2291,170 +3304,159 @@ with tab1:
         return _search(require_inside=False)
 
     def trace_multiple_flow(x0, y0, grid_x, grid_y, dz_dx, dz_dy, grid_z, boundary,
-                             n_stream=20, inside=None, depth0=0.2, flow_acc=None):
-        """Trace multiple steepest-descent streamlines dari titik (x0,y0).
+                             n_stream=20, inside=None, depth0=0.2, flow_acc=None,
+                             d8_recv_r=None, d8_recv_c=None, d8_has_recv=None):
+        """Trace jalur aliran dari titik (x0,y0) memakai metode D8 CELL-STEPPING.
 
-        PERBAIKAN vs versi sebelumnya: sebelumnya z tiap titik path diambil dari
-        indeks grid SEBELUM posisi berpindah (off-by-one), sehingga path_z
-        memiliki 1 elemen lebih sedikit dari path_x/path_y dan elevasi yang
-        ditampilkan tidak sinkron dengan posisi (x,y) sebenarnya — inilah salah
-        satu penyebab tampilan streamline 3D terlihat 'melayang'/tidak menempel
-        pas ke permukaan aktual. Sekarang z diambil pada posisi SETELAH pindah,
-        dan titik awal (x0,y0,z0) turut disertakan sehingga x,y,z selalu
-        panjangnya sama & konsisten satu sama lain.
+        PERBAIKAN TOTAL (mengganti pendekatan lama): versi sebelumnya menelusuri
+        jalur langkah-demi-langkah di ruang KONTINU (gradien elevasi + "channel-
+        snap" ke sel tetangga ber-flow_acc tertinggi, dievaluasi ulang tiap
+        langkah). Pendekatan itu TERBUKTI rapuh -- di channel sempit/berkelok,
+        sel tujuan "terbaik" bisa berubah-ubah antar langkah dan membuat jalur
+        berputar-putar (oscillation) tanpa progres, bahkan setelah ditambal
+        beberapa kali (filter arah gerak, deteksi loop, recovery mematikan
+        snap sementara -- tetap saja rapuh di data lapangan yang riil/noisy).
 
-        PERBAIKAN LEBIH LANJUT: sebelumnya iterasi dibatasi fixed range(800) --
-        dengan step 0.5 satuan itu setara jarak tempuh maksimum ~400 satuan,
-        yang BISA lebih pendek dari luas area kajian sebenarnya (mis. boundary
-        berukuran 1-2 km), sehingga aliran berhenti karena kehabisan jatah
-        iterasi, BUKAN karena benar-benar mencapai tepi boundary/sink. Sekarang
-        jumlah iterasi maksimum dihitung ADAPTIF dari diagonal bounding-box
-        boundary (dikali faktor aman 6x untuk mengakomodasi jalur yang berkelok/
-        tidak lurus), supaya aliran betul-betul disimulasikan sampai keluar
-        boundary atau mencapai titik tanpa gradien turun (sink/local minimum),
-        bukan berhenti prematur oleh limit sembarang. Tetap ada hard-cap supaya
-        tidak infinite-loop kalau ada kasus aneh (mis. boundary sangat kecil).
+        Sekarang jalur ditelusuri dengan D8 CELL-STEPPING: pada tiap sel,
+        tujuan berikutnya adalah SATU tetangga (dari 8 arah) dengan slope
+        menurun TERCURAM -- persis algoritma yang SAMA yang dipakai untuk
+        menghitung flow_acc/flow accumulation (compute_d8_receivers &
+        compute_flow_accumulation_d8), supaya jalur individual otomatis
+        konsisten dengan flow_acc dan channel yang ditampilkan. Ini secara
+        MATEMATIS TIDAK MUNGKIN berputar-putar/oscillation: tiap langkah wajib
+        menuju sel yang elevasinya STRICTLY lebih rendah dari sel sekarang,
+        jadi satu sel tidak akan pernah dikunjungi dua kali dalam satu jalur.
+        Jalur hanya berhenti karena 2 kondisi yang sah: sel sink asli (tidak
+        ada tetangga yang lebih rendah) atau keluar tepi area kajian (boundary)
+        -- tidak ada lagi kemungkinan "habis iterasi" atau "loop terdeteksi".
 
-        REVISI TERBARU (fix "aliran stuck padahal cuma pembelokan kecil"):
-        sebelumnya, begitu gradien lokal nol DAN _find_downhill_escape() gagal
-        menemukan sel lebih rendah dalam radius terbatas (40 sel), aliran
-        LANGSUNG dianggap sink & berhenti. Radius _find_downhill_escape()
-        sekarang sudah dilebarkan sampai mencakup seluruh grid (lihat fungsi
-        tsb), tapi sebagai lapis pengaman tambahan: kalau toh escape masih
-        gagal (mis. titik itu benar2 titik terendah di seluruh grid yg masih
-        tersambung), aliran TIDAK langsung berhenti selama masih punya arah
-        gerak terakhir yang valid (momentum) -- aliran didorong terus memakai
-        arah terakhir tsb sampai maksimum `max_momentum_steps` langkah, dengan
-        harapan keluar dari plateau/artefak lokal dan kembali menemukan gradien
-        turun yang sebenarnya atau mencapai boundary. Ini meniru perilaku air
-        asli yang tetap punya inersia/momentum melewati bagian datar pendek.
-        Baru kalau momentum juga habis tanpa progres, aliran dianggap benar2
-        mencapai sink asli / dasar cekungan tertutup.
+        d8_recv_r/d8_recv_c/d8_has_recv (opsional): grid receiver D8 yang
+        SUDAH dihitung sebelumnya (mis. dari compute_flow_accumulation_d8),
+        dioper langsung ke sini supaya tidak perlu dihitung ulang tiap
+        pemanggilan (penting untuk simulasi hujan yang memanggil fungsi ini
+        berkali-kali per titik hujan).
 
-        Selain X,Y,Z, sekarang juga mengembalikan `path_depth` (ketebalan air
-        perkiraan di tiap titik path) -- dimulai dari `depth0` (kedalaman air
-        awal yang diisi user) dan membesar seiring bertambahnya flow_acc lokal
-        (proxy jumlah tangkapan air di sel tsb, kalau `flow_acc` grid disediakan)
-        supaya representasi 3D terlihat makin tebal ke arah hilir seperti aliran
-        air sungai sungguhan, bukan garis tipis konstan.
+        Mengembalikan (all_paths, stop_reasons):
+        - all_paths: list of (path_x, path_y, path_z, path_depth) per jalur.
+          path_depth adalah ketebalan air perkiraan di tiap titik -- dimulai
+          dari `depth0` dan membesar seiring bertambahnya flow_acc lokal
+          (proxy jumlah tangkapan air di sel tsb) supaya representasi 3D
+          terlihat makin tebal ke arah hilir, bukan garis tipis konstan.
+        - stop_reasons: list of dict {"reason", "n_points", "distance"} per
+          jalur, dipakai untuk diagnosis (lihat expander "Diagnosis jalur
+          aliran" & marker "Titik Berhenti Aliran" di model 3D).
         """
-
-        step_size = 0.5
-        minx, miny, maxx, maxy = boundary.bounds
-        diag = float(np.hypot(maxx - minx, maxy - miny))
-        max_iter = int(np.clip((diag / step_size) * 6, 800, 200000))
-        max_momentum_steps = 400
 
         if inside is None:
             inside = ~np.isnan(grid_z)
 
-        # PERBAIKAN ("aliran masih nyangkut/berhenti padahal mesh 3D-nya --
-        # area hijau yang sama -- masih terlihat lanjut jauh melewati titik
-        # itu"): sebelumnya kondisi berhenti trace memakai uji Shapely
-        # `boundary.buffer(...).contains(Point)` TERPISAH dari mask `inside`
-        # (raster hasil `vectorized.contains(boundary, grid_x, grid_y)`) yang
-        # justru menentukan bentuk mesh 3D yang dirender (area hijau yang
-        # dilihat user). Dua uji containment berbeda pada geometry yang sama
-        # (satu Shapely scalar Point-in-polygon pada boundary yang dibuffer,
-        # satu lagi raster grid) bisa TIDAK KONSISTEN persis di tepi/sudut
-        # boundary yang rumit (hasil alpha-shape/digitasi manual) -- trace
-        # berhenti duluan padahal sel gridnya sendiri masih ditandai "inside"
-        # & dirender sebagai bagian mesh yang valid.
-        #
-        # Sekarang kondisi berhenti trace memakai PERSIS raster `inside` yang
-        # sama dgn yang dipakai untuk mesh (look-up sel grid terdekat, bukan
-        # uji polygon terpisah), supaya "kalau masih dirender sebagai area
-        # valid, aliran juga masih boleh melewatinya" -- otomatis konsisten.
-        # Raster ini didilasi beberapa sel (toleransi tepi, meniru cell buffer
-        # sebelumnya tapi sedikit lebih longgar) supaya artefak tepi
-        # sub-piksel (pinch/lubang kecil dari alpha-shape) tidak lagi memutus
-        # trace prematur, sesuai laporan aliran masih "nyangkut" walau tepat
-        # di sebelahnya area hijau masih lanjut.
-        _inside_tol = binary_dilation(inside, iterations=3)
-        _ny_max_chk, _nx_max_chk = grid_z.shape
+        # toleransi tepi (dilasi beberapa sel) supaya artefak sub-piksel di
+        # tepi boundary (pinch/lubang kecil dari alpha-shape) tidak memutus
+        # jalur prematur padahal secara visual mesh masih menampilkannya
+        # sebagai area valid -- konsisten dengan versi2 sebelumnya.
+        _inside_tol = binary_dilation(inside, iterations=6)
 
-        def _still_inside(px, py):
-            _ixc = np.abs(grid_x[:, 0] - px).argmin()
-            _iyc = np.abs(grid_y[0, :] - py).argmin()
-            if _ixc < 0 or _ixc >= _ny_max_chk or _iyc < 0 or _iyc >= _nx_max_chk:
-                return False
-            return bool(_inside_tol[_ixc, _iyc])
+        _dx_cell = (
+            abs(float(grid_x[1, 0] - grid_x[0, 0])) if grid_x.shape[0] > 1 else 1.0
+        )
+        _dy_cell = (
+            abs(float(grid_y[0, 1] - grid_y[0, 0])) if grid_y.shape[1] > 1 else 1.0
+        )
 
-        all_paths = []
+        if d8_recv_r is not None and d8_recv_c is not None and d8_has_recv is not None:
+            recv_r, recv_c, has_recv = d8_recv_r, d8_recv_c, d8_has_recv
+        else:
+            # fallback: kalau caller tidak meneruskan receiver yang sudah dihitung
+            # di luar (mis. karena `inside` di sini beda dari yang dipakai saat
+            # precompute global, contoh: gabungan sub-segmen) -- tetap lakukan
+            # depression filling dulu di sini juga, supaya sink palsu akibat
+            # artefak interpolasi tetap konsisten teratasi di jalur manapun.
+            _filled_for_recv = fill_depressions(grid_z, inside)
+            recv_r, recv_c, has_recv = compute_d8_receivers(
+                _filled_for_recv, _dx_cell, _dy_cell, inside
+            )
 
         ix0 = np.abs(grid_x[:, 0] - x0).argmin()
         iy0 = np.abs(grid_y[0, :] - y0).argmin()
-        z0 = grid_z[ix0, iy0]
+        z0 = float(grid_z[ix0, iy0])
         acc0 = float(flow_acc[ix0, iy0]) if flow_acc is not None else 1.0
 
-        for angle in np.linspace(-0.5, 0.5, n_stream):
+        # sebaran titik AWAL tegak lurus arah gradien lokal, supaya tetap
+        # terlihat seperti "kipas" dari 1 titik seperti versi sebelumnya --
+        # tiap jalur lalu menyusuri rantai receiver D8-nya sendiri secara
+        # independen & deterministik (beberapa bisa menyatu jadi 1 channel
+        # yang sama di hilir -- itu justru sesuai perilaku anak sungai/
+        # tributary yang bergabung, bukan bug).
+        _gx_local = -dz_dx[ix0, iy0]
+        _gy_local = -dz_dy[ix0, iy0]
+        _gnorm = float(np.hypot(_gx_local, _gy_local))
+        if _gnorm > 1e-9:
+            _perp_x, _perp_y = -_gy_local / _gnorm, _gx_local / _gnorm
+        else:
+            _perp_x, _perp_y = 1.0, 0.0
 
-            path_x, path_y, path_z, path_depth = [x0], [y0], [z0], [depth0]
-            x, y = x0, y0
-            last_vx, last_vy = None, None
-            stuck_streak = 0
+        _spread = 1.5 * float(np.hypot(_dx_cell, _dy_cell))
 
-            for _ in range(max_iter):
+        all_paths = []
+        stop_reasons = []
 
-                ix = np.abs(grid_x[:, 0] - x).argmin()
-                iy = np.abs(grid_y[0, :] - y).argmin()
+        _ny, _nx = grid_z.shape
+        _max_chain = _ny * _nx + 8  # batas aman mutlak; strictly menurun => tak pernah tercapai
 
-                vx = -dz_dx[ix, iy]
-                vy = -dz_dy[ix, iy]
+        for angle in (np.linspace(-0.5, 0.5, n_stream) if n_stream > 1 else [0.0]):
 
-                vx += angle * 0.2
-                vy += angle * 0.2
+            sx = x0 + angle * _spread * _perp_x
+            sy = y0 + angle * _spread * _perp_y
 
-                norm = np.sqrt(vx**2 + vy**2)
+            ix = int(np.abs(grid_x[:, 0] - sx).argmin())
+            iy = int(np.abs(grid_y[0, :] - sy).argmin())
 
-                if norm < 1e-6:
-                    # gradien lokal nol -> coba lompati plateau/artefak interpolasi
-                    # dulu sebelum menyerah (lihat catatan _find_downhill_escape)
-                    escape = _find_downhill_escape(x, y, grid_x, grid_y, grid_z, inside)
-                    if escape is not None:
-                        ex, ey = escape
-                        vx, vy = ex - x, ey - y
-                        norm = np.sqrt(vx**2 + vy**2)
-                        stuck_streak = 0
-                    elif last_vx is not None and stuck_streak < max_momentum_steps:
-                        # tidak ada sel lebih rendah SAMA SEKALI di seluruh grid dari
-                        # sini -> dorong terus pakai arah gerak terakhir (momentum),
-                        # jangan langsung menyerah, siapa tahu ini cuma titik pelana
-                        # (saddle) sempit lalu gradien turun lagi ditemukan berikutnya
-                        vx, vy = last_vx, last_vy
-                        norm = np.sqrt(vx**2 + vy**2)
-                        stuck_streak += 1
-                    else:
-                        # sudah dicoba escape + momentum ratusan langkah, tetap tidak
-                        # ada progres -> baru dianggap sink asli / dasar cekungan
-                        break
+            path_x = [float(grid_x[ix, 0])]
+            path_y = [float(grid_y[0, iy])]
+            path_z = [float(grid_z[ix, iy])]
+            path_depth = [depth0]
 
-                    if norm < 1e-6:
-                        break
-                else:
-                    stuck_streak = 0
+            reason = None
+            visited = set()
+            steps = 0
 
-                x += (vx / norm) * step_size
-                y += (vy / norm) * step_size
-                last_vx, last_vy = vx, vy
+            while steps < _max_chain:
 
-                if not _still_inside(x, y):
-                    # mencapai tepi boundary -> kondisi berhenti yang sebenarnya diminta
+                cell_key = (ix, iy)
+                if cell_key in visited:
+                    # Secara teori TIDAK MUNGKIN terjadi (D8 selalu strictly
+                    # menurun elevasinya) -- dipertahankan sebagai pengaman
+                    # mutlak terakhir kalau ada data elevasi yang aneh (mis.
+                    # dua sel persis sama tinggi & saling menunjuk).
+                    reason = (
+                        "loop pada rantai D8 (kasus tak terduga -- kemungkinan "
+                        "ada 2 sel bertetangga dengan elevasi identik persis; "
+                        "coba turunkan smoothing/resolusi grid)"
+                    )
+                    break
+                visited.add(cell_key)
+
+                if not bool(_inside_tol[ix, iy]):
+                    reason = "keluar/mencapai tepi area kajian (boundary)"
                     break
 
-                ix_new = np.abs(grid_x[:, 0] - x).argmin()
-                iy_new = np.abs(grid_y[0, :] - y).argmin()
-                z = grid_z[ix_new, iy_new]
-
-                if np.isnan(z):
+                if not bool(has_recv[ix, iy]):
+                    reason = "sink asli (dasar cekungan, tidak ada tetangga yang lebih rendah)"
                     break
 
-                path_x.append(x)
-                path_y.append(y)
-                path_z.append(z)
+                nix, niy = int(recv_r[ix, iy]), int(recv_c[ix, iy])
+                nz = grid_z[nix, niy]
+
+                if np.isnan(nz):
+                    reason = "data elevasi NaN di sel tujuan (di luar jangkauan interpolasi)"
+                    break
+
+                path_x.append(float(grid_x[nix, 0]))
+                path_y.append(float(grid_y[0, niy]))
+                path_z.append(float(nz))
 
                 if flow_acc is not None:
-                    acc_here = float(flow_acc[ix_new, iy_new])
+                    acc_here = float(flow_acc[nix, niy])
                     # ketebalan membesar mengikuti akar dari rasio flow accumulation
                     # (proxy debit ~ luas tangkapan) relatif titik awal -- pendekatan
                     # sederhana ala hydraulic geometry (lebar/kedalaman ~ Q^0.4-0.5)
@@ -2463,9 +3465,29 @@ with tab1:
                 else:
                     path_depth.append(path_depth[-1])
 
-            all_paths.append((path_x, path_y, path_z, path_depth))
+                ix, iy = nix, niy
+                steps += 1
 
-        return all_paths
+            if reason is None:
+                # tidak seharusnya tercapai (lihat _max_chain di atas), tapi
+                # dijaga supaya selalu ada label yang jelas kalau tetap terjadi
+                reason = "batas pengaman mutlak tercapai (kasus tak terduga -- laporkan)"
+
+            _dist = 0.0
+            for _k in range(1, len(path_x)):
+                _dist += float(np.hypot(
+                    path_x[_k] - path_x[_k - 1],
+                    path_y[_k] - path_y[_k - 1]
+                ))
+
+            all_paths.append((path_x, path_y, path_z, path_depth))
+            stop_reasons.append({
+                "reason": reason,
+                "n_points": len(path_x),
+                "distance": _dist,
+            })
+
+        return all_paths, stop_reasons
 
     # ================= RECOMMENDATION ENGINE =================
     def generate_recommendation(
@@ -2621,28 +3643,156 @@ with tab1:
         }
 
     # ================= AI-BASED GEOTECHNICAL RECOMMENDATION =================
-    def _get_anthropic_api_key():
+    # Bisa pilih salah satu dari 3 sumber AI (dropdown ditaruh sebelum tombol
+    # RUN ANALYSIS, lihat st.session_state["ai_source_choice"]):
+    #   - "GPT (OpenAI)"    -> butuh st.secrets["openai_api_key"], berbayar
+    #   - "Gemini (Google)" -> butuh st.secrets["gemini_api_key"], ADA free tier
+    #   - "Groq"            -> butuh st.secrets["groq_api_key"], ADA free tier
+    # Kalau API key untuk sumber terpilih belum diisi, otomatis fallback ke
+    # narasi rule-based (tidak pernah error/blank ke user).
+    def _get_openai_api_key():
         try:
-            return st.secrets["anthropic_api_key"]
+            return st.secrets["openai_api_key"]
         except Exception:
             return None
 
-    def generate_ai_recommendation(context, rule_based):
-        """Minta narasi & rekomendasi geoteknik dari Claude (Anthropic API), berbasis
-        angka HASIL RUNNING segmen ini (bukan template tetap) — tiap segmen akan
-        mendapat narasi berbeda menyesuaikan kombinasi angka aktualnya.
+    def _get_gemini_api_key():
+        try:
+            return st.secrets["gemini_api_key"]
+        except Exception:
+            return None
+
+    def _get_groq_api_key():
+        try:
+            return st.secrets["groq_api_key"]
+        except Exception:
+            return None
+
+    def _parse_ai_json_reply(raw_text):
+        """Bersihkan kemungkinan markdown-fence lalu parse JSON {"narrative":..,
+        "recommendations":[..]} yang formatnya diminta sama ke ketiga provider."""
+        import json as _json
+        text = (raw_text or "").strip()
+        text = text.replace("```json", "").replace("```", "").strip()
+        parsed = _json.loads(text)
+        if not parsed.get("narrative") or not parsed.get("recommendations"):
+            raise ValueError("Respons AI tidak lengkap")
+        return parsed
+
+    def _call_openai(prompt, api_key):
+        resp = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
+            json={
+                "model": "gpt-4o",
+                "max_tokens": 1000,
+                "messages": [{"role": "user", "content": prompt}],
+                "response_format": {"type": "json_object"}
+            },
+            timeout=30
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data["choices"][0]["message"]["content"]
+
+    def _call_gemini(prompt, api_key):
+        # Catatan: gemini-2.5-flash kini dibatasi Google hanya untuk akun/API
+        # key yang sudah pernah memakainya sebelumnya -- project/key BARU akan
+        # selalu dapat 404 walau key-nya valid. Google merekomendasikan pindah
+        # ke gemini-3.5-flash (atau gemini-3.1-flash-lite) untuk key baru.
+        # Kalau model utama gagal (404/model tidak tersedia di akun tsb),
+        # otomatis coba model fallback sebelum menyerah ke rule-based.
+        _models_to_try = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash"]
+        _last_err = None
+        for _model in _models_to_try:
+            try:
+                resp = requests.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{_model}:generateContent",
+                    headers={"content-type": "application/json"},
+                    params={"key": api_key},
+                    json={
+                        "contents": [{"parts": [{"text": prompt}]}],
+                        "generationConfig": {
+                            "maxOutputTokens": 2048,
+                            "responseMimeType": "application/json",
+                            # Model Gemini 3.x mengaktifkan "thinking" (penalaran
+                            # internal) secara default, dan token thinking ikut
+                            # memotong jatah maxOutputTokens -- kalau tidak
+                            # dimatikan, jawaban JSON-nya sering kepotong di
+                            # tengah (error "Unterminated string") karena token
+                            # habis dipakai buat mikir, bukan buat menulis hasil.
+                            "thinkingConfig": {"thinkingBudget": 0}
+                        }
+                    },
+                    timeout=30
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                return data["candidates"][0]["content"]["parts"][0]["text"]
+            except Exception as e:
+                _last_err = e
+                continue
+        raise _last_err
+
+    def _call_groq(prompt, api_key):
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
+            json={
+                "model": "openai/gpt-oss-120b",
+                "max_tokens": 1000,
+                "messages": [{"role": "user", "content": prompt}],
+                "response_format": {"type": "json_object"}
+            },
+            timeout=30
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data["choices"][0]["message"]["content"]
+
+    # provider registry: (nama tampil, fungsi ambil-key, fungsi panggil-API, label sumber di UI)
+    _AI_PROVIDERS = {
+        "GPT (OpenAI)": {
+            "get_key": _get_openai_api_key,
+            "call": _call_openai,
+            "secret_name": "openai_api_key",
+            "label": "AI (GPT/OpenAI)",
+        },
+        "Gemini (Google)": {
+            "get_key": _get_gemini_api_key,
+            "call": _call_gemini,
+            "secret_name": "gemini_api_key",
+            "label": "AI (Gemini/Google)",
+        },
+        "Groq": {
+            "get_key": _get_groq_api_key,
+            "call": _call_groq,
+            "secret_name": "groq_api_key",
+            "label": "AI (Groq)",
+        },
+    }
+
+    def generate_ai_recommendation(context, rule_based, ai_source="GPT (OpenAI)"):
+        """Minta narasi & rekomendasi geoteknik dari salah satu provider AI
+        (dipilih lewat `ai_source`), berbasis angka HASIL RUNNING segmen ini
+        (bukan template tetap) — tiap segmen akan mendapat narasi berbeda
+        menyesuaikan kombinasi angka aktualnya.
 
         `rule_based` (dict dari generate_recommendation) dipakai sebagai fallback
         DAN sebagai anchor status/level supaya narasi AI tetap konsisten dengan
         klasifikasi TARP/status yang deterministik.
         """
 
-        api_key = _get_anthropic_api_key()
+        provider = _AI_PROVIDERS.get(ai_source, _AI_PROVIDERS["GPT (OpenAI)"])
+        api_key = provider["get_key"]()
 
         fallback = {
             "narrative": rule_based["narrative"],
             "recommendations": rule_based["recommendations"],
-            "source": "rule-based (AI belum aktif — set st.secrets['anthropic_api_key'] untuk mengaktifkan narasi AI dinamis)"
+            "source": (
+                f"rule-based (AI '{ai_source}' belum aktif — set "
+                f"st.secrets['{provider['secret_name']}'] untuk mengaktifkan narasi AI dinamis)"
+            )
         }
 
         if not api_key:
@@ -2678,40 +3828,14 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
 """
 
         try:
-            resp = requests.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json"
-                },
-                json={
-                    "model": "claude-sonnet-4-6",
-                    "max_tokens": 1000,
-                    "messages": [{"role": "user", "content": prompt}]
-                },
-                timeout=30
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            text = "".join(
-                block.get("text", "") for block in data.get("content", [])
-                if block.get("type") == "text"
-            ).strip()
-            text = text.replace("```json", "").replace("```", "").strip()
-
-            import json as _json
-            parsed = _json.loads(text)
-
-            if not parsed.get("narrative") or not parsed.get("recommendations"):
-                raise ValueError("Respons AI tidak lengkap")
-
-            parsed["source"] = "AI (Claude) — dihasilkan dari angka hasil running segmen ini"
+            raw_text = provider["call"](prompt, api_key)
+            parsed = _parse_ai_json_reply(raw_text)
+            parsed["source"] = f"{provider['label']} — dihasilkan dari angka hasil running segmen ini"
             return parsed
 
         except Exception as e:
             fallback["narrative"] += (
-                f"\n\n[Catatan: narasi AI gagal diambil ({e}), menampilkan hasil rule-based sebagai fallback.]"
+                f"\n\n[Catatan: narasi AI ({ai_source}) gagal diambil ({e}), menampilkan hasil rule-based sebagai fallback.]"
             )
             return fallback
 
@@ -2728,7 +3852,32 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
     # sekali), supaya blok ini tetap tampil & re-render di rerun berikutnya --
     # termasuk saat klik-peta -- alih-alih ikut hilang mengikuti status tombol
     # yang cuma valid untuk satu rerun.
-    if st.button("RUN ANALYSIS") or st.session_state.get("analysis_done", False):
+    #
+    # PERBAIKAN PERFORMA (menjawab keluhan "loading tambah lama"): sebelumnya,
+    # KARENA gerbang blok ini "menempel" lewat analysis_done, seluruh isi blok --
+    # termasuk rekonstruksi terrain, hidrologi, erosion assessment, DAN 5+
+    # pemanggilan pio.write_image() (kaleido, render 3D/2D lewat headless
+    # Chromium, berat) per segmen -- ikut dieksekusi ULANG di SETIAP rerun
+    # Streamlit, yaitu di SETIAP interaksi apa pun di app (buka panel chat,
+    # edit tabel ground-truth, ganti dropdown segmen, dst), bukan cuma saat
+    # tombol RUN ANALYSIS benar-benar diklik. Sekarang status klik tombol
+    # disimpan ke variabel run_button_clicked, dan dipakai di bawah untuk
+    # membatasi pio.write_image() supaya HANYA re-export saat memang baru
+    # diklik (atau file PNG-nya belum pernah ada) -- rerun lain tinggal pakai
+    # file PNG yang sudah ada, sehingga jauh lebih cepat.
+    st.selectbox(
+        "Sumber AI untuk narasi & rekomendasi rekayasa",
+        list(_AI_PROVIDERS.keys()),
+        key="ai_source_choice",
+        help=(
+            "Dipakai untuk menghasilkan narasi & rekomendasi rekayasa tiap segmen "
+            "berdasarkan angka hasil running. Kalau API key sumber terpilih belum "
+            "diisi di st.secrets, otomatis fallback ke narasi rule-based."
+        ),
+    )
+
+    run_button_clicked = st.button(_t("RUN ANALYSIS", "RUN ANALYSIS"))
+    if run_button_clicked or st.session_state.get("analysis_done", False):
 
         st.session_state["analysis_done"] = True
         st.session_state["segment_results"] = {}
@@ -2799,7 +3948,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
             st.caption(f"Jenis kondisi: **{design_type}**  |  Metode: **{analysis_method}**")
 
             if not kontur_dxf:
-                st.error(f"[{seg_label}] Upload Kontur DXF dulu — segmen ini dilewati.")
+                st.error(_t(f"[{seg_label}] Upload Kontur DXF dulu — segmen ini dilewati.", f"[{seg_label}] Upload contour DXF first — this segment is skipped."))
                 continue
 
             if is_sub_segment and not boundary_dxf:
@@ -2842,7 +3991,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
             z_all = np.array(z_all)
 
             if len(x_all) < 10:
-                st.error("Kontur tidak terbaca")
+                st.error(_t("Kontur tidak terbaca", "Contour could not be read"))
                 continue
 
             # ================= DIAGNOSTIK KONTUR (verifikasi sebelum surface dibangun) =================
@@ -2853,7 +4002,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                 dcol3.metric("Titik blunder (Z beda di XY sama)", f"{contour_diag['n_blunder_points']:,}")
 
                 if contour_diag.get("n_points_added_densify", 0) > 0:
-                    st.caption(
+                    _ui_caption(
                         f"+{contour_diag['n_points_added_densify']:,} titik tambahan disisipkan otomatis "
                         f"di sepanjang segmen polyline yang panjangnya > "
                         f"{contour_diag.get('densify_max_seg_len', 0):.2f} m (garis DXF ikut dimodelkan "
@@ -2873,14 +4022,14 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                         "atau gunakan opsi 'ambil elevasi dari nama layer' jika layer Anda mengikuti konvensi penamaan angka."
                     )
                 elif contour_diag["n_layer_elevation_fallback"] > 0:
-                    st.warning(
+                    _ui_warning(
                         f"{contour_diag['n_layer_elevation_fallback']} entity elevasinya diambil dari nama layer "
                         f"(bukan dari geometri Z). Contoh: {contour_diag['layer_elevation_hints'][:5]}. "
                         "Mohon cross-check apakah ini benar sebelum melanjutkan."
                     )
 
                 if contour_diag["n_blunder_points"] > 0:
-                    st.warning(
+                    _ui_warning(
                         f"Ditemukan {contour_diag['n_blunder_points']} titik dengan koordinat X,Y hampir sama "
                         "tetapi elevasi Z berbeda >1cm — indikasi kesalahan digitasi/duplikasi layer kontur. "
                         f"Contoh (x, y, z1, z2): {contour_diag['blunder_sample']}"
@@ -2911,20 +4060,29 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                 return 1.0 / (nn_dist * 2.5)
 
             if boundary_dxf:
-                boundary = read_boundary_polygon(boundary_dxf)
+                boundary = read_boundary_polygon(boundary_dxf, debug_label=f"Boundary DXF - {seg_label}")
                 boundary = fix_geom(boundary)
             else:
                 alpha_est = _estimate_alpha(pts)
                 try:
                     boundary = alphashape.alphashape(pts, alpha_est)
+                    # PERBAIKAN ("area pasir berspot-spot cuma muncul 1 spot"):
+                    # dulu di sini dicek `hasattr(boundary, "exterior")` -- tapi
+                    # MultiPolygon (hasil wajar kalau titik kontur memang
+                    # membentuk beberapa spot terpisah) TIDAK PUNYA atribut
+                    # `.exterior` sama sekali, jadi cek ini SELALU gagal untuk
+                    # MultiPolygon dan diam-diam jatuh ke except di bawah, yang
+                    # menggantinya dengan SATU convex hull gabungan -- itu sebabnya
+                    # spot-spot yang terpisah melebur jadi satu boundary besar.
+                    # Sekarang MultiPolygon dianggap valid juga (tidak dipaksa
+                    # jadi satu Polygon).
                     if (boundary is None or boundary.is_empty
-                            or not hasattr(boundary, "exterior")
-                            or boundary.exterior is None):
+                            or boundary.geom_type not in ("Polygon", "MultiPolygon")):
                         raise ValueError("alpha-shape kosong/tidak valid")
                 except Exception:
                     # fallback aman: convex hull (lebih kasar tapi selalu valid)
                     boundary = Polygon(pts).convex_hull
-                    st.info(
+                    _ui_info(
                         f"[{seg_label}] Auto-boundary (alpha-shape adaptif) gagal membentuk poligon "
                         "yang valid dari titik kontur — menggunakan convex hull sebagai fallback. "
                         "Untuk batas area yang presisi mengikuti bentuk DAS asli, upload DXF boundary terpisah."
@@ -2940,7 +4098,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
             # tengah permukaan yang seharusnya menyambung). Lubang kecil (<3% luas
             # total polygon) ditutup otomatis; lubang besar tetap dipertahankan
             # (kemungkinan memang area yang sengaja dikecualikan, mis. kolam/pond).
-            def _tutup_lubang_kecil(poly, rasio_luas_min=0.03):
+            def _tutup_lubang_kecil_1(poly, rasio_luas_min=0.03):
                 try:
                     if poly.geom_type != "Polygon" or not poly.interiors:
                         return poly, 0
@@ -2959,17 +4117,32 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                 except Exception:
                     return poly, 0
 
+            def _tutup_lubang_kecil(geom, rasio_luas_min=0.03):
+                # Boundary bisa berupa banyak spot terpisah (MultiPolygon) --
+                # proses lubang kecil per-spot lalu gabungkan lagi hasilnya.
+                if geom is None or geom.is_empty:
+                    return geom, 0
+                if geom.geom_type == "Polygon":
+                    return _tutup_lubang_kecil_1(geom, rasio_luas_min)
+                if geom.geom_type == "MultiPolygon":
+                    hasil = []
+                    total_ditutup = 0
+                    for g in geom.geoms:
+                        g2, n = _tutup_lubang_kecil_1(g, rasio_luas_min)
+                        hasil.append(g2)
+                        total_ditutup += n
+                    return unary_union(hasil), total_ditutup
+                return geom, 0
+
             boundary, _n_lubang_ditutup = _tutup_lubang_kecil(boundary)
             if _n_lubang_ditutup > 0:
-                st.info(
+                _ui_info(
                     f"[{seg_label}] Terdeteksi {_n_lubang_ditutup} lubang kecil pada boundary hasil "
                     "deteksi otomatis (kemungkinan artefak alpha-shape akibat kerapatan titik kontur "
                     "tidak merata) — lubang tersebut ditutup otomatis supaya permukaan 3D menyambung. "
                     "Kalau memang ada area yang SENGAJA berlubang (mis. kolam/pond di tengah area), "
                     "upload DXF Boundary manual agar bentuknya presisi sesuai desain."
                 )
-
-            bx, by = boundary.exterior.xy
 
             # ================= RESOLUSI GRID & SMOOTHING (adaptif + bisa diatur user) =================
 
@@ -3049,7 +4222,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
             z_in = _df_clean["z"].to_numpy()
 
             if _n_cluster_blunder > 0:
-                st.info(
+                _ui_info(
                     f"[{seg_label}] {_n_cluster_blunder} titik blunder (X,Y hampir sama, Z berbeda "
                     f"jauh, radius toleransi ≈{_snap_tol:.3f} m) dibersihkan otomatis sebelum "
                     "interpolasi permukaan (diambil median Z per kelompok) — sebelumnya titik-titik "
@@ -3147,7 +4320,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                 )
 
                 if not r24_mm:
-                    st.warning(
+                    _ui_warning(
                         f"[{seg_label}] Perhitungan Rational Method+Manning diaktifkan tapi data "
                         "curah hujan (R24) belum tersedia — ambil data hujan dulu di bagian "
                         "'Data Curah Hujan' atau isi manual. Memakai kecepatan/kedalaman manual sebagai fallback."
@@ -3196,7 +4369,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                                 "agar kedalaman normal turun."
                             )
 
-                        st.caption(
+                        _ui_caption(
                             f"R24 dipakai: {r24_mm:.1f} mm × Extreme Rainfall Factor {rain_factor:.1f} = "
                             f"{r24_mm_extreme:.1f} mm | C={runoff_c:.2f} | tc={tc_hours:.2f} jam | "
                             f"n={manning_n:.3f} | b={channel_b:.1f} m | z={channel_z:.1f} | "
@@ -3251,6 +4424,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
             # ================= FLOW =================
 
             flow_paths = []
+            flow_stop_reasons = []
 
             flow_count = np.zeros_like(
                 grid_z
@@ -3262,8 +4436,22 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
             # di cabang Hujan sehingga tidak tersedia saat trace_multiple_flow() perlu
             # tahu seberapa besar tangkapan air di tiap sel untuk merepresentasikan
             # aliran yang makin tebal ke arah hilir.
-            with st.spinner(f"Menghitung D8 flow accumulation ({seg_label})..."):
-                flow_acc_grid = compute_flow_accumulation_d8(grid_z, inside, dx, dy)
+            #
+            # PERBAIKAN ("aliran mentok di 'sink asli' padahal channel di lapangan/
+            # DXF masih menyambung jauh ke bawah"): D8 receiver SEBELUMNYA dihitung
+            # langsung dari grid_z mentah -- cekungan kecil hasil artefak interpolasi
+            # griddata (umum terjadi di area data kontur/survei jarang) langsung
+            # dianggap "sink asli" dan seluruh jalur funnel ke situ & berhenti,
+            # walau secara topografi riil channel-nya masih lanjut. Sekarang grid_z
+            # di-"fill" dulu (depression filling / priority-flood, spt ArcGIS Fill)
+            # KHUSUS untuk menentukan ARAH routing -- elevasi asli (grid_z) tetap
+            # dipakai apa adanya untuk ditampilkan (path_z/hover/mesh), cuma arah
+            # alirannya yang dikoreksi supaya melewati cekungan kecil itu.
+            with st.spinner(f"Mengisi cekungan artefak & menghitung D8 flow accumulation ({seg_label})..."):
+                _grid_z_filled = fill_depressions(grid_z, inside)
+                flow_acc_grid, _d8_recv_r, _d8_recv_c, _d8_has_recv = (
+                    compute_flow_accumulation_d8(_grid_z_filled, inside, dx, dy)
+                )
             flow_acc_grid[~inside] = 0.0
 
             if (
@@ -3286,6 +4474,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                 _main_sid_src2 = st.session_state["segments"][0]
                 _main_res_src = st.session_state.get("segment_results", {}).get(_main_sid_src2)
                 flow_paths = []
+                flow_stop_reasons = []  # sub-segmen tidak trace baru, tidak ada diagnosis sendiri
                 if _main_res_src:
                     for _fp in _main_res_src.get("flow_paths", []):
                         _fpx, _fpy, _fpz, _fpd = _fp
@@ -3310,7 +4499,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                         velocity_hulu
                     )
                     if _arrive_depths:
-                        st.caption(
+                        _ui_caption(
                             f"Aliran dari Segmen 1 (Main) memasuki sub-segmen ini "
                             f"({seg_label}) — estimasi kedalaman air ≈ "
                             f"{np.mean(_arrive_depths):.2f} m pada velocity hulu "
@@ -3318,7 +4507,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                             "bukan sumber air baru yang terpisah)."
                         )
                 else:
-                    st.warning(
+                    _ui_warning(
                         f"Jalur aliran dari Segmen 1 (Main) belum melewati boundary "
                         f"sub-segmen '{seg_label}'. Cek apakah boundary sub-segmen ini "
                         "memang dilalui aliran dari titik hulu yang dipilih di Segmen 1 "
@@ -3359,10 +4548,10 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                         ))
                         _pick_legend_shown = True
 
-                    # boundary area kajian
-                    _pbx, _pby = boundary.exterior.xy
+                    # boundary area kajian (bisa lebih dari satu spot/boundary)
+                    _pbx, _pby = _boundary_xy_flat(boundary)
                     fig_pick.add_trace(go.Scatter(
-                        x=list(_pbx), y=list(_pby), mode="lines",
+                        x=_pbx, y=_pby, mode="lines",
                         line=dict(color="magenta", width=2), name="Boundary",
                         hoverinfo="skip",
                     ))
@@ -3403,7 +4592,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                     _pick_key = f"flow_click_map_{sid}"
                     try:
                         _ev = st.plotly_chart(
-                            fig_pick, use_container_width=True,
+                            fig_pick, width="stretch",
                             on_select="rerun", selection_mode="points",
                             key=_pick_key,
                         )
@@ -3417,8 +4606,8 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                         # fallback untuk versi Streamlit lama yang belum mendukung on_select
                         # di st.plotly_chart -- tetap tampilkan peta (statis, tanpa klik),
                         # dan beri tahu user cara mengaktifkan fitur klik.
-                        st.plotly_chart(fig_pick, use_container_width=True)
-                        st.warning(
+                        st.plotly_chart(fig_pick, width="stretch")
+                        _ui_warning(
                             "Versi Streamlit di server ini belum mendukung klik-pilih pada grafik "
                             "(butuh Streamlit >= 1.35 untuk parameter on_select). Update Streamlit "
                             "untuk mengaktifkan fitur klik-di-peta, atau gunakan mode ketik koordinat manual."
@@ -3426,13 +4615,13 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
 
                     _clicked_xy = st.session_state.get(f"flow_click_xy_{sid}")
                     if _clicked_xy is None:
-                        st.warning(
+                        _ui_warning(
                             f"Belum ada titik yang diklik untuk {seg_label} — klik salah satu titik "
                             "di peta di atas dulu untuk melanjutkan simulasi aliran segmen ini."
                         )
                         continue
                     point_x, point_y = _clicked_xy
-                    st.success(f"Titik aliran terpilih: X = {point_x:.3f}, Y = {point_y:.3f}")
+                    st.success(_t(f"Titik aliran terpilih: X = {point_x:.3f}, Y = {point_y:.3f}", f"Selected flow point: X = {point_x:.3f}, Y = {point_y:.3f}"))
 
                 if not boundary.contains(
                     Point(point_x, point_y)
@@ -3486,7 +4675,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                             _trace_boundary = boundary
                             _trace_inside = inside
 
-                flow_paths = trace_multiple_flow(
+                flow_paths, flow_stop_reasons = trace_multiple_flow(
                     point_x,
                     point_y,
                     grid_x,
@@ -3499,6 +4688,32 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                     depth0=st.session_state.get(f"point_depth_{sid}", 0.2),
                     flow_acc=flow_acc_grid
                 )
+
+                # DIAGNOSIS ("kenapa aliran stop separuh, tidak sampai ujung channel?"):
+                # tampilkan alasan berhenti tiap jalur (bukan cuma diam2 stop) supaya
+                # kalau ada jalur yang berhenti karena "sink/cekungan" atau "NaN" jauh
+                # sebelum benar2 mencapai tepi boundary, itu langsung kelihatan di sini
+                # -- bukan cuma dugaan dari tampilan visual saja.
+                if flow_stop_reasons:
+                    _n_boundary = sum(
+                        1 for r in flow_stop_reasons
+                        if r["reason"].startswith("keluar")
+                    )
+                    _n_short = sum(
+                        1 for r in flow_stop_reasons
+                        if not r["reason"].startswith("keluar")
+                    )
+                    with st.expander(
+                        f"Diagnosis jalur aliran ({sid}) — "
+                        f"{_n_boundary} dari {len(flow_stop_reasons)} jalur mencapai tepi area, "
+                        f"{_n_short} berhenti lebih awal",
+                        expanded=(_n_short > 0)
+                    ):
+                        for _i, _r in enumerate(flow_stop_reasons):
+                            st.write(
+                                f"Jalur #{_i+1}: berhenti setelah ≈{_r['distance']:.1f} satuan "
+                                f"({_r['n_points']} titik) — {_r['reason']}"
+                            )
 
             # ================= FLOW MASK & FLOW ACCUMULATION (D8, seluruh grid) =================
 
@@ -3899,7 +5114,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
             top10.insert(2, "Segmen", seg_label)
 
             st.markdown("**Sepuluh Titik Prioritas Mitigasi (setara Tabel 8 makalah acuan)**")
-            st.caption(
+            _ui_caption(
                 "Jenis risiko dominan diklasifikasi otomatis dari kombinasi: probabilitas deposisi "
                 "(Sedimentasi), flow density × risk score (Overflow), dan kemiringan lokal (Erosi "
                 "Tebing vs Erosi Dasar). Ambang kemiringan dihitung adaptif dari persentil ke-70 "
@@ -3909,7 +5124,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                               "JenisRisikoDominan", "RiskScore", "Rekomendasi"]
             st.dataframe(
                 top10[_display_cols].round(3),
-                use_container_width=True
+                width="stretch"
             )
 
             _risk_type_colors = {
@@ -3929,9 +5144,30 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                 xaxis_title="Risk Index", height=420, barmode="overlay",
                 yaxis=dict(autorange="reversed")
             )
-            st.plotly_chart(fig_priority, use_container_width=True)
+            st.plotly_chart(fig_priority, width="stretch")
 
-            st.subheader(
+            # ================= EXPORT PNG "SEBARAN RISK INDEX" UNTUK LAPORAN PDF =================
+            # Sebelumnya chart ini HANYA tampil interaktif di layar (st.plotly_chart) dan
+            # tidak pernah disimpan sebagai gambar statis -- akibatnya tidak pernah ikut
+            # masuk ke GENERATE EXECUTIVE REPORT. Sekarang di-export sekali di sini lalu
+            # path-nya disimpan ke segment_results supaya bisa dipakai ulang saat generate PDF.
+            #
+            # PERBAIKAN PERFORMA: hanya re-export (panggil kaleido, yang berat) kalau memang
+            # baru diklik RUN ANALYSIS atau file PNG-nya belum pernah ada. Rerun lain (chat,
+            # edit tabel ground-truth, dsb) tinggal pakai file yang sudah ada -> jauh lebih cepat.
+            risk_index_chart_path = f"RiskIndexDistribution_{sid}.png"
+            try:
+                if run_button_clicked or not os.path.exists(risk_index_chart_path):
+                    pio.write_image(fig_priority, risk_index_chart_path, format="png",
+                                     width=1300, height=550, scale=2)
+            except Exception as _e_riskidx_png:
+                risk_index_chart_path = None
+                _ui_caption(
+                    f"Catatan: gagal membuat snapshot 'Sebaran Risk Index' untuk laporan PDF "
+                    f"({_e_riskidx_png}). Pastikan paket 'kaleido' terpasang (pip install -U kaleido)."
+                )
+
+            _sub_header(
                 "Numerical Modelling"
             )
 
@@ -3961,39 +5197,144 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                     )
                 )
 
+            # PERBAIKAN ("3D chart jadi blank/putih saat di-rotate, khusus mode Point
+            # Source"): sebelumnya SETIAP titik di sepanjang tiap jalur aliran (bisa
+            # ribuan titik x sampai 20 jalur = puluhan ribu marker individual, masing2
+            # ukurannya beda2 lewat array marker_sizes) digambar sebagai
+            # mode="lines+markers". Itu jauh lebih berat dari kapasitas WebGL browser
+            # -- begitu chart di-rotate, GPU/browser harus rebuild seluruh buffer dari
+            # sudut baru, WebGL context langsung "lost", dan Plotly tidak auto-recover
+            # -> kanvas jadi blank. Perhitungan/analisis (flow_mask, flow_density, dst)
+            # TETAP memakai flow_paths APA ADANYA (lengkap, tidak di-downsample) --
+            # yang dihemat cuma jumlah titik & marker yang benar2 digambar di layar.
+            _MAX_RENDER_PTS_PER_PATH = 120  # cukup halus divisualisasikan, jauh lebih ringan
+            _MAX_MARKERS_PER_PATH = 25      # marker cuma dipakai utk kesan "ketebalan air"
+
             for px, py, pz, pdepth in flow_paths:
 
                 pz_arr = np.array(pz)
                 pdepth_arr = np.array(pdepth)
+                n_pts = len(px)
+                if n_pts == 0:
+                    continue
+
                 # permukaan air digambar SEDIKIT DI ATAS permukaan tanah, setinggi
                 # ketebalan air di titik tsb (pdepth), supaya terlihat sebagai lapisan
                 # air yang punya volume/ketebalan -- bukan cuma garis tipis menempel
-                # tanah seperti sebelumnya. Ukuran marker juga ikut membesar mengikuti
-                # ketebalan (lebih tebal ke arah hilir kalau flow_acc tersedia).
+                # tanah seperti sebelumnya.
                 water_z = (pz_arr + pdepth_arr) * vertical_exaggeration
-                marker_sizes = np.clip(4 + pdepth_arr * 25, 4, 22)
+
+                # -- downsample titik GARIS (tetap sampai titik terakhir supaya jalur
+                # nyambung utuh sampai ujung, bukan terpotong) --
+                if n_pts > _MAX_RENDER_PTS_PER_PATH:
+                    _line_idx = np.unique(np.concatenate([
+                        np.linspace(0, n_pts - 1, _MAX_RENDER_PTS_PER_PATH, dtype=int),
+                        [n_pts - 1],
+                    ]))
+                else:
+                    _line_idx = np.arange(n_pts)
 
                 fig.add_trace(
                     go.Scatter3d(
-                        x=px,
-                        y=py,
-                        z=water_z,
-                        mode="lines+markers",
+                        x=np.asarray(px)[_line_idx],
+                        y=np.asarray(py)[_line_idx],
+                        z=water_z[_line_idx],
+                        mode="lines",
                         line=dict(
                             color="#00C8FF",
                             width=5
                         ),
-                        marker=dict(
-                            size=marker_sizes,
-                            color="#00C8FF",
-                            opacity=0.85
-                        ),
-                        customdata=pdepth_arr,
+                        customdata=pdepth_arr[_line_idx],
                         hovertemplate="Ketebalan air ≈ %{customdata:.2f} m<extra></extra>",
                         name="Aliran Air",
                         showlegend=False
                     )
                 )
+
+                # -- marker ketebalan air: subset titik JAUH lebih jarang lagi
+                # (cukup utk kesan visual "makin tebal ke hilir", tidak perlu tiap
+                # titik garis) --
+                if n_pts > _MAX_MARKERS_PER_PATH:
+                    _mk_idx = np.unique(np.concatenate([
+                        np.linspace(0, n_pts - 1, _MAX_MARKERS_PER_PATH, dtype=int),
+                        [n_pts - 1],
+                    ]))
+                else:
+                    _mk_idx = np.arange(n_pts)
+
+                marker_sizes = np.clip(4 + pdepth_arr[_mk_idx] * 25, 4, 22)
+
+                fig.add_trace(
+                    go.Scatter3d(
+                        x=np.asarray(px)[_mk_idx],
+                        y=np.asarray(py)[_mk_idx],
+                        z=water_z[_mk_idx],
+                        mode="markers",
+                        marker=dict(
+                            size=marker_sizes,
+                            color="#00C8FF",
+                            opacity=0.85
+                        ),
+                        customdata=pdepth_arr[_mk_idx],
+                        hovertemplate="Ketebalan air ≈ %{customdata:.2f} m<extra></extra>",
+                        name="Aliran Air",
+                        showlegend=False
+                    )
+                )
+
+            # FITUR BARU: tandai titik berhenti tiap jalur LANGSUNG di model 3D (bukan
+            # cuma di teks expander) -- supaya kelihatan persis DI MANA & warna apa
+            # (= kategori penyebab) tiap jalur berhenti, dibandingkan terhadap bentuk
+            # terrain/mesh di sekitarnya. Jalur yang berhenti karena "keluar boundary"
+            # (wajar, mencapai tepi area kajian) ditandai hijau; selain itu (sink,
+            # NaN, batas iterasi -- kemungkinan berhenti prematur) ditandai merah
+            # dengan simbol X besar supaya langsung mencolok saat rotate.
+            if flow_stop_reasons and len(flow_stop_reasons) == len(flow_paths):
+
+                _stop_x, _stop_y, _stop_z, _stop_color, _stop_text = [], [], [], [], []
+
+                for (px, py, pz, pdepth), _r in zip(flow_paths, flow_stop_reasons):
+
+                    if len(px) == 0:
+                        continue
+
+                    _is_boundary = _r["reason"].startswith("keluar")
+
+                    _stop_x.append(px[-1])
+                    _stop_y.append(py[-1])
+                    _stop_z.append(
+                        (pz[-1] + pdepth[-1]) * vertical_exaggeration
+                    )
+                    _stop_color.append("#2ECC71" if _is_boundary else "#FF3333")
+                    _stop_text.append(
+                        f"Jarak tempuh ≈{_r['distance']:.1f} satuan "
+                        f"({_r['n_points']} titik)<br>Alasan: {_r['reason']}"
+                    )
+
+                if _stop_x:
+                    fig.add_trace(
+                        go.Scatter3d(
+                            x=_stop_x,
+                            y=_stop_y,
+                            z=_stop_z,
+                            mode="markers",
+                            marker=dict(
+                                size=12,
+                                symbol="x",
+                                color=_stop_color,
+                                line=dict(color="white", width=2)
+                            ),
+                            text=_stop_text,
+                            hovertemplate="%{text}<extra>Titik Berhenti Aliran</extra>",
+                            name="Titik Berhenti Aliran (merah = kemungkinan prematur, hijau = wajar/tepi area)",
+                            showlegend=True
+                        )
+                    )
+                    _n_stop_marker_trace = 1
+                else:
+                    _n_stop_marker_trace = 0
+            else:
+                _n_stop_marker_trace = 0
 
             fig.update_layout(
 
@@ -4006,9 +5347,108 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
 
                 scene=dict(
                     aspectmode="data"
-                )
+                ),
+
+                # PERBAIKAN: sebelumnya legend (nama trace seperti "Overflow Risk",
+                # "Aliran Air", "DXF Asli") dan colorbar (skala warna risiko dari trace
+                # Mesh3d) sama-sama jatuh di posisi default pojok kanan atas -> teksnya
+                # saling tumpang tindih dan sulit dibaca (terlihat di screenshot user).
+                # Sekarang legend digeser ke kiri-atas, colorbar tetap di kanan, supaya
+                # tidak lagi bertabrakan.
+                legend=dict(
+                    x=0.01, y=0.99,
+                    xanchor="left", yanchor="top",
+                    bgcolor="rgba(255,255,255,0.6)",
+                ),
             )
-        
+
+            # ================= EXPORT 3 SUDUT PANDANG "NUMERICAL MODELLING" (3D) UNTUK LAPORAN PDF =================
+            # Sebelumnya chart 3D ini (fig) hanya tampil interaktif via st.plotly_chart dan
+            # TIDAK PERNAH disimpan sebagai gambar statis -- jadi tidak pernah ikut masuk ke
+            # GENERATE EXECUTIVE REPORT. Sekarang di-export 3 kali dengan sudut kamera berbeda:
+            # (1) overall/isometrik, (2) mengarah ke titik paling kritis (titik prioritas
+            # mitigasi teratas berdasarkan FlowDensity, sama dengan titik yang dipakai untuk
+            # "Zoom Titik Kritis" pada peta komposit), dan (3) sudut pandang lain (side view)
+            # supaya bentuk model 3D lebih mudah diinterpretasi dari berbagai arah.
+            numerical_modelling_view_paths = {"overall": None, "critical_point": None, "alternate": None}
+            try:
+                # PERBAIKAN BUG ("3D chart di layar jadi blank/putih setelah fitur export
+                # laporan ditambahkan"): sebelumnya kode ini memutasi LANGSUNG objek `fig`
+                # yang sama yang ditampilkan ke layar (fig.update_layout(scene_camera=...))
+                # untuk mengambil 3 snapshot sudut pandang, lalu mencoba "mengembalikan ke
+                # default" lewat fig.update_layout(scene_camera=None) di akhir. Masalahnya,
+                # di Plotly mengirim None ke update_layout itu berarti "JANGAN UBAH apa-apa"
+                # (no-op), BUKAN "hapus/reset" -- jadi reset itu tidak pernah benar-benar
+                # terjadi, dan fig yang ditampilkan ke layar (st.plotly_chart di bawah) ikut
+                # "ketiban" sudut pandang terakhir yang dipakai untuk export laporan (sudut
+                # ekstrem hampir sejajar tanah), sehingga tampak putih kosong.
+                # Sekarang export memakai SALINAN terpisah (deepcopy) dari fig, supaya objek
+                # asli yang ditampilkan ke layar tidak pernah tersentuh sama sekali.
+                import copy as _copy_mod
+                _fig_export = _copy_mod.deepcopy(fig)
+
+                _gx_min, _gx_max = float(np.nanmin(grid_x)), float(np.nanmax(grid_x))
+                _gy_min, _gy_max = float(np.nanmin(grid_y)), float(np.nanmax(grid_y))
+                _cx_grid = (_gx_min + _gx_max) / 2.0
+                _cy_grid = (_gy_min + _gy_max) / 2.0
+
+                _nm_overall_path = f"NumericalModelling_Overall_{sid}.png"
+                _nm_critical_path = f"NumericalModelling_CriticalPoint_{sid}.png"
+                _nm_alternate_path = f"NumericalModelling_Alternate_{sid}.png"
+                # PERBAIKAN PERFORMA: sama seperti export lain -- ketiga render kaleido 3D ini
+                # (paling berat di antara semua export, karena scene 3D beresolusi tinggi) hanya
+                # dibuat ulang saat RUN ANALYSIS benar-benar diklik, atau kalau file-nya belum ada.
+                _nm_need_export = run_button_clicked or not (
+                    os.path.exists(_nm_overall_path)
+                    and os.path.exists(_nm_critical_path if len(top10) > 0 else _nm_overall_path)
+                    and os.path.exists(_nm_alternate_path)
+                )
+
+                # -- (1) VIEW OVERALL: sudut isometrik standar, memperlihatkan seluruh model --
+                if _nm_need_export:
+                    _fig_export.update_layout(scene_camera=dict(eye=dict(x=1.45, y=1.45, z=1.15)))
+                    pio.write_image(_fig_export, _nm_overall_path,
+                                     format="png", width=1500, height=950, scale=2)
+                numerical_modelling_view_paths["overall"] = _nm_overall_path
+
+                # -- (2) VIEW MENGARAH KE TITIK PALING KRITIS --
+                # Titik paling kritis = baris teratas 'top10' (sudah diurutkan berdasarkan
+                # FlowDensity tertinggi di atas). Kamera ditempatkan di sisi BERLAWANAN dari
+                # titik tsb terhadap pusat model, sehingga garis pandang kamera "menembus"
+                # pusat model MENUJU titik paling kritis.
+                if len(top10) > 0:
+                    if _nm_need_export:
+                        _crit_x_coord = float(top10.iloc[0]["X"])
+                        _crit_y_coord = float(top10.iloc[0]["Y"])
+                        _dx = _crit_x_coord - _cx_grid
+                        _dy = _crit_y_coord - _cy_grid
+                        _dist = max((_dx ** 2 + _dy ** 2) ** 0.5, 1e-6)
+                        _eye_x = -(_dx / _dist) * 1.7
+                        _eye_y = -(_dy / _dist) * 1.7
+                        _fig_export.update_layout(scene_camera=dict(
+                            eye=dict(x=_eye_x, y=_eye_y, z=0.65),
+                            center=dict(x=0, y=0, z=0),
+                        ))
+                        pio.write_image(_fig_export, _nm_critical_path,
+                                         format="png", width=1500, height=950, scale=2)
+                    numerical_modelling_view_paths["critical_point"] = _nm_critical_path
+
+                # -- (3) VIEW LAIN: sudut alternatif (side/elevation) --
+                if _nm_need_export:
+                    _fig_export.update_layout(scene_camera=dict(eye=dict(x=0.1, y=-2.0, z=0.55)))
+                    pio.write_image(_fig_export, _nm_alternate_path,
+                                     format="png", width=1500, height=950, scale=2)
+                numerical_modelling_view_paths["alternate"] = _nm_alternate_path
+
+                # `fig` asli TIDAK PERNAH diubah sama sekali di atas -- jadi tidak perlu lagi
+                # ada langkah "reset kamera" yang (seperti dijelaskan di atas) sebenarnya
+                # tidak pernah benar-benar bekerja.
+            except Exception as _e_num3d_png:
+                _ui_caption(
+                    f"Catatan: gagal membuat snapshot 'Numerical Modelling' untuk laporan PDF "
+                    f"({_e_num3d_png}). Pastikan paket 'kaleido' terpasang (pip install -U kaleido)."
+                )
+
             # PERBAIKAN: sebelumnya chart 3D ini dirender per-segmen TANPA syarat --
             # kalau ada 2 segmen (Main + 1 sub-boundary), user melihat 3 output 3D
             # sekaligus (chart Main di sini, chart Segmen-2 di sini juga saat loop
@@ -4023,7 +5463,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
             if _total_segments_now == 1:
                 st.plotly_chart(
                     fig,
-                    use_container_width=True
+                    width="stretch"
                 )
             else:
                 st.caption(
@@ -4035,7 +5475,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
 
             # ================= SIMULASI ALIRAN AIR (ANIMASI 3D) =================
             st.markdown("#### Simulasi Aliran Air (Animasi)")
-            st.caption(
+            _ui_caption(
                 "Animasi ini memutar ulang jalur aliran (streamline steepest-descent) "
                 "yang sama dengan hasil 'Numerical Modelling' di atas — bukan simulasi "
                 "hidrolik baru — divisualisasikan sebagai pergerakan titik air dari hulu "
@@ -4067,7 +5507,16 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
 
                     frame_indices = np.linspace(1, max_len, n_frames, dtype=int)
 
-                    anim_base_traces = list(fig.data[:-len(flow_paths)]) if len(flow_paths) > 0 else list(fig.data)
+                    # PENTING: sekarang tiap flow_paths menghasilkan 2 trace "Aliran Air"
+                    # (garis + marker terpisah, lihat perbaikan render di atas), bukan 1
+                    # seperti sebelumnya -- slicing harus ikut dikali 2. Ditambah 1 trace
+                    # lagi "Titik Berhenti Aliran" (fitur diagnosis) kalau ada -- kalau
+                    # tidak disesuaikan, trace2 ini ikut kebawa jadi "base" animasi.
+                    _n_trailing_flow_traces = 2 * len(flow_paths) + _n_stop_marker_trace
+                    anim_base_traces = (
+                        list(fig.data[:-_n_trailing_flow_traces])
+                        if _n_trailing_flow_traces > 0 else list(fig.data)
+                    )
 
                     frames = []
                     for f_i, cut in enumerate(frame_indices):
@@ -4106,7 +5555,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                         frames.append(go.Frame(data=anim_base_traces + frame_traces, name=str(f_i)))
 
                     fig_anim = go.Figure(
-                        data=anim_base_traces + frames[0].data[len(anim_base_traces):],
+                        data=anim_base_traces + list(frames[0].data[len(anim_base_traces):]),
                         frames=frames
                     )
 
@@ -4159,7 +5608,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                         )]
                     )
 
-                    st.plotly_chart(fig_anim, use_container_width=True)
+                    st.plotly_chart(fig_anim, width="stretch")
                     st.caption(
                         "Tekan ▶ Play untuk menjalankan animasi, atau geser slider untuk "
                         "melihat progres aliran pada frame tertentu."
@@ -4167,7 +5616,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
 
             # ================= SIMULASI HUJAN (ANIMASI: TETES JATUH + ALIRAN MULTI-TITIK) =================
             st.markdown("#### Simulasi Hujan (Animasi Tetes Jatuh + Aliran Multi-Titik)")
-            st.caption(
+            _ui_caption(
                 "Berbeda dari animasi di atas (yang cuma mengikuti 1 titik hulu), simulasi ini "
                 "mengambil beberapa titik ACAK tersebar di seluruh area kajian untuk mewakili "
                 "hujan yang jatuh merata, lalu menganimasikan tetes air jatuh dari atas ke "
@@ -4207,7 +5656,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                     valid_iy, valid_ix = np.where(inside)
 
                     if len(valid_iy) == 0:
-                        st.warning("Tidak ada sel valid di dalam boundary untuk mensimulasikan hujan.")
+                        _ui_warning("Tidak ada sel valid di dalam boundary untuk mensimulasikan hujan.")
                     else:
                         n_pick = min(n_rain_points, len(valid_iy))
                         pick_idx = rng.choice(len(valid_iy), size=n_pick, replace=False)
@@ -4217,20 +5666,27 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                             rr, cc = int(valid_iy[k]), int(valid_ix[k])
                             rx0 = float(grid_x[rr, 0])
                             ry0 = float(grid_y[0, cc])
-                            _paths = trace_multiple_flow(
+                            _paths, _ = trace_multiple_flow(
                                 rx0, ry0, grid_x, grid_y, dz_dx, dz_dy, grid_z, boundary,
                                 n_stream=1, inside=inside,
-                                depth0=0.1, flow_acc=flow_acc_grid
+                                depth0=0.1, flow_acc=flow_acc_grid,
+                                d8_recv_r=_d8_recv_r, d8_recv_c=_d8_recv_c,
+                                d8_has_recv=_d8_has_recv
                             )
                             if _paths:
                                 rain_paths.append(_paths[0])
 
                         if not rain_paths:
-                            st.warning("Gagal membangun streamline hujan untuk segmen ini.")
+                            _ui_warning("Gagal membangun streamline hujan untuk segmen ini.")
                         else:
+                            # sama seperti anim_base_traces di atas: tiap flow_paths
+                            # sekarang menghasilkan 2 trace (garis + marker), plus 1
+                            # trace "Titik Berhenti Aliran" kalau ada -- slicing harus
+                            # ikut disesuaikan.
+                            _n_trailing_flow_traces_rain = 2 * len(flow_paths) + _n_stop_marker_trace
                             base_traces_rain = (
-                                list(fig.data[:-len(flow_paths)])
-                                if len(flow_paths) > 0 else list(fig.data)
+                                list(fig.data[:-_n_trailing_flow_traces_rain])
+                                if _n_trailing_flow_traces_rain > 0 else list(fig.data)
                             )
 
                             max_len_rain = max(len(p[0]) for p in rain_paths)
@@ -4297,7 +5753,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                                 )
 
                             fig_rain_anim = go.Figure(
-                                data=base_traces_rain + frames_rain[0].data[len(base_traces_rain):],
+                                data=base_traces_rain + list(frames_rain[0].data[len(base_traces_rain):]),
                                 frames=frames_rain
                             )
 
@@ -4332,14 +5788,14 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                                 )]
                             )
 
-                            st.plotly_chart(fig_rain_anim, use_container_width=True)
-                            st.caption(
+                            st.plotly_chart(fig_rain_anim, width="stretch")
+                            _ui_caption(
                                 "Fase awal: tetes air hujan 'jatuh' dari atas ke permukaan tanah di "
                                 "beberapa titik acak. Fase berikutnya: air tsb mengalir ke hilir mengikuti "
                                 "topografi. Tekan ▶ Play atau geser slider."
                             )
 
-            st.subheader(
+            _sub_header(
                 "2D Risk Map"
             )
 
@@ -4363,10 +5819,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                     )
                 )
 
-            bx, by = boundary.exterior.xy
-
-            bx = np.array(bx)
-            by = np.array(by)
+            bx, by = _boundary_xy_flat(boundary)
 
             fig2.add_trace(
                 go.Scatter(
@@ -4482,8 +5935,43 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
 
             st.plotly_chart(
                 fig2,
-                use_container_width=True
+                width="stretch"
             )
+
+            # ================= EXPORT PNG "2D RISK MAP" UNTUK LAPORAN PDF =================
+            # Sebelumnya fig2 hanya tampil interaktif di layar dan tidak pernah disimpan
+            # sebagai gambar statis, sehingga tidak pernah ikut masuk ke GENERATE EXECUTIVE
+            # REPORT. Sekarang di-export sekali di sini, path-nya disimpan ke segment_results.
+            #
+            # PERBAIKAN: garis kontur DXF pada fig2 digambar putih (line=dict(color="white", ...))
+            # dan boundary/area lain juga terang -- di layar (background gelap Streamlit) masih
+            # kelihatan, tapi begitu diekspor ke PNG untuk PDF (background default putih) garis
+            # putih itu jadi tidak kelihatan sama sekali di atas kertas putih. Untuk versi
+            # EKSPOR SAJA (bukan chart interaktif di atas, yang tetap dibiarkan seperti semula),
+            # background diset HITAM PEKAT (bukan abu-abu) supaya semua elemen (kontur putih,
+            # boundary magenta, titik erosi/overflow/konvergensi) tetap kontras dan terbaca di
+            # laporan, sekaligus konsisten dengan tampilan gelap di layar.
+            #
+            # PERBAIKAN PERFORMA: sama seperti export lain -- hanya re-export (kaleido) saat
+            # RUN ANALYSIS benar-benar diklik atau file-nya belum ada.
+            risk_map_2d_path = f"RiskMap2D_{sid}.png"
+            try:
+                if run_button_clicked or not os.path.exists(risk_map_2d_path):
+                    fig2.update_layout(
+                        paper_bgcolor="#000000",
+                        plot_bgcolor="#000000",
+                        xaxis=dict(gridcolor="#3a3a3a", zerolinecolor="#3a3a3a"),
+                        yaxis=dict(gridcolor="#3a3a3a", zerolinecolor="#3a3a3a"),
+                        font=dict(color="#f0f0f0"),
+                    )
+                    pio.write_image(fig2, risk_map_2d_path, format="png",
+                                     width=1300, height=1300, scale=2)
+            except Exception as _e_riskmap2d_png:
+                risk_map_2d_path = None
+                _ui_caption(
+                    f"Catatan: gagal membuat snapshot '2D Risk Map' untuk laporan PDF "
+                    f"({_e_riskmap2d_png}). Pastikan paket 'kaleido' terpasang (pip install -U kaleido)."
+                )
 
             # ================= PETA RISIKO + ORTHOPHOTO OVERLAY (OPSIONAL) =================
             if orthophoto_data is not None:
@@ -4518,9 +6006,12 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                         # 3) Garis DXF asli (kontur) teroverlay paling atas
                         _plot_dxf_overlay_2d(_ax_ortho, contours, color="black", linewidth=0.5, alpha=0.85)
 
-                        # 4) Boundary area kajian
-                        _bx_o, _by_o = boundary.exterior.xy
-                        _ax_ortho.plot(_bx_o, _by_o, color="magenta", linewidth=2.0, zorder=6, label="Boundary")
+                        # 4) Boundary area kajian (gambar semua spot/boundary kalau lebih dari satu)
+                        for _i_bo, (_bx_o, _by_o) in enumerate(_iter_boundary_rings(boundary)):
+                            _ax_ortho.plot(
+                                _bx_o, _by_o, color="magenta", linewidth=2.0, zorder=6,
+                                label="Boundary" if _i_bo == 0 else None,
+                            )
 
                         _ax_ortho.set_title(f"Peta Risiko Erosi/Sedimentasi + DXF di atas Orthophoto — {seg_label}",
                                              fontsize=11, fontweight="bold")
@@ -4535,14 +6026,100 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                         _ax_ortho.set_xlim(x_all.min() - _pad_x, x_all.max() + _pad_x)
                         _ax_ortho.set_ylim(y_all.min() - _pad_y, y_all.max() + _pad_y)
 
-                        st.pyplot(_fig_ortho, use_container_width=True)
+                        st.pyplot(_fig_ortho, width="stretch")
                         plt.close(_fig_ortho)
 
-                    st.caption(
+                    _ui_caption(
                         "Orthophoto tidak di-reproject otomatis — pastikan sistem koordinatnya sama "
                         "dengan DXF. Kalau posisi orthophoto terlihat bergeser/tidak pas dengan garis "
                         "DXF, kemungkinan orthophoto dan DXF memakai datum/zona koordinat yang berbeda."
                     )
+
+            # ================= PETA RISIKO + CITRA SATELIT ONLINE (OPSIONAL) =================
+            # Alternatif dari orthophoto upload di atas: ambil citra satelit terbaru
+            # langsung dari Esri World Imagery (gratis, tanpa API key, auto-update),
+            # jadi tidak perlu upload file orthophoto manual tiap kali. Karena grid
+            # Lokal proyek ini punya rotasi signifikan (~57 derajat) terhadap UTM,
+            # seluruh geometri (kontur DXF, boundary, grid risiko) ditransformasi dulu
+            # ke UTM Zone 50S baru ditumpuk di atas citra satelit (yang selalu "north-up").
+            utm_satellite_data = None
+            utm_contours = None
+            utm_boundary_xy = None
+            utm_grid_x = None
+            utm_grid_y = None
+
+            show_sat_overlay = st.checkbox(
+                f"Tampilkan peta rainbow erosi/sedimentasi + garis DXF teroverlay di atas "
+                f"Citra Satelit Online (Esri, auto-update) — {seg_label}",
+                value=False,
+                key=f"show_sat_overlay_{sid}",
+            )
+            if show_sat_overlay:
+                with st.spinner(f"[{seg_label}] Transformasi koordinat Lokal -> UTM & mengambil citra satelit..."):
+                    utm_x_all, utm_y_all = _lokal_to_utm_xy(x_all, y_all)
+                    utm_extent_bbox = (
+                        float(np.nanmin(utm_x_all)), float(np.nanmax(utm_x_all)),
+                        float(np.nanmin(utm_y_all)), float(np.nanmax(utm_y_all)),
+                    )
+
+                    # cache per-segmen supaya tidak fetch ulang tiap rerun kalau extent-nya sama
+                    _sat_cache_key = f"sat_basemap_{sid}"
+                    _sat_sig = tuple(round(v, 1) for v in utm_extent_bbox)
+                    _cached_sat = st.session_state.get(_sat_cache_key)
+                    if _cached_sat is not None and _cached_sat.get("sig") == _sat_sig:
+                        utm_satellite_data = _cached_sat.get("data")
+                    else:
+                        utm_satellite_data = _fetch_satellite_basemap_utm(utm_extent_bbox)
+                        st.session_state[_sat_cache_key] = {"sig": _sat_sig, "data": utm_satellite_data}
+
+                    utm_contours = _contours_lokal_to_utm(contours)
+                    utm_boundary_xy = [
+                        _ring_lokal_to_utm(_bx_r, _by_r) for _bx_r, _by_r in _iter_boundary_rings(boundary)
+                    ]
+                    utm_grid_x, utm_grid_y = _grid_lokal_to_utm(grid_x, grid_y)
+
+                if utm_satellite_data is not None:
+                    _fig_sat, _ax_sat = plt.subplots(figsize=(12, 9))
+
+                    _ax_sat.imshow(
+                        utm_satellite_data["rgb"],
+                        extent=utm_satellite_data["extent"],
+                        origin="upper",
+                        zorder=1,
+                    )
+                    _ax_sat.contourf(
+                        utm_grid_x, utm_grid_y, zone_map, levels=15,
+                        cmap="RdYlGn_r", alpha=0.55, zorder=2,
+                    )
+                    _ax_sat.contourf(
+                        utm_grid_x, utm_grid_y, sediment_map, levels=[0.5, 0.7, 0.85, 1],
+                        cmap="Blues", alpha=0.40, zorder=3,
+                    )
+                    _plot_dxf_overlay_2d(_ax_sat, utm_contours, color="black", linewidth=0.5, alpha=0.85)
+                    for _i_bs_o, (_ubx, _uby) in enumerate(utm_boundary_xy):
+                        _ax_sat.plot(
+                            _ubx, _uby, color="magenta", linewidth=2.0, zorder=6,
+                            label="Boundary" if _i_bs_o == 0 else None,
+                        )
+
+                    _ax_sat.set_title(
+                        f"Peta Risiko Erosi/Sedimentasi + DXF di atas Citra Satelit Online — {seg_label}",
+                        fontsize=11, fontweight="bold"
+                    )
+                    _ax_sat.set_xlabel("Easting UTM 50S (m)")
+                    _ax_sat.set_ylabel("Northing UTM 50S (m)")
+                    _ax_sat.set_aspect("equal", adjustable="box")
+                    _ax_sat.legend(loc="upper right", fontsize=8)
+
+                    st.pyplot(_fig_sat, width="stretch")
+                    plt.close(_fig_sat)
+
+                _ui_caption(
+                    "Citra satelit diambil otomatis dari Esri World Imagery (auto-update, "
+                    "gratis tanpa API key) berdasarkan hasil konversi koordinat Lokal -> UTM Zone 50S. "
+                    "Kalau posisi desain terlihat melenceng dari kondisi lapangan sebenarnya, "
+                    "kemungkinan zona UTM proyek ini bukan 50S — cek parameter _COORD_UTM_EPSG di kode."
+                )
 
             erosion_area = (
                 np.sum(zone_map > 1.5)
@@ -4645,7 +6222,8 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                     "surface_rmse": "N/A (validasi RMSE permukaan belum tersedia di modul ini)",
                     "hydraulics_text": hydro_text_for_ai
                 },
-                rule_based=rekomendasi
+                rule_based=rekomendasi,
+                ai_source=st.session_state.get("ai_source_choice", "GPT (OpenAI)")
             )
 
             st.markdown("#### Rekayasa & Rekomendasi Geoteknik")
@@ -4692,33 +6270,59 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
             # running nyata segmen ini (kecepatan, overflow, konvergensi, hasil
             # Manning's/Rational Method) -- begitu API key terpasang, narasi AI
             # otomatis "terkoneksi" dengan angka-angka tsb, tidak perlu ubah apa pun
-            # lagi di sini.
+            # lagi di sini. Instruksi di bawah mengikuti sumber AI yang SEDANG
+            # dipilih di dropdown "Sumber AI" (bisa GPT/Gemini/Groq).
             if ai_reco["source"].startswith("rule-based"):
-                with st.expander("⚙ Aktifkan narasi AI (Claude) untuk rekomendasi ini", expanded=False):
+                _sel_source = st.session_state.get("ai_source_choice", "GPT (OpenAI)")
+                _setup_info = {
+                    "GPT (OpenAI)": {
+                        "key_url": "[platform.openai.com](https://platform.openai.com/api-keys)",
+                        "akun_note": "butuh akun OpenAI + saldo/billing aktif — **bukan** login ChatGPT biasa; langganan ChatGPT Plus tidak otomatis memberi akses API. **Tidak ada tier gratis.**",
+                        "secret_name": "openai_api_key",
+                        "example_val": "sk-xxxxxxxxxxxxxxxx",
+                    },
+                    "Gemini (Google)": {
+                        "key_url": "[aistudio.google.com/apikey](https://aistudio.google.com/apikey)",
+                        "akun_note": "cukup akun Google biasa, **ada tier gratis** tanpa kartu kredit (cukup untuk pemakaian per-segmen di app ini).",
+                        "secret_name": "gemini_api_key",
+                        "example_val": "AIzaSyxxxxxxxxxxxxxxxx",
+                    },
+                    "Groq": {
+                        "key_url": "[console.groq.com/keys](https://console.groq.com/keys)",
+                        "akun_note": "cukup daftar akun Groq, **ada tier gratis** tanpa kartu kredit, inference sangat cepat (model open-source seperti Llama 3.3).",
+                        "secret_name": "groq_api_key",
+                        "example_val": "gsk_xxxxxxxxxxxxxxxx",
+                    },
+                }[_sel_source]
+
+                with st.expander(f"Aktifkan narasi AI ({_sel_source}) untuk rekomendasi ini", expanded=False):
                     st.markdown(
                         "Rekomendasi di atas masih dari mesin **rule-based** (aturan ambang deterministik). "
                         "Untuk mendapat narasi AI yang menyesuaikan angka hasil running tiap segmen "
                         "(kecepatan aliran, overflow, konvergensi, hasil Manning's/Rational Method — "
                         "semuanya sudah otomatis dikirim ke AI, tidak perlu setup tambahan selain API key), "
-                        "aktifkan dengan langkah berikut:"
+                        f"aktifkan sumber **{_sel_source}** dengan langkah berikut:"
                     )
                     st.markdown(
-                        "1. Buat/ambil API key di [console.anthropic.com](https://console.anthropic.com) "
-                        "(butuh akun Anthropic + saldo/billing aktif).\n"
+                        f"1. Buat/ambil API key di {_setup_info['key_url']} "
+                        f"({_setup_info['akun_note']})\n"
                         "2. Kalau app di-deploy di **Streamlit Community Cloud**: buka menu app → "
                         "**Settings → Secrets**, lalu tambahkan baris:\n"
                     )
-                    st.code('anthropic_api_key = "sk-ant-xxxxxxxxxxxxxxxx"', language="toml")
+                    st.code(f"{_setup_info['secret_name']} = \"{_setup_info['example_val']}\"", language="toml")
                     st.markdown(
                         "3. Kalau dijalankan lokal: buat file `.streamlit/secrets.toml` di folder project "
                         "berisi baris yang sama seperti di atas.\n"
                         "4. Simpan, lalu **reboot/rerun app** — tidak perlu ubah kode apa pun, narasi AI "
-                        "otomatis aktif begitu `st.secrets['anthropic_api_key']` terbaca."
+                        f"otomatis aktif begitu `st.secrets['{_setup_info['secret_name']}']` terbaca.\n"
+                        "5. Bisa isi ketiga-tiganya (openai_api_key, gemini_api_key, groq_api_key) sekaligus di "
+                        "Secrets, lalu tinggal pindah-pindah lewat dropdown **\"Sumber AI\"** di atas tombol "
+                        "RUN ANALYSIS tanpa perlu ubah Secrets lagi tiap ganti sumber."
                     )
-                    st.caption(
+                    _ui_caption(
                         "Jangan commit API key ke repository Git — selalu lewat Secrets/environment variable. "
                         "Kalau API key sudah dipasang tapi masih muncul rule-based, cek pesan error di "
-                        "'[Catatan: narasi AI gagal diambil ...]' pada narasi di atas untuk detail sebabnya "
+                        "'[Catatan: narasi AI ... gagal diambil ...]' pada narasi di atas untuk detail sebabnya "
                         "(mis. saldo habis, model tidak tersedia, rate limit)."
                     )
 
@@ -4770,6 +6374,11 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                 "online_rainfall_meta": st.session_state.get("online_rainfall_meta"),
                 "slope": slope,
                 "flow_density": flow_density,
+                "overflow_index": locals().get("overflow_index"),
+                "overflow_zone": locals().get("overflow_zone"),
+                "convergence_zone": locals().get("convergence_zone"),
+                "r24_mm": locals().get("r24_mm"),
+                "r24_mm_extreme": locals().get("r24_mm_extreme"),
                 "rho_water": float(rho_water),
                 "rho_soil": float(rho_soil),
                 "erodibility_M": float(erodibility_M),
@@ -4777,6 +6386,11 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                 "flow_depth": float(flow_depth),
                 "valid_mask": valid,
                 "orthophoto": orthophoto_data,
+                "satellite_basemap": utm_satellite_data,
+                "utm_contours": utm_contours,
+                "utm_boundary_xy": utm_boundary_xy,
+                "utm_grid_x": utm_grid_x,
+                "utm_grid_y": utm_grid_y,
                 "contours": contours,
                 "flow_paths": flow_paths,
                 "is_sub_segment": is_sub_segment,
@@ -4785,6 +6399,9 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                 "z_mesh": z_mesh,
                 "valid_triangles": valid_triangles,
                 "vertical_exaggeration": float(vertical_exaggeration),
+                "risk_index_chart_path": risk_index_chart_path,
+                "numerical_modelling_views": numerical_modelling_view_paths,
+                "risk_map_2d_path": risk_map_2d_path,
             }
 
         # ================= SCENE 3D GABUNGAN (SEMUA SEGMEN) =================
@@ -4817,8 +6434,8 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
         if len(_seg_results_now) >= 2:
 
             st.markdown("---")
-            st.subheader("Scene 3D Gabungan — Semua Segmen (Main + Sub-Boundary)")
-            st.caption(
+            _sub_header(_t("Scene 3D Gabungan — Semua Segmen (Main + Sub-Boundary)", "Combined 3D Scene — All Segments (Main + Sub-Boundary)"))
+            _ui_caption(
                 "Semua segmen (Main & sub-boundary) digabung jadi SATU output analisa 3D "
                 "yang sama — mesh rainbow (risiko erosi) tiap segmen digambar dalam satu "
                 "scene, bukan simulasi terpisah-pisah. Urutan tampil: Segmen 1/Main "
@@ -4972,7 +6589,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                                     for _px, _py in zip(_tcx, _tcy)
                                 ])
                             except Exception:
-                                st.warning(
+                                _ui_warning(
                                     f"Gagal memotong overlap mesh untuk {_res['label']} "
                                     "terhadap salah satu segmen berikutnya — kemungkinan "
                                     "boundary segmen tsb geometrinya tidak valid. Overlap "
@@ -5117,12 +6734,12 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                 _ve = _res.get("vertical_exaggeration", vertical_exaggeration)
                 _color = _combo_palette[_i_seg % len(_combo_palette)]
 
-                _bx, _by = _res["boundary"].exterior.xy
+                _bx, _by = _boundary_xy_flat(_res["boundary"])
                 _bz_ref = float(np.nanmax(_res["grid_z"])) * _ve
                 fig_combo.add_trace(
                     go.Scatter3d(
-                        x=list(_bx), y=list(_by),
-                        z=[_bz_ref] * len(_bx),
+                        x=_bx, y=_by,
+                        z=[_bz_ref if _v is not None else None for _v in _bx],
                         mode="lines",
                         line=dict(color=_color, width=4),
                         name=f"Boundary — {_res['label']}",
@@ -5172,7 +6789,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                 margin=dict(l=0, r=0, t=30, b=0),
             )
 
-            st.plotly_chart(fig_combo, use_container_width=True)
+            st.plotly_chart(fig_combo, width="stretch")
 
             # ---- ringkasan gabungan singkat (pelengkap, bukan pengganti detail per-segmen di bawah) ----
             _n_seg = len(_seg_results_now)
@@ -5193,1607 +6810,1888 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
 
 
     # =====================================================
-# CROSS SECTION TOOL
-# =====================================================
+    # CROSS SECTION TOOL
+    # =====================================================
 
-if st.session_state.get("analysis_done", False):
+    if st.session_state.get("analysis_done", False):
 
-    st.markdown("---")
-    st.subheader("Cross Section Analysis")
+        st.markdown("---")
+        _sub_header("Cross Section Analysis")
 
-    seg_results = st.session_state.get("segment_results", {})
+        seg_results = st.session_state.get("segment_results", {})
 
-    if seg_results:
-        seg_options = {v["label"]: k for k, v in seg_results.items()}
-        picked_label = st.selectbox(
-            "Pilih segmen untuk Cross Section & Report",
-            list(seg_options.keys())
-        )
-        picked_sid = seg_options[picked_label]
-        active = seg_results[picked_sid]
-
-        grid_x = active["grid_x"]
-        grid_y = active["grid_y"]
-        grid_z = active["grid_z"]
-        zone_map = active["zone_map"]
-        sediment_map = active["sediment_map"]
-
-        st.session_state["active_segment_label"] = picked_label
-        st.session_state["grid_x"] = grid_x
-        st.session_state["grid_y"] = grid_y
-        st.session_state["grid_z"] = grid_z
-        st.session_state["zone_map"] = zone_map
-        st.session_state["sediment_map"] = sediment_map
-        st.session_state["erosion_area"] = active["erosion_area"]
-        st.session_state["sedimentation_area"] = active["sedimentation_area"]
-        st.session_state["max_zone"] = active["max_zone"]
-        st.session_state["boundary"] = active["boundary"]
-        st.session_state["cell_area"] = active["cell_area"]
-        st.session_state["inside"] = active["inside"]
-        st.session_state["analysis_method"] = active["analysis_method"]
-    else:
-        grid_x = st.session_state["grid_x"]
-        grid_y = st.session_state["grid_y"]
-        grid_z = st.session_state["grid_z"]
-
-        zone_map = st.session_state["zone_map"]
-        sediment_map = st.session_state["sediment_map"]
-
-    section_mode = st.radio(
-        "Section Type",
-        [
-            "Straight Line",
-            "Polyline DXF"
-        ]
-    )
-
-    # ==========================================
-    # STRAIGHT LINE
-    # ==========================================
-
-    if section_mode == "Straight Line":
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-
-            x1 = st.number_input(
-                "Start X",
-                value=float(np.nanmin(grid_x))
+        if seg_results:
+            seg_options = {v["label"]: k for k, v in seg_results.items()}
+            picked_label = st.selectbox(
+                "Pilih segmen untuk Cross Section & Report",
+                list(seg_options.keys())
             )
+            picked_sid = seg_options[picked_label]
+            active = seg_results[picked_sid]
 
-            y1 = st.number_input(
-                "Start Y",
-                value=float(np.nanmin(grid_y))
-            )
+            grid_x = active["grid_x"]
+            grid_y = active["grid_y"]
+            grid_z = active["grid_z"]
+            zone_map = active["zone_map"]
+            sediment_map = active["sediment_map"]
 
-        with col2:
+            st.session_state["active_segment_label"] = picked_label
+            st.session_state["grid_x"] = grid_x
+            st.session_state["grid_y"] = grid_y
+            st.session_state["grid_z"] = grid_z
+            st.session_state["zone_map"] = zone_map
+            st.session_state["sediment_map"] = sediment_map
+            st.session_state["erosion_area"] = active["erosion_area"]
+            st.session_state["sedimentation_area"] = active["sedimentation_area"]
+            st.session_state["max_zone"] = active["max_zone"]
+            st.session_state["boundary"] = active["boundary"]
+            st.session_state["cell_area"] = active["cell_area"]
+            st.session_state["inside"] = active["inside"]
+            st.session_state["analysis_method"] = active["analysis_method"]
+        else:
+            grid_x = st.session_state["grid_x"]
+            grid_y = st.session_state["grid_y"]
+            grid_z = st.session_state["grid_z"]
 
-            x2 = st.number_input(
-                "End X",
-                value=float(np.nanmax(grid_x))
-            )
+            zone_map = st.session_state["zone_map"]
+            sediment_map = st.session_state["sediment_map"]
 
-            y2 = st.number_input(
-                "End Y",
-                value=float(np.nanmax(grid_y))
-            )
-
-    # ==========================================
-    # POLYLINE DXF
-    # ==========================================
-
-    else:
-
-        section_dxf = st.file_uploader(
-            "Upload Polyline Section DXF",
-            type=["dxf"],
-            key="section_polyline"
+        section_mode = st.radio(
+            "Section Type",
+            [
+                "Straight Line",
+                "Polyline DXF"
+            ]
         )
 
-    # ==========================================
-    # BUTTON
-    # ==========================================
-
-    if st.button("Generate Cross Section"):
-
-        # ----------------------------
-        # STRAIGHT
-        # ----------------------------
+        # ==========================================
+        # STRAIGHT LINE
+        # ==========================================
 
         if section_mode == "Straight Line":
 
-            n_samples = 500
+            col1, col2 = st.columns(2)
 
-            xs = np.linspace(
-                x1,
-                x2,
-                n_samples
-            )
+            with col1:
 
-            ys = np.linspace(
-                y1,
-                y2,
-                n_samples
-            )
+                x1 = st.number_input(
+                    "Start X",
+                    value=float(np.nanmin(grid_x))
+                )
 
-            st.session_state["section_line"] = [
-                (x1, y1),
-                (x2, y2)
-            ]
+                y1 = st.number_input(
+                    "Start Y",
+                    value=float(np.nanmin(grid_y))
+                )
 
-        # ----------------------------
-        # POLYLINE
-        # ----------------------------
+            with col2:
+
+                x2 = st.number_input(
+                    "End X",
+                    value=float(np.nanmax(grid_x))
+                )
+
+                y2 = st.number_input(
+                    "End Y",
+                    value=float(np.nanmax(grid_y))
+                )
+
+        # ==========================================
+        # POLYLINE DXF
+        # ==========================================
 
         else:
 
-            if section_dxf is None:
+            section_dxf = st.file_uploader(
+                "Upload Polyline Section DXF",
+                type=["dxf"],
+                key="section_polyline"
+            )
 
-                st.warning(
-                    "Upload DXF terlebih dahulu"
+        # ==========================================
+        # BUTTON
+        # ==========================================
+
+        if st.button(_t("Generate Cross Section", "Generate Cross Section")):
+
+            # ----------------------------
+            # STRAIGHT
+            # ----------------------------
+
+            if section_mode == "Straight Line":
+
+                n_samples = 500
+
+                xs = np.linspace(
+                    x1,
+                    x2,
+                    n_samples
                 )
 
-                st.stop()
-
-            vertices = read_section_dxf(
-                section_dxf
-            )
-
-            if vertices is None:
-
-                st.error(
-                    "Polyline tidak terbaca"
+                ys = np.linspace(
+                    y1,
+                    y2,
+                    n_samples
                 )
 
-                st.stop()
+                st.session_state["section_line"] = [
+                    (x1, y1),
+                    (x2, y2)
+                ]
 
-            st.session_state["section_line"] = vertices
+            # ----------------------------
+            # POLYLINE
+            # ----------------------------
 
-            xs = []
-            ys = []
-
-            for i in range(
-                len(vertices)-1
-            ):
-
-                p1 = vertices[i]
-                p2 = vertices[i+1]
-
-                xs.extend(
-                    np.linspace(
-                        p1[0],
-                        p2[0],
-                        100
-                    )
-                )
-
-                ys.extend(
-                    np.linspace(
-                        p1[1],
-                        p2[1],
-                        100
-                    )
-                )
-
-            xs = np.array(xs)
-            ys = np.array(ys)
-
-            n_samples = len(xs)
-
-        # ==================================
-        # PROFILE
-        # ==================================
-
-        elev_profile = []
-        erosion_profile = []
-        sediment_profile = []
-
-        for xx, yy in zip(xs, ys):
-
-            ix = np.abs(
-                grid_x[:,0] - xx
-            ).argmin()
-
-            iy = np.abs(
-                grid_y[0,:] - yy
-            ).argmin()
-
-            elev_profile.append(
-                grid_z[ix, iy]
-            )
-
-            erosion_profile.append(
-                zone_map[ix, iy]
-            )
-
-            sediment_profile.append(
-                sediment_map[ix, iy]
-            )
-
-        distance = np.arange(
-            len(xs)
-        )
-
-        # ==================================
-        # ELEVATION PROFILE
-        # ==================================
-
-        fig_cs = go.Figure()
-
-        fig_cs.add_trace(
-            go.Scatter(
-                x=distance,
-                y=elev_profile,
-                name="Elevation"
-            )
-        )
-
-        fig_cs.update_layout(
-            title="Elevation Profile",
-            xaxis_title="Distance",
-            yaxis_title="Elevation (m)",
-            height=500
-        )
-
-        st.plotly_chart(
-            fig_cs,
-            use_container_width=True
-        )
-
-        # ==================================
-        # RISK PROFILE
-        # ==================================
-
-        fig_risk = go.Figure()
-
-        fig_risk.add_trace(
-            go.Scatter(
-                x=distance,
-                y=erosion_profile,
-                name="Erosion Risk"
-            )
-        )
-
-        fig_risk.add_trace(
-            go.Scatter(
-                x=distance,
-                y=sediment_profile,
-                name="Sedimentation"
-            )
-        )
-
-        fig_risk.update_layout(
-            title="Risk Profile",
-            height=500
-        )
-
-        st.plotly_chart(
-            fig_risk,
-            use_container_width=True
-        )
-
-        st.session_state["section_distance"] = distance
-        st.session_state["section_elevation"] = elev_profile
-        st.session_state["section_erosion"] = erosion_profile
-        st.session_state["section_sediment"] = sediment_profile
-
-    # =========================================================
-    # ================= VALIDASI LAPANGAN (GROUND-TRUTH) =================
-    # =========================================================
-    # Mengikuti Bab 3.5-3.6 makalah EroSlope PERHAPI: confusion matrix 3x3
-    # (Rendah/Sedang/Tinggi-Ekstrem), overall accuracy, precision/recall/F1
-    # per kelas, dan Cohen's Kappa (Landis & Koch, 1977) untuk mengukur
-    # kesesuaian klasifikasi model terhadap titik sampel observasi lapangan.
-
-    from sklearn.metrics import (
-        confusion_matrix as _sk_confusion_matrix,
-        cohen_kappa_score as _sk_cohen_kappa,
-        precision_recall_fscore_support as _sk_prfs,
-    )
-
-    st.markdown("---")
-    st.subheader("Validasi Lapangan (Ground-Truth)")
-    st.caption(
-        "Masukkan titik sampel observasi lapangan (survey/inspeksi visual/patok kontrol) untuk "
-        "menguji kesesuaian klasifikasi risiko model terhadap kondisi aktual — mengikuti metodologi "
-        "confusion matrix & Cohen's Kappa pada makalah acuan (Landis & Koch, 1977)."
-    )
-
-    RISK_CLASSES = ["Rendah", "Sedang", "Tinggi/Ekstrem"]
-
-    def _classify_score(score, low_hi=0.5, mid_hi=1.0):
-        if score is None or (isinstance(score, float) and np.isnan(score)):
-            return None
-        if score < low_hi:
-            return "Rendah"
-        elif score < mid_hi:
-            return "Sedang"
-        else:
-            return "Tinggi/Ekstrem"
-
-    seg_results_val = st.session_state.get("segment_results", {})
-
-    if not seg_results_val:
-        st.info("Jalankan analisis segmen dulu sebelum melakukan validasi lapangan.")
-    else:
-        val_seg_options = {v["label"]: k for k, v in seg_results_val.items()}
-        val_picked_label = st.selectbox(
-            "Segmen yang divalidasi",
-            list(val_seg_options.keys()),
-            key="val_segment_picker"
-        )
-        val_sid = val_seg_options[val_picked_label]
-        val_seg = seg_results_val[val_sid]
-
-        st.caption(
-            f"Ambang klasifikasi memakai skema TARP yang sama dengan peta risiko: "
-            f"Rendah (skor < 0.5), Sedang (0.5-1.0), Tinggi/Ekstrem (≥ 1.0). "
-            f"Metode segmen ini: **{val_seg['analysis_method']}**."
-        )
-
-        default_gt = pd.DataFrame({
-            "ID_Titik": ["GT-01", "GT-02", "GT-03"],
-            "X": [float(np.nanmin(val_seg["grid_x"])) + 10] * 3,
-            "Y": [float(np.nanmin(val_seg["grid_y"])) + 10] * 3,
-            "Kelas_Observasi": ["Rendah", "Sedang", "Tinggi/Ekstrem"],
-        })
-
-        gt_key = f"ground_truth_table_{val_sid}"
-        if gt_key not in st.session_state:
-            st.session_state[gt_key] = default_gt
-
-        st.write(
-            "**Tabel titik sampel lapangan** — isi koordinat (X, Y dalam sistem koordinat DXF yang sama) "
-            "dan kelas hasil pengamatan/inspeksi lapangan aktual di lokasi itu:"
-        )
-        edited_gt = st.data_editor(
-            st.session_state[gt_key],
-            num_rows="dynamic",
-            column_config={
-                "Kelas_Observasi": st.column_config.SelectboxColumn(
-                    "Kelas_Observasi", options=RISK_CLASSES, required=True
-                )
-            },
-            key=f"gt_editor_{val_sid}",
-            use_container_width=True,
-        )
-        st.session_state[gt_key] = edited_gt
-
-        gt_csv_upload = st.file_uploader(
-            "Atau upload CSV titik sampel (kolom: ID_Titik, X, Y, Kelas_Observasi)",
-            type=["csv"], key=f"gt_csv_{val_sid}"
-        )
-        if gt_csv_upload is not None:
-            try:
-                uploaded_gt = pd.read_csv(gt_csv_upload)
-                required_cols = {"ID_Titik", "X", "Y", "Kelas_Observasi"}
-                if required_cols.issubset(set(uploaded_gt.columns)):
-                    st.session_state[gt_key] = uploaded_gt
-                    edited_gt = uploaded_gt
-                    st.success(f"{len(uploaded_gt)} titik sampel dimuat dari CSV.")
-                else:
-                    st.error(f"CSV harus punya kolom: {required_cols}")
-            except Exception as e:
-                st.error(f"Gagal membaca CSV: {e}")
-
-        if st.button("Jalankan Validasi", key=f"run_validation_{val_sid}"):
-
-            gx, gy = val_seg["grid_x"], val_seg["grid_y"]
-            zmap = val_seg["zone_map"]
-
-            gx_flat = gx.ravel()
-            gy_flat = gy.ravel()
-            z_flat = zmap.ravel()
-
-            y_true = []
-            y_pred = []
-            detail_rows = []
-
-            for _, row in edited_gt.iterrows():
-                try:
-                    px, py = float(row["X"]), float(row["Y"])
-                    obs_class = row["Kelas_Observasi"]
-                except (ValueError, TypeError, KeyError):
-                    continue
-                if obs_class not in RISK_CLASSES:
-                    continue
-
-                dist2 = (gx_flat - px) ** 2 + (gy_flat - py) ** 2
-                nearest_idx = np.nanargmin(dist2)
-                nearest_score = z_flat[nearest_idx]
-                pred_class = _classify_score(nearest_score)
-
-                if pred_class is None:
-                    continue  # titik di luar boundary (NaN) -> tidak bisa divalidasi
-
-                y_true.append(obs_class)
-                y_pred.append(pred_class)
-                detail_rows.append({
-                    "ID_Titik": row.get("ID_Titik", "-"),
-                    "X": px, "Y": py,
-                    "Kelas_Observasi": obs_class,
-                    "Skor_Model": round(float(nearest_score), 3),
-                    "Kelas_Prediksi": pred_class,
-                    "Cocok": "Cocok" if obs_class == pred_class else "Tidak",
-                })
-
-            if len(y_true) < 2:
-                st.error(
-                    "Minimal 2 titik sampel yang valid (berada di dalam boundary area, kelas terisi) "
-                    "diperlukan untuk validasi."
-                )
             else:
-                cm = _sk_confusion_matrix(y_true, y_pred, labels=RISK_CLASSES)
-                overall_acc = float(np.trace(cm)) / float(np.sum(cm))
-                kappa = _sk_cohen_kappa(y_true, y_pred, labels=RISK_CLASSES)
-                precision, recall, f1, support = _sk_prfs(
-                    y_true, y_pred, labels=RISK_CLASSES, zero_division=0
-                )
 
-                def _kappa_interpretation(k):
-                    if k < 0:
-                        return "Poor (lebih buruk dari acak)"
-                    elif k < 0.20:
-                        return "Slight"
-                    elif k < 0.40:
-                        return "Fair"
-                    elif k < 0.60:
-                        return "Moderate"
-                    elif k < 0.80:
-                        return "Substantial"
-                    else:
-                        return "Almost perfect agreement"
+                if section_dxf is None:
 
-                st.markdown("#### Hasil Validasi")
-                vcol1, vcol2, vcol3 = st.columns(3)
-                vcol1.metric("Overall Accuracy", f"{overall_acc*100:.1f}%")
-                vcol2.metric("Cohen's Kappa (κ)", f"{kappa:.2f}")
-                vcol3.metric("Interpretasi (Landis & Koch, 1977)", _kappa_interpretation(kappa))
-
-                st.markdown("**Confusion Matrix** (baris = observasi lapangan, kolom = prediksi model)")
-                cm_df = pd.DataFrame(cm, index=RISK_CLASSES, columns=RISK_CLASSES)
-                cm_df["Total"] = cm_df.sum(axis=1)
-                st.dataframe(cm_df, use_container_width=True)
-
-                st.markdown("**Precision, Recall, F1-Score per kelas**")
-                prfs_df = pd.DataFrame({
-                    "Kelas": RISK_CLASSES,
-                    "Precision": np.round(precision, 3),
-                    "Recall": np.round(recall, 3),
-                    "F1-Score": np.round(f1, 3),
-                    "Jumlah Sampel": support,
-                })
-                st.dataframe(prfs_df, use_container_width=True)
-
-                st.markdown("**Detail per titik sampel**")
-                st.dataframe(pd.DataFrame(detail_rows), use_container_width=True)
-
-                if kappa < 0.60:
-                    st.warning(
-                        "Kappa < 0.60 menunjukkan kesesuaian model terhadap lapangan masih lemah/moderate. "
-                        "Pertimbangkan kalibrasi ulang parameter (grain_size, tau_critical, erodibility_M) "
-                        "atau tambah titik sampel lapangan sebelum dipakai sebagai dasar keputusan operasional."
+                    _ui_warning(
+                        "Upload DXF terlebih dahulu"
                     )
 
-                # simpan hasil ke segment untuk disertakan di report PDF
-                st.session_state["segment_results"][val_sid]["validation"] = {
-                    "overall_accuracy": overall_acc,
-                    "kappa": float(kappa),
-                    "kappa_interpretation": _kappa_interpretation(kappa),
-                    "confusion_matrix": cm_df,
-                    "prfs": prfs_df,
-                    "detail": pd.DataFrame(detail_rows),
-                    "n_samples": len(y_true),
-                }
-                st.success("Hasil validasi tersimpan dan akan otomatis disertakan di Executive Report.")
+                    st.stop()
 
-        # ================= BANDINGKAN KETIGA METODE (Hjulström vs Shields vs Partheniades) =================
+                vertices = read_section_dxf(
+                    section_dxf
+                )
+
+                if vertices is None:
+
+                    st.error(
+                        "Polyline tidak terbaca"
+                    )
+
+                    st.stop()
+
+                st.session_state["section_line"] = vertices
+
+                xs = []
+                ys = []
+
+                for i in range(
+                    len(vertices)-1
+                ):
+
+                    p1 = vertices[i]
+                    p2 = vertices[i+1]
+
+                    xs.extend(
+                        np.linspace(
+                            p1[0],
+                            p2[0],
+                            100
+                        )
+                    )
+
+                    ys.extend(
+                        np.linspace(
+                            p1[1],
+                            p2[1],
+                            100
+                        )
+                    )
+
+                xs = np.array(xs)
+                ys = np.array(ys)
+
+                n_samples = len(xs)
+
+            # ==================================
+            # PROFILE
+            # ==================================
+
+            elev_profile = []
+            erosion_profile = []
+            sediment_profile = []
+
+            for xx, yy in zip(xs, ys):
+
+                ix = np.abs(
+                    grid_x[:,0] - xx
+                ).argmin()
+
+                iy = np.abs(
+                    grid_y[0,:] - yy
+                ).argmin()
+
+                elev_profile.append(
+                    grid_z[ix, iy]
+                )
+
+                erosion_profile.append(
+                    zone_map[ix, iy]
+                )
+
+                sediment_profile.append(
+                    sediment_map[ix, iy]
+                )
+
+            distance = np.arange(
+                len(xs)
+            )
+
+            # ==================================
+            # ELEVATION PROFILE
+            # ==================================
+
+            fig_cs = go.Figure()
+
+            fig_cs.add_trace(
+                go.Scatter(
+                    x=distance,
+                    y=elev_profile,
+                    name="Elevation"
+                )
+            )
+
+            fig_cs.update_layout(
+                title="Elevation Profile",
+                xaxis_title="Distance",
+                yaxis_title="Elevation (m)",
+                height=500
+            )
+
+            st.plotly_chart(
+                fig_cs,
+                width="stretch"
+            )
+
+            # ==================================
+            # RISK PROFILE
+            # ==================================
+
+            fig_risk = go.Figure()
+
+            fig_risk.add_trace(
+                go.Scatter(
+                    x=distance,
+                    y=erosion_profile,
+                    name="Erosion Risk"
+                )
+            )
+
+            fig_risk.add_trace(
+                go.Scatter(
+                    x=distance,
+                    y=sediment_profile,
+                    name="Sedimentation"
+                )
+            )
+
+            fig_risk.update_layout(
+                title="Risk Profile",
+                height=500
+            )
+
+            st.plotly_chart(
+                fig_risk,
+                width="stretch"
+            )
+
+            st.session_state["section_distance"] = distance
+            st.session_state["section_elevation"] = elev_profile
+            st.session_state["section_erosion"] = erosion_profile
+            st.session_state["section_sediment"] = sediment_profile
+
+        # =========================================================
+        # ================= VALIDASI LAPANGAN (GROUND-TRUTH) =================
+        # =========================================================
+        # Mengikuti Bab 3.5-3.6 makalah EroSlope PERHAPI: confusion matrix 3x3
+        # (Rendah/Sedang/Tinggi-Ekstrem), overall accuracy, precision/recall/F1
+        # per kelas, dan Cohen's Kappa (Landis & Koch, 1977) untuk mengukur
+        # kesesuaian klasifikasi model terhadap titik sampel observasi lapangan.
+
+        from sklearn.metrics import (
+            confusion_matrix as _sk_confusion_matrix,
+            cohen_kappa_score as _sk_cohen_kappa,
+            precision_recall_fscore_support as _sk_prfs,
+        )
+
         st.markdown("---")
-        st.markdown("#### Bandingkan Ketiga Metode Erosion Assessment")
-        st.caption(
-            "Menjalankan Hjulström, Shields, dan Partheniades+Flow Accumulation sekaligus pada segmen "
-            "yang sama, lalu membandingkan akurasi klasifikasi masing-masing terhadap titik sampel "
-            "lapangan yang sama — mengikuti struktur Tabel 5 & Gambar 8 pada makalah acuan."
+        _sub_header(_t("Validasi Lapangan (Ground-Truth)", "Field Validation (Ground-Truth)"))
+        _ui_caption(
+            "Uji kesesuaian klasifikasi risiko model terhadap kondisi aktual — mengikuti metodologi "
+            "confusion matrix & Cohen's Kappa pada makalah acuan (Landis & Koch, 1977). Data observasi "
+            "lapangan bisa diisi lewat titik sampel (tabel/CSV) ATAU lewat boundary erosi aktual (DXF)."
         )
 
-        if st.button("Jalankan Perbandingan 3 Metode", key=f"run_compare3_{val_sid}"):
+        RISK_CLASSES = ["Rendah", "Sedang", "Tinggi/Ekstrem"]
 
-            gt_table_cmp = st.session_state.get(gt_key, default_gt)
-            valid_gt_rows = [
-                r for _, r in gt_table_cmp.iterrows()
-                if r.get("Kelas_Observasi") in RISK_CLASSES
-            ]
-
-            if len(valid_gt_rows) < 2:
-                st.error("Isi minimal 2 titik sampel lapangan (di bagian atas) sebelum membandingkan metode.")
+        def _classify_score(score, low_hi=0.5, mid_hi=1.0):
+            if score is None or (isinstance(score, float) and np.isnan(score)):
+                return None
+            if score < low_hi:
+                return "Rendah"
+            elif score < mid_hi:
+                return "Sedang"
             else:
-                gx_c, gy_c = val_seg["grid_x"], val_seg["grid_y"]
-                slope_c = val_seg["slope"]
-                flow_density_c = val_seg["flow_density"]
-                velocity_field_c = val_seg["velocity_field"]
-                valid_mask_c = val_seg["valid_mask"]
-                grain_size_c = val_seg["grain_size_mm"]
-                rho_water_c = val_seg["rho_water"]
-                rho_soil_c = val_seg["rho_soil"]
-                tau_critical_c = val_seg["tau_critical"]
-                erodibility_M_c = val_seg["erodibility_M"]
-                flow_weight_c = val_seg["flow_weight"]
-                flow_depth_c = val_seg["flow_depth"]
+                return "Tinggi/Ekstrem"
 
-                methods_to_run = ["Hjulstrom Diagram", "Shields Diagram", "Partheniades + Flow Accumulation"]
-                comparison_rows = []
-                zone_maps_by_method = {}
+        def _kappa_interpretation(k):
+            if k < 0:
+                return "Poor (lebih buruk dari acak)"
+            elif k < 0.20:
+                return "Slight"
+            elif k < 0.40:
+                return "Fair"
+            elif k < 0.60:
+                return "Moderate"
+            elif k < 0.80:
+                return "Substantial"
+            else:
+                return "Almost perfect agreement"
 
-                for method_name in methods_to_run:
-                    t0 = time.time()
-                    zmap_c = np.full(gx_c.shape, np.nan)
+        def _show_validation_result(y_true, y_pred, extra_metric=None):
+            """Helper bersama: hitung & tampilkan confusion matrix, kappa, PRFS untuk
+            kedua mode input (titik sampel maupun boundary DXF), supaya hasilnya konsisten."""
+            cm = _sk_confusion_matrix(y_true, y_pred, labels=RISK_CLASSES)
+            overall_acc = float(np.trace(cm)) / float(np.sum(cm))
+            kappa = _sk_cohen_kappa(y_true, y_pred, labels=RISK_CLASSES)
+            precision, recall, f1, support = _sk_prfs(
+                y_true, y_pred, labels=RISK_CLASSES, zero_division=0
+            )
 
-                    if method_name == "Hjulstrom Diagram":
-                        zmap_c[valid_mask_c] = np.vectorize(hjulstrom_zone, otypes=[float])(
-                            velocity_field_c[valid_mask_c], grain_size_c
+            st.markdown("#### Hasil Validasi")
+            vcol1, vcol2, vcol3 = st.columns(3)
+            vcol1.metric("Overall Accuracy", f"{overall_acc*100:.1f}%")
+            vcol2.metric("Cohen's Kappa (κ)", f"{kappa:.2f}")
+            vcol3.metric("Interpretasi (Landis & Koch, 1977)", _kappa_interpretation(kappa))
+            if extra_metric:
+                _ui_caption(extra_metric)
+
+            st.markdown("**Confusion Matrix** (baris = observasi lapangan, kolom = prediksi model)")
+            cm_df = pd.DataFrame(cm, index=RISK_CLASSES, columns=RISK_CLASSES)
+            cm_df["Total"] = cm_df.sum(axis=1)
+            st.dataframe(cm_df, width="stretch")
+
+            st.markdown("**Precision, Recall, F1-Score per kelas**")
+            prfs_df = pd.DataFrame({
+                "Kelas": RISK_CLASSES,
+                "Precision": np.round(precision, 3),
+                "Recall": np.round(recall, 3),
+                "F1-Score": np.round(f1, 3),
+                "Jumlah Sampel": support,
+            })
+            st.dataframe(prfs_df, width="stretch")
+
+            if kappa < 0.60:
+                _ui_warning(
+                    "Kappa < 0.60 menunjukkan kesesuaian model terhadap lapangan masih lemah/moderate. "
+                    "Pertimbangkan kalibrasi ulang parameter (grain_size, tau_critical, erodibility_M) "
+                    "atau tambah data observasi lapangan sebelum dipakai sebagai dasar keputusan operasional."
+                )
+            return overall_acc, kappa, cm_df, prfs_df
+
+        seg_results_val = st.session_state.get("segment_results", {})
+
+        if not seg_results_val:
+            _ui_info("Jalankan analisis segmen dulu sebelum melakukan validasi lapangan.")
+        else:
+            val_seg_options = {v["label"]: k for k, v in seg_results_val.items()}
+            val_picked_label = st.selectbox(
+                "Segmen yang divalidasi",
+                list(val_seg_options.keys()),
+                key="val_segment_picker"
+            )
+            val_sid = val_seg_options[val_picked_label]
+            val_seg = seg_results_val[val_sid]
+
+            _ui_caption(
+                f"Ambang klasifikasi memakai skema TARP yang sama dengan peta risiko: "
+                f"Rendah (skor < 0.5), Sedang (0.5-1.0), Tinggi/Ekstrem (≥ 1.0). "
+                f"Metode segmen ini: **{val_seg['analysis_method']}**."
+            )
+
+            gt_mode = st.radio(
+                "Sumber data observasi lapangan (ground-truth)",
+                ["Titik Sampel (Tabel / CSV)", "Boundary Erosi Aktual (DXF)"],
+                key=f"gt_mode_{val_sid}",
+                horizontal=True,
+            )
+
+            # gt_key & default_gt didefinisikan di sini (bukan di dalam cabang mode titik saja)
+            # supaya section "Bandingkan Ketiga Metode" di bawah (yang masih memakai titik sampel)
+            # tetap bisa mengambil tabel titik sampel meski user sedang berada di mode DXF.
+            default_gt = pd.DataFrame({
+                "ID_Titik": ["GT-01", "GT-02", "GT-03"],
+                "X": [float(np.nanmin(val_seg["grid_x"])) + 10] * 3,
+                "Y": [float(np.nanmin(val_seg["grid_y"])) + 10] * 3,
+                "Kelas_Observasi": ["Rendah", "Sedang", "Tinggi/Ekstrem"],
+            })
+            gt_key = f"ground_truth_table_{val_sid}"
+            if gt_key not in st.session_state:
+                st.session_state[gt_key] = default_gt
+
+            # ================= MODE 1: TITIK SAMPEL (TABEL / CSV) =================
+            if gt_mode == "Titik Sampel (Tabel / CSV)":
+
+                st.write(
+                    "**Tabel titik sampel lapangan** — isi koordinat (X, Y dalam sistem koordinat DXF yang sama) "
+                    "dan kelas hasil pengamatan/inspeksi lapangan aktual di lokasi itu:"
+                )
+                edited_gt = st.data_editor(
+                    st.session_state[gt_key],
+                    num_rows="dynamic",
+                    column_config={
+                        "Kelas_Observasi": st.column_config.SelectboxColumn(
+                            "Kelas_Observasi", options=RISK_CLASSES, required=True
                         )
-                    elif method_name == "Shields Diagram":
-                        zmap_c[valid_mask_c] = np.vectorize(shields_zone, otypes=[float])(
-                            velocity_field_c[valid_mask_c], slope_c[valid_mask_c],
-                            rho_water_c, rho_soil_c, grain_size_c
-                        )
-                    else:
-                        risk_map_c = partheniades_erosion(
-                            slope=slope_c, flow_density=flow_density_c, rho_water=rho_water_c,
-                            flow_depth=flow_depth_c, tau_critical=tau_critical_c,
-                            erodibility_M=erodibility_M_c, flow_weight=flow_weight_c
-                        )
-                        zmap_c = risk_map_c.copy()
-                        zmap_c = zmap_c / (np.nanpercentile(zmap_c, 99) + 1e-9)
-                        zmap_c = np.clip(zmap_c, 0, 2)
+                    },
+                    key=f"gt_editor_{val_sid}",
+                    width="stretch",
+                )
+                st.session_state[gt_key] = edited_gt
 
-                    zmap_c[~valid_mask_c] = np.nan
-                    elapsed = time.time() - t0
-                    zone_maps_by_method[method_name] = zmap_c
+                gt_csv_upload = st.file_uploader(
+                    "Atau upload CSV titik sampel (kolom: ID_Titik, X, Y, Kelas_Observasi)",
+                    type=["csv"], key=f"gt_csv_{val_sid}"
+                )
+                if gt_csv_upload is not None:
+                    try:
+                        uploaded_gt = pd.read_csv(gt_csv_upload)
+                        required_cols = {"ID_Titik", "X", "Y", "Kelas_Observasi"}
+                        if required_cols.issubset(set(uploaded_gt.columns)):
+                            st.session_state[gt_key] = uploaded_gt
+                            edited_gt = uploaded_gt
+                            st.success(_t(f"{len(uploaded_gt)} titik sampel dimuat dari CSV.", f"{len(uploaded_gt)} sample points loaded from CSV."))
+                        else:
+                            st.error(_t(f"CSV harus punya kolom: {required_cols}", f"CSV must have columns: {required_cols}"))
+                    except Exception as e:
+                        st.error(_t(f"Gagal membaca CSV: {e}", f"Failed to read CSV: {e}"))
 
-                    # validasi metode ini terhadap titik sampel yang sama
-                    gx_flat_c = gx_c.ravel()
-                    gy_flat_c = gy_c.ravel()
-                    z_flat_c = zmap_c.ravel()
-                    yt, yp = [], []
-                    for r in valid_gt_rows:
+                block_radius_m = st.number_input(
+                    "Radius blok representasi per titik sampel (m)",
+                    min_value=0.0, value=5.0, step=1.0,
+                    key=f"gt_block_radius_{val_sid}",
+                    help="1 titik sampel dianggap mewakili KONDISI SATU BLOK/AREA di sekitarnya, bukan "
+                         "hanya satu sel grid tunggal. Skor model pada titik itu dihitung sebagai rata-rata "
+                         "seluruh sel grid model dalam radius ini, baru diklasifikasi. Isi 0 untuk memakai "
+                         "sel grid terdekat saja (perilaku lama, per-titik/pixel)."
+                )
+
+                if st.button(_t("Jalankan Validasi", "Run Validation"), key=f"run_validation_{val_sid}"):
+
+                    gx, gy = val_seg["grid_x"], val_seg["grid_y"]
+                    zmap = val_seg["zone_map"]
+
+                    gx_flat = gx.ravel()
+                    gy_flat = gy.ravel()
+                    z_flat = zmap.ravel()
+
+                    y_true = []
+                    y_pred = []
+                    detail_rows = []
+
+                    for _, row in edited_gt.iterrows():
                         try:
-                            px, py = float(r["X"]), float(r["Y"])
-                        except (ValueError, TypeError):
+                            px, py = float(row["X"]), float(row["Y"])
+                            obs_class = row["Kelas_Observasi"]
+                        except (ValueError, TypeError, KeyError):
                             continue
-                        dist2 = (gx_flat_c - px) ** 2 + (gy_flat_c - py) ** 2
-                        nidx = np.nanargmin(dist2)
-                        pcls = _classify_score(z_flat_c[nidx])
-                        if pcls is None:
+                        if obs_class not in RISK_CLASSES:
                             continue
-                        yt.append(r["Kelas_Observasi"])
-                        yp.append(pcls)
 
-                    if len(yt) >= 2:
-                        acc_m = float(np.mean([a == b for a, b in zip(yt, yp)]))
-                        kappa_m = _sk_cohen_kappa(yt, yp, labels=RISK_CLASSES)
+                        dist2 = (gx_flat - px) ** 2 + (gy_flat - py) ** 2
+
+                        if block_radius_m and block_radius_m > 0:
+                            # ---- Representasi blok: rata-rata semua sel grid dalam radius ----
+                            within_block = dist2 <= block_radius_m ** 2
+                            block_scores = z_flat[within_block]
+                            block_scores = block_scores[~np.isnan(block_scores)]
+                            if len(block_scores) == 0:
+                                continue
+                            nearest_score = float(np.mean(block_scores))
+                            n_cells_block = int(len(block_scores))
+                        else:
+                            # ---- Perilaku lama: sel grid terdekat saja ----
+                            nearest_idx = np.nanargmin(dist2)
+                            nearest_score = z_flat[nearest_idx]
+                            n_cells_block = 1
+
+                        pred_class = _classify_score(nearest_score)
+
+                        if pred_class is None:
+                            continue  # titik/blok di luar boundary (NaN) -> tidak bisa divalidasi
+
+                        y_true.append(obs_class)
+                        y_pred.append(pred_class)
+                        detail_rows.append({
+                            "ID_Titik": row.get("ID_Titik", "-"),
+                            "X": px, "Y": py,
+                            "Radius_Blok_m": block_radius_m,
+                            "N_Sel_dalam_Blok": n_cells_block,
+                            "Kelas_Observasi": obs_class,
+                            "Skor_Model (rata-rata blok)": round(float(nearest_score), 3),
+                            "Kelas_Prediksi": pred_class,
+                            "Cocok": "Cocok" if obs_class == pred_class else "Tidak",
+                        })
+
+                    if len(y_true) < 2:
+                        st.error(
+                            "Minimal 2 titik sampel yang valid (berada di dalam boundary area, kelas terisi) "
+                            "diperlukan untuk validasi."
+                        )
                     else:
-                        acc_m, kappa_m = float("nan"), float("nan")
+                        overall_acc, kappa, cm_df, prfs_df = _show_validation_result(y_true, y_pred)
 
-                    comparison_rows.append({
-                        "Metode": method_name,
-                        "Akurasi vs Sampel Lapangan (%)": round(acc_m * 100, 1) if not np.isnan(acc_m) else "-",
-                        "Cohen's Kappa": round(kappa_m, 3) if not np.isnan(kappa_m) else "-",
-                        "Skor Risiko Maks": round(float(np.nanmax(zmap_c)), 3),
-                        "Rata-rata Skor Risiko": round(float(np.nanmean(zmap_c)), 3),
-                        "Waktu Komputasi (detik)": round(elapsed, 3),
-                    })
+                        st.markdown("**Detail per titik sampel**")
+                        st.dataframe(pd.DataFrame(detail_rows), width="stretch")
 
-                comp_df = pd.DataFrame(comparison_rows)
-                st.markdown("**Tabel Perbandingan (Tabel 5-equivalent)**")
-                st.dataframe(comp_df, use_container_width=True)
+                        # simpan hasil ke segment untuk disertakan di report PDF
+                        st.session_state["segment_results"][val_sid]["validation"] = {
+                            "overall_accuracy": overall_acc,
+                            "kappa": float(kappa),
+                            "kappa_interpretation": _kappa_interpretation(kappa),
+                            "confusion_matrix": cm_df,
+                            "prfs": prfs_df,
+                            "detail": pd.DataFrame(detail_rows),
+                            "n_samples": len(y_true),
+                            "source": f"Titik sampel (radius blok {block_radius_m:.0f} m)" if block_radius_m > 0
+                                      else "Titik sampel (sel grid terdekat)",
+                        }
+                        st.success(_t("Hasil validasi tersimpan dan akan otomatis disertakan di Executive Report.", "Validation results saved and will be automatically included in the Executive Report."))
 
-                fig_cmp = go.Figure()
-                fig_cmp.add_trace(go.Bar(
-                    x=comp_df["Metode"],
-                    y=[v if isinstance(v, (int, float)) else 0 for v in comp_df["Akurasi vs Sampel Lapangan (%)"]],
-                    text=comp_df["Akurasi vs Sampel Lapangan (%)"],
-                    textposition="outside",
-                    marker_color=["#4C78A8", "#54A24B", "#E45756"],
-                ))
-                fig_cmp.update_layout(
-                    title="Perbandingan Akurasi Klasifikasi Risiko 3 Metode (vs sampel lapangan Anda)",
-                    yaxis_title="Akurasi (%)", yaxis_range=[0, 100], height=420
+            # ================= MODE 2: BOUNDARY EROSI AKTUAL (DXF) =================
+            else:
+                st.write(
+                    "**Upload DXF boundary erosi aktual** — poligon/garis tertutup hasil survey/pemetaan "
+                    "lapangan yang menandai batas area yang BENAR-BENAR tererosi di lokasi ini."
                 )
-                st.plotly_chart(fig_cmp, use_container_width=True)
-
-                best_method = comp_df.loc[
-                    comp_df["Akurasi vs Sampel Lapangan (%)"].apply(lambda v: v if isinstance(v, (int, float)) else -1).idxmax()
-                ]
-                st.info(
-                    f"Metode dengan akurasi tertinggi terhadap sampel lapangan Anda saat ini: "
-                    f"**{best_method['Metode']}** ({best_method['Akurasi vs Sampel Lapangan (%)']}%). "
-                    "Catatan: hasil ini bergantung penuh pada jumlah & sebaran titik sampel yang diinput — "
-                    "tambah titik sampel untuk kesimpulan yang lebih andal."
+                gt_dxf_upload = st.file_uploader(
+                    "Upload DXF Boundary Erosi Aktual",
+                    type=["dxf"], key=f"gt_dxf_{val_sid}"
+                )
+                _ui_caption(
+                    "Sel grid model di DALAM boundary DXF ini diberi label observasi 'Tinggi/Ekstrem' "
+                    "(dianggap benar-benar tererosi di lapangan); sel grid lain di dalam boundary area studi "
+                    "diberi label 'Rendah'. Karena sumbernya berupa boundary (bukan titik 3 kelas), metode ini "
+                    "TIDAK menghasilkan kelas 'Sedang' pada data observasi -- kalau butuh 3 kelas, gunakan mode "
+                    "Titik Sampel."
                 )
 
-                st.session_state["segment_results"][val_sid]["method_comparison"] = comp_df
-
-    # ================= HELPER: render formula sebagai gambar (mathtext) =================
-    def _render_formula_png(latex_expr, out_path, fontsize=15):
-        f = plt.figure(figsize=(6.2, 0.9))
-        f.text(0.02, 0.5, f"${latex_expr}$", fontsize=fontsize, va="center", ha="left")
-        plt.axis("off")
-        plt.savefig(out_path, dpi=220, bbox_inches="tight", pad_inches=0.08, transparent=False)
-        plt.close(f)
-        return out_path
-
-    # ================= HELPER: tabel TARP (Trigger Action Response Plan) =================
-    def _tarp_rows(current_score):
-        levels = [
-            ("HIJAU (Normal)", 0.0, 0.5,
-             "Skor risiko < 0.5 — kondisi stabil",
-             "Inspeksi rutin bulanan, pantau curah hujan",
-             "Pertahankan geometri drainase, tanpa aksi khusus",
-             "Tim O&M lapangan"),
-            ("KUNING (Waspada)", 0.5, 1.0,
-             "Skor risiko 0.5-1.0 — erosi awal terdeteksi",
-             "Inspeksi 2 minggu sekali, pasang patok monitoring",
-             "Revegetasi, surface protection mat, perbaikan berm",
-             "Pengawas lapangan + Geoteknik"),
-            ("ORANYE (Siaga)", 1.0, 2.0,
-             "Skor risiko 1.0-2.0 — erosi sedang, potensi berkembang",
-             "Inspeksi mingguan, pasang alat ukur kecepatan aliran",
-             "Riprap D50 150-300 mm, check dam, drop structure, turunkan kecepatan < 1 m/s",
-             "Engineer Geoteknik + Manajer Proyek"),
-            ("MERAH (Kritis)", 2.0, float("inf"),
-             "Skor risiko > 2.0 — erosi ekstrem, risiko scouring/headcut/kegagalan drainase",
-             "Monitoring harian/real-time, evakuasi area jika perlu",
-             "Redesain drainase, concrete lining/reno mattress, detention pond, "
-             "turunkan slope < 5% dan kecepatan < 1 m/s SEGERA",
-             "Manajer Proyek + Ahli Geoteknik Bersertifikat"),
-        ]
-        rows = [["Level TARP", "Kriteria Trigger", "Aksi Monitoring", "Aksi Respons", "Penanggung Jawab"]]
-        active_level_idx = None
-        for i, (name, lo, hi, crit, monitor, action, pic) in enumerate(levels):
-            mark = ""
-            if lo <= current_score < hi:
-                mark = "  ← KONDISI SAAT INI"
-                active_level_idx = i
-            rows.append([name + mark, crit, monitor, action, pic])
-        return rows, active_level_idx
-
-    # ================= HELPER: bangun peta erosi/sedimentasi per segmen =================
-    def _build_segment_map_png(seg, out_path):
-        """Peta risiko erosi/sedimentasi bergaya kartografi standar (mirip layout
-        ArcGIS/QGIS): hillshade + kontur elevasi, overlay risiko, boundary,
-        scale bar (sebelumnya diimpor tapi TIDAK PERNAH dipasang di peta),
-        north arrow, graticule koordinat, neatline, dan title block."""
-
-        gx, gy, gz = seg["grid_x"], seg["grid_y"], seg["grid_z"]
-        zmap, smap, bnd = seg["zone_map"], seg["sediment_map"], seg["boundary"]
-        ortho = seg.get("orthophoto")
-        seg_contours = seg.get("contours")
-
-        fig_s, ax_s = plt.subplots(figsize=(12, 8.5))
-        from matplotlib.colors import LightSource
-        ls = LightSource(azdeg=315, altdeg=45)
-        hillshade = ls.hillshade(gz, vert_exag=3)
-
-        extent = [np.nanmin(gx), np.nanmax(gx), np.nanmin(gy), np.nanmax(gy)]
-
-        if ortho is not None:
-            # Orthophoto sebagai latar; hillshade tidak dipakai lagi supaya foto asli
-            # tidak tertutup abu-abu, dan risk map dibuat lebih transparan.
-            ax_s.imshow(
-                ortho["rgb"], extent=ortho["extent"], origin="upper", zorder=1
-            )
-            _risk_alpha = 0.55
-            _sed_alpha = 0.40
-        else:
-            ax_s.imshow(
-                hillshade, cmap="gray", alpha=0.45,
-                extent=extent, origin="lower"
-            )
-            ax_s.contour(gx, gy, gz, levels=20, colors="black", linewidths=0.35, alpha=0.55)
-            _risk_alpha = 0.65
-            _sed_alpha = 0.50
-
-        erosion_plot = ax_s.contourf(gx, gy, zmap, levels=15, cmap="RdYlGn_r", alpha=_risk_alpha)
-        sedim_plot = ax_s.contourf(
-            gx, gy, smap, levels=[0.5, 0.7, 0.85, 1], cmap="Blues", alpha=_sed_alpha
-        )
-        if ortho is not None and seg_contours:
-            # Garis DXF asli digambar ulang sebagai overlay di atas orthophoto + risk map,
-            # supaya bentuk kontur/desain DXF tetap kelihatan jelas di atas foto udara.
-            _plot_dxf_overlay_2d(ax_s, seg_contours, color="black", linewidth=0.4, alpha=0.85)
-        bx_s, by_s = bnd.exterior.xy
-        ax_s.plot(bx_s, by_s, color="black" if ortho is None else "magenta", linewidth=2.2, label="Boundary Area")
-
-        # ---- Graticule koordinat (garis bantu Easting/Northing bergaya peta teknik) ----
-        ax_s.grid(True, which="major", linestyle="--", linewidth=0.4, color="grey", alpha=0.5)
-        ax_s.tick_params(labelsize=8)
-        ax_s.ticklabel_format(style="plain", axis="both")
-        for label in ax_s.get_xticklabels():
-            label.set_rotation(30)
-
-        # ---- Colorbar ----
-        cbar = plt.colorbar(erosion_plot, ax=ax_s, shrink=0.65, pad=0.02)
-        cbar.set_label("Erosion Risk Index", fontsize=9)
-        cbar.ax.tick_params(labelsize=8)
-
-        # ---- Legend (boundary + kategori sedimentasi) ----
-        legend_handles = [
-            Patch(facecolor="none", edgecolor="black", linewidth=2.2, label="Batas Area (Boundary)"),
-            Patch(facecolor="#4d94ff", alpha=0.5, label="Potensi Sedimentasi"),
-        ]
-        ax_s.legend(
-            handles=legend_handles, loc="upper left", fontsize=8,
-            framealpha=0.9, edgecolor="black"
-        )
-
-        # ---- Scale Bar (sebelumnya diimpor tapi tidak pernah dipasang) ----
-        try:
-            scalebar = ScaleBar(
-                1, units="m", location="lower right",
-                box_alpha=0.8, color="black", box_color="white",
-                font_properties={"size": 8}
-            )
-            ax_s.add_artist(scalebar)
-        except Exception:
-            pass
-
-        # ---- North Arrow ----
-        arrow_x = extent[1] - (extent[1] - extent[0]) * 0.06
-        arrow_y_base = extent[2] + (extent[3] - extent[2]) * 0.08
-        arrow_len = (extent[3] - extent[2]) * 0.08
-        ax_s.annotate(
-            "N",
-            xy=(arrow_x, arrow_y_base + arrow_len),
-            xytext=(arrow_x, arrow_y_base),
-            ha="center", va="center", fontsize=12, fontweight="bold",
-            arrowprops=dict(facecolor="black", edgecolor="black", width=3, headwidth=10, headlength=10)
-        )
-
-        # ---- Neatline (bingkai peta) ----
-        for spine in ax_s.spines.values():
-            spine.set_edgecolor("black")
-            spine.set_linewidth(1.4)
-
-        ax_s.set_title(
-            f"Peta Risiko Erosi & Sedimentasi — {seg['label']}",
-            fontsize=14, fontweight="bold", pad=14
-        )
-        ax_s.set_xlabel("Easting (m)", fontsize=9)
-        ax_s.set_ylabel("Northing (m)", fontsize=9)
-        ax_s.set_aspect("equal", adjustable="box")
-
-        # ---- Title block kecil di bawah peta (koordinat sistem, sumber, tanggal) ----
-        fig_s.text(
-            0.5, 0.01,
-            "Sistem Koordinat: mengikuti DXF sumber (proyeksi lokal/UTM sesuai input)  |  "
-            "Sumber: Analisis Geoteknik Otomatis  |  Dibuat: " + pd.Timestamp.now().strftime("%d %b %Y"),
-            ha="center", fontsize=7.5, color="#333333"
-        )
-
-        plt.tight_layout(rect=[0, 0.02, 1, 1])
-        plt.savefig(out_path, dpi=220, bbox_inches="tight")
-        plt.close(fig_s)
-        return out_path
-
-    # ================= HELPER: peta komposit gaya "figure ilmiah" (klasifikasi + grafik + 3D) =================
-    def _build_segment_composite_map_png(seg, out_path):
-        """Layout komposit satu halaman mengikuti gaya figure laporan geoteknik/tambang:
-        - Panel besar kiri: peta klasifikasi risiko (diskrit, dengan kotak Keterangan/legend)
-          + north arrow + scale bar + boundary.
-        - Panel kanan atas: grafik luasan per kategori risiko (Ha).
-        - Dua panel kanan tengah: tampilan hillshade & zoom area kritis (pengganti foto lapangan,
-          karena foto drone/lapangan asli tidak tersedia di pipeline ini).
-        - Panel kanan bawah: render 3D model permukaan (Model 3D) berwarna sesuai indeks risiko.
-        Dibuat landscape (lebar > tinggi) supaya proporsinya pas dipasang di halaman landscape."""
-
-        from matplotlib.colors import LightSource, ListedColormap, BoundaryNorm
-        from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 (registrasi proyeksi 3d)
-
-        gx, gy, gz = seg["grid_x"], seg["grid_y"], seg["grid_z"]
-        zmap, smap, bnd = seg["zone_map"], seg["sediment_map"], seg["boundary"]
-        inside_mask = seg.get("inside")
-
-        # ---- Klasifikasi diskrit 4 kelas mengikuti ambang TARP (konsisten dgn seluruh laporan) ----
-        class_bounds = [0, 0.5, 1.0, 2.0, np.inf]
-        class_colors = ["#4CAF50", "#FFD54F", "#FF9800", "#D32F2F"]
-        class_labels = ["Stabil (Hijau)", "Waspada (Kuning)", "Siaga (Oranye)", "Kritis (Merah)"]
-        cmap_cls = ListedColormap(class_colors)
-        norm_cls = BoundaryNorm(class_bounds, cmap_cls.N)
-
-        fig = plt.figure(figsize=(15.5, 9.2))
-        gspec = fig.add_gridspec(
-            3, 3,
-            width_ratios=[2.0, 0.9, 0.9],
-            height_ratios=[1.0, 1.0, 1.0],
-            wspace=0.28, hspace=0.42
-        )
-
-        # ============ PANEL UTAMA: PETA KLASIFIKASI ============
-        ax_main = fig.add_subplot(gspec[:, 0])
-        ls = LightSource(azdeg=315, altdeg=45)
-        hillshade = ls.hillshade(gz, vert_exag=3)
-        extent = [np.nanmin(gx), np.nanmax(gx), np.nanmin(gy), np.nanmax(gy)]
-
-        ax_main.imshow(hillshade, cmap="gray", alpha=0.35, extent=extent, origin="lower")
-        ax_main.contourf(gx, gy, zmap, levels=class_bounds, cmap=cmap_cls, norm=norm_cls, alpha=0.75)
-        ax_main.contour(gx, gy, gz, levels=15, colors="black", linewidths=0.3, alpha=0.4)
-
-        bx, by = bnd.exterior.xy
-        ax_main.plot(bx, by, color="black", linewidth=2.0)
-
-        # kotak "Keterangan" (legend) khas peta tematik ArcGIS, dengan judul
-        legend_handles = [Patch(facecolor=c, edgecolor="black", linewidth=0.6, label=l)
-                           for c, l in zip(class_colors, class_labels)]
-        legend_handles.append(Patch(facecolor="none", edgecolor="black", linewidth=2.0, label="Batas Area"))
-        leg = ax_main.legend(
-            handles=legend_handles, loc="upper left", fontsize=8.5,
-            title="Keterangan", title_fontsize=9.5, framealpha=0.95, edgecolor="black"
-        )
-        leg.get_frame().set_facecolor("white")
-
-        try:
-            scalebar = ScaleBar(1, units="m", location="lower right",
-                                 box_alpha=0.85, color="black", box_color="white",
-                                 font_properties={"size": 7.5})
-            ax_main.add_artist(scalebar)
-        except Exception:
-            pass
-
-        arrow_x = extent[1] - (extent[1] - extent[0]) * 0.07
-        arrow_y0 = extent[2] + (extent[3] - extent[2]) * 0.06
-        arrow_len = (extent[3] - extent[2]) * 0.07
-        ax_main.annotate(
-            "N", xy=(arrow_x, arrow_y0 + arrow_len), xytext=(arrow_x, arrow_y0),
-            ha="center", va="center", fontsize=11, fontweight="bold",
-            arrowprops=dict(facecolor="black", edgecolor="black", width=2.5, headwidth=9, headlength=9)
-        )
-        for spine in ax_main.spines.values():
-            spine.set_edgecolor("black")
-            spine.set_linewidth(1.3)
-
-        ax_main.set_title(f"Peta Sebaran Potensi Erosi & Sedimentasi\n{seg['label']}", fontsize=12, fontweight="bold")
-        ax_main.set_xlabel("Easting (m)", fontsize=8.5)
-        ax_main.set_ylabel("Northing (m)", fontsize=8.5)
-        ax_main.tick_params(labelsize=7.5)
-        ax_main.set_aspect("equal", adjustable="box")
-
-        # ============ PANEL KANAN ATAS: GRAFIK LUAS PER KATEGORI ============
-        ax_bar = fig.add_subplot(gspec[0, 1:])
-        cell_area = seg.get("cell_area", 1.0)
-        if inside_mask is not None:
-            vals = zmap[inside_mask]
-        else:
-            vals = zmap[~np.isnan(zmap)]
-        areas_ha = []
-        for lo, hi in zip(class_bounds[:-1], class_bounds[1:]):
-            n_cell = np.sum((vals >= lo) & (vals < hi))
-            areas_ha.append(n_cell * cell_area / 10000.0)
-        ax_bar.bar(class_labels, areas_ha, color=class_colors, edgecolor="black", linewidth=0.6)
-        ax_bar.set_title("Luas per Kategori Risiko (Ha)", fontsize=9.5, fontweight="bold")
-        ax_bar.tick_params(axis="x", labelsize=6.5, rotation=18)
-        ax_bar.tick_params(axis="y", labelsize=7)
-        ax_bar.spines[["top", "right"]].set_visible(False)
-        for i, v in enumerate(areas_ha):
-            ax_bar.text(i, v, f"{v:.2f}", ha="center", va="bottom", fontsize=6.5)
-
-        # ============ 2 PANEL KANAN TENGAH: HILLSHADE & ZOOM TITIK KRITIS ============
-        ax_hs = fig.add_subplot(gspec[1, 1])
-        ax_hs.imshow(hillshade, cmap="gist_earth", extent=extent, origin="lower")
-        ax_hs.plot(bx, by, color="black", linewidth=1.0)
-        ax_hs.set_title("Topografi (Hillshade)", fontsize=8, fontweight="bold")
-        ax_hs.set_xticks([]); ax_hs.set_yticks([])
-        for spine in ax_hs.spines.values():
-            spine.set_edgecolor("black"); spine.set_linewidth(0.8)
-
-        ax_zoom = fig.add_subplot(gspec[1, 2])
-        top10 = seg.get("top10_overflow")
-        if top10 is not None and len(top10) > 0:
-            cx_, cy_ = float(top10.iloc[0]["X"]), float(top10.iloc[0]["Y"])
-            zoom_span = (extent[1] - extent[0]) * 0.12
-            ax_zoom.imshow(hillshade, cmap="gray", extent=extent, origin="lower", alpha=0.5)
-            ax_zoom.contourf(gx, gy, zmap, levels=class_bounds, cmap=cmap_cls, norm=norm_cls, alpha=0.8)
-            ax_zoom.plot(cx_, cy_, marker="*", color="black", markersize=14, markeredgecolor="white")
-            ax_zoom.set_xlim(cx_ - zoom_span, cx_ + zoom_span)
-            ax_zoom.set_ylim(cy_ - zoom_span, cy_ + zoom_span)
-        ax_zoom.set_title("Zoom Titik Kritis", fontsize=8, fontweight="bold")
-        ax_zoom.set_xticks([]); ax_zoom.set_yticks([])
-        for spine in ax_zoom.spines.values():
-            spine.set_edgecolor("black"); spine.set_linewidth(0.8)
-
-        # ============ PANEL KANAN BAWAH: MODEL 3D ============
-        ax3d = fig.add_subplot(gspec[2, 1:], projection="3d")
-        step = max(1, gx.shape[0] // 80)
-        gx_s, gy_s, gz_s, zmap_s = gx[::step, ::step], gy[::step, ::step], gz[::step, ::step], zmap[::step, ::step]
-        face_colors = cmap_cls(norm_cls(np.nan_to_num(zmap_s, nan=0)))
-        ax3d.plot_surface(
-            gx_s, gy_s, gz_s, facecolors=face_colors,
-            rstride=1, cstride=1, linewidth=0, antialiased=True, shade=True
-        )
-        ax3d.set_title("Model 3D", fontsize=9, fontweight="bold")
-        ax3d.set_xticks([]); ax3d.set_yticks([]); ax3d.set_zticks([])
-        ax3d.view_init(elev=48, azim=-60)
-        try:
-            ax3d.set_box_aspect((1, 1, 0.35))
-        except Exception:
-            pass
-
-        fig.suptitle(
-            f"Analisis Sebaran Potensi Erosi & Sedimentasi — {seg['label']} "
-            f"({pd.Timestamp.now().strftime('%d %B %Y')})",
-            fontsize=11, fontweight="bold", y=0.995
-        )
-
-        plt.savefig(out_path, dpi=200, bbox_inches="tight")
-        plt.close(fig)
-        return out_path
-
-    if st.session_state.get("analysis_done", False) and st.button("GENERATE EXECUTIVE REPORT"):
-
-        seg_results_all = st.session_state.get("segment_results", {})
-
-        if not seg_results_all:
-            st.error("Belum ada hasil analisis segmen yang tersimpan. Jalankan analisis dulu.")
-        else:
-            st.info(f"Menyusun laporan teknis untuk {len(seg_results_all)} segmen...")
-
-            # ================= PAGE / STYLE SETUP (format artikel jurnal, A4; peta = landscape) =================
-            PAGE_W, PAGE_H = A4
-            LAND_W, LAND_H = landscape(A4)
-            MARGIN = 2.1 * cm
-            CONTENT_W = PAGE_W - 2 * MARGIN
-            LAND_CONTENT_W = LAND_W - 2 * MARGIN
-
-            pdf_file = "Executive_Report.pdf"
-
-            frame_portrait = Frame(
-                MARGIN, MARGIN, PAGE_W - 2 * MARGIN, PAGE_H - 2 * MARGIN - 0.4 * cm,
-                id="portrait_frame", topPadding=0.4 * cm
-            )
-            frame_landscape = Frame(
-                MARGIN, MARGIN, LAND_W - 2 * MARGIN, LAND_H - 2 * MARGIN - 0.4 * cm,
-                id="landscape_frame", topPadding=0.4 * cm
-            )
-
-            def _header_footer_portrait(canvas, doc_):
-                _draw_header_footer(canvas, doc_, PAGE_W, PAGE_H)
-
-            def _header_footer_landscape(canvas, doc_):
-                _draw_header_footer(canvas, doc_, LAND_W, LAND_H)
-
-            doc = BaseDocTemplate(
-                pdf_file,
-                pagesize=A4,
-                leftMargin=MARGIN, rightMargin=MARGIN,
-                topMargin=2.3 * cm, bottomMargin=2.2 * cm,
-                title="Laporan Teknis Analisis Erosi & Sedimentasi",
-                author="Geotechnical Intelligence Platform"
-            )
-            doc.addPageTemplates([
-                PageTemplate(id="Portrait", frames=[frame_portrait], pagesize=A4, onPage=_header_footer_portrait),
-                PageTemplate(id="Landscape", frames=[frame_landscape], pagesize=landscape(A4), onPage=_header_footer_landscape),
-            ])
-
-            base = getSampleStyleSheet()
-            styles = {
-                "Title": ParagraphStyle(
-                    "ArtTitle", parent=base["Title"], fontName="Helvetica-Bold",
-                    fontSize=18, leading=22, alignment=TA_CENTER, spaceAfter=4,
-                    textColor=colors.HexColor("#0B3D2E")
-                ),
-                "Subtitle": ParagraphStyle(
-                    "ArtSubtitle", parent=base["Normal"], fontName="Helvetica",
-                    fontSize=9.5, leading=13, alignment=TA_CENTER,
-                    textColor=colors.HexColor("#555555")
-                ),
-                "H1": ParagraphStyle(
-                    "ArtH1", parent=base["Heading1"], fontName="Helvetica-Bold",
-                    fontSize=13.5, leading=17, spaceBefore=16, spaceAfter=6,
-                    textColor=colors.HexColor("#0B3D2E")
-                ),
-                "H2": ParagraphStyle(
-                    "ArtH2", parent=base["Heading2"], fontName="Helvetica-Bold",
-                    fontSize=10.5, leading=14, spaceBefore=10, spaceAfter=5,
-                    textColor=colors.HexColor("#12523D")
-                ),
-                "Body": ParagraphStyle(
-                    "ArtBody", parent=base["BodyText"], fontName="Helvetica",
-                    fontSize=9.3, leading=13.5, alignment=TA_JUSTIFY, spaceAfter=6
-                ),
-                "BodyItalic": ParagraphStyle(
-                    "ArtBodyItalic", parent=base["BodyText"], fontName="Helvetica-Oblique",
-                    fontSize=8.8, leading=12.5, alignment=TA_JUSTIFY,
-                    textColor=colors.HexColor("#444444"), spaceAfter=6
-                ),
-                "Caption": ParagraphStyle(
-                    "ArtCaption", parent=base["Normal"], fontName="Helvetica-Oblique",
-                    fontSize=8, leading=11, alignment=TA_CENTER,
-                    textColor=colors.HexColor("#666666"), spaceBefore=3, spaceAfter=10
-                ),
-                "Bullet": ParagraphStyle(
-                    "ArtBullet", parent=base["BodyText"], fontName="Helvetica",
-                    fontSize=9.1, leading=13, leftIndent=10, spaceAfter=3
-                ),
-                "TblHeader": ParagraphStyle(
-                    "TblHeader", parent=base["Normal"], fontName="Helvetica-Bold",
-                    fontSize=7.6, leading=9.5, textColor=colors.white, alignment=TA_LEFT
-                ),
-                "TblCell": ParagraphStyle(
-                    "TblCell", parent=base["Normal"], fontName="Helvetica",
-                    fontSize=7.4, leading=9.6, alignment=TA_LEFT
-                ),
-                "TblCellBold": ParagraphStyle(
-                    "TblCellBold", parent=base["Normal"], fontName="Helvetica-Bold",
-                    fontSize=7.4, leading=9.6, alignment=TA_LEFT
-                ),
-            }
-
-            def _p(text, style="Body"):
-                return Paragraph(text, styles[style])
-
-            def _divider():
-                return HRFlowable(
-                    width="100%", thickness=0.8, color=colors.HexColor("#0B3D2E"),
-                    spaceBefore=2, spaceAfter=10
-                )
-
-            def _fit_image(path, max_width=CONTENT_W, max_height=None):
-                """Skala gambar proporsional (tanpa distorsi & tanpa sisa ruang kosong
-                dari rasio yang dipaksakan) berdasarkan dimensi asli file."""
-                try:
-                    with PILImage.open(path) as im:
-                        iw, ih = im.size
-                except Exception:
-                    return Image(path, width=max_width, height=max_width * 0.6)
-
-                ratio = ih / iw if iw else 0.6
-                w = max_width
-                h = w * ratio
-                if max_height and h > max_height:
-                    h = max_height
-                    w = h / ratio if ratio else max_width
-                return Image(path, width=w, height=h)
-
-            def _wrap_row(row, header=False, bold_cols=None):
-                bold_cols = bold_cols or []
-                out = []
-                for ci, cell in enumerate(row):
-                    txt = str(cell)
-                    if header:
-                        out.append(Paragraph(txt, styles["TblHeader"]))
-                    elif ci in bold_cols:
-                        out.append(Paragraph(txt, styles["TblCellBold"]))
+                if st.button(_t("Jalankan Validasi dari DXF Boundary", "Run Validation from DXF Boundary"), key=f"run_validation_dxf_{val_sid}"):
+                    if gt_dxf_upload is None:
+                        st.error(_t("Upload file DXF boundary erosi aktual terlebih dahulu.", "Please upload the actual erosion boundary DXF file first."))
                     else:
-                        out.append(Paragraph(txt, styles["TblCell"]))
-                return out
+                        erosion_gt_polygon = None
+                        try:
+                            erosion_gt_polygon = read_boundary_polygon(gt_dxf_upload)
+                        except Exception as e:
+                            st.error(_t(f"Gagal membaca DXF: {e}", f"Failed to read DXF: {e}"))
 
-            def _build_table(rows, col_widths, bold_cols=None, highlight_row=None):
-                """Tabel standar artikel: header hijau tua, isi ter-wrap rapi (tidak overflow),
-                baris selang-seling, opsional highlight 1 baris (mis. status TARP aktif)."""
-                wrapped = [_wrap_row(rows[0], header=True)]
-                for r in rows[1:]:
-                    wrapped.append(_wrap_row(r, bold_cols=bold_cols))
+                        if erosion_gt_polygon is None:
+                            st.error(
+                                "Tidak ditemukan boundary/polygon tertutup yang valid pada file DXF ini. "
+                                "Pastikan DXF berisi polyline tertutup (LWPOLYLINE/POLYLINE) yang membentuk "
+                                "batas area erosi."
+                            )
+                        else:
+                            gx, gy = val_seg["grid_x"], val_seg["grid_y"]
+                            zmap = val_seg["zone_map"]
+                            inside_study = val_seg["inside"]
+                            cell_area = val_seg.get("cell_area", 1.0)
 
-                t = Table(wrapped, colWidths=col_widths, hAlign="CENTER", repeatRows=1)
-                cmds = [
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0B3D2E")),
-                    ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#BBBBBB")),
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 4),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-                    ("TOPPADDING", (0, 0), (-1, -1), 3.5),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3.5),
-                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F2F6F4")]),
-                ]
-                if highlight_row is not None:
-                    cmds.append(("BACKGROUND", (0, highlight_row), (-1, highlight_row), colors.HexColor("#FFE3B0")))
-                t.setStyle(TableStyle(cmds))
-                return t
+                            gx_flat = gx.ravel()
+                            gy_flat = gy.ravel()
+                            z_flat = zmap.ravel()
+                            inside_flat = np.asarray(inside_study).ravel()
 
-            def _draw_header_footer(canvas, doc_, page_w, page_h):
-                canvas.saveState()
-                canvas.setStrokeColor(colors.HexColor("#0B3D2E"))
-                canvas.setLineWidth(0.6)
-                canvas.line(MARGIN, page_h - 1.5 * cm, page_w - MARGIN, page_h - 1.5 * cm)
-                canvas.setFont("Helvetica", 7.5)
-                canvas.setFillColor(colors.HexColor("#666666"))
-                canvas.drawString(MARGIN, page_h - 1.3 * cm, "Laporan Teknis Analisis Erosi & Sedimentasi")
-                canvas.drawRightString(
-                    page_w - MARGIN, page_h - 1.3 * cm,
-                    pd.Timestamp.now().strftime("%d %B %Y")
-                )
-                canvas.line(MARGIN, 1.5 * cm, page_w - MARGIN, 1.5 * cm)
-                canvas.drawString(MARGIN, 1.15 * cm, "Geotechnical Intelligence Platform — Dokumen Hasil Analisis Otomatis")
-                canvas.drawRightString(page_w - MARGIN, 1.15 * cm, f"Halaman {doc_.page}")
-                canvas.restoreState()
+                            valid_mask = inside_flat & ~np.isnan(z_flat)
+                            gx_valid = gx_flat[valid_mask]
+                            gy_valid = gy_flat[valid_mask]
+                            z_valid = z_flat[valid_mask]
 
-            story = []
+                            if len(gx_valid) == 0:
+                                st.error(_t("Tidak ada sel grid valid di dalam boundary area studi segmen ini.", "No valid grid cells inside this segment's study area boundary."))
+                            else:
+                                inside_erosion = vectorized.contains(erosion_gt_polygon, gx_valid, gy_valid)
 
-            rain_meta_global = st.session_state.get("online_rainfall_meta")
-            rain_val_global = st.session_state.get("online_rainfall")
+                                y_true_arr = np.where(inside_erosion, "Tinggi/Ekstrem", "Rendah")
+                                y_pred_arr = np.array(
+                                    [_classify_score(s) or "Rendah" for s in z_valid]
+                                )
 
-            # ===================== COVER / RINGKASAN EKSEKUTIF =====================
-            story.append(Paragraph("LAPORAN TEKNIS ANALISIS EROSI & SEDIMENTASI", styles["Title"]))
-            story.append(Paragraph("Evaluasi Geoteknik Sekat/Channel Berbasis Model Numerik DXF", styles["Subtitle"]))
-            story.append(Spacer(1, 4))
-            story.append(Paragraph(
-                f"Diterbitkan {pd.Timestamp.now().strftime('%d %B %Y, %H:%M')} WIB &nbsp;|&nbsp; "
-                f"{len(seg_results_all)} segmen dianalisis &nbsp;|&nbsp; "
-                f"Sumber hujan: {(rain_meta_global or {}).get('source', 'tidak tersedia')}",
-                styles["Subtitle"]
-            ))
-            story.append(Spacer(1, 10))
-            story.append(_divider())
+                                overall_acc, kappa, cm_df, prfs_df = _show_validation_result(
+                                    list(y_true_arr), list(y_pred_arr),
+                                    extra_metric=(
+                                        f"Jumlah sel grid dibandingkan: {len(y_true_arr)} "
+                                        f"(dari boundary DXF vs klasifikasi model)."
+                                    )
+                                )
 
-            # --- ringkasan eksekutif naratif (abstrak) ---
-            n_seg = len(seg_results_all)
-            worst_seg = max(seg_results_all.values(), key=lambda s: s["max_zone"])
-            avg_erosion_ratio = np.mean([s["erosion_ratio"] for s in seg_results_all.values()]) * 100
-            n_reject = sum(
-                1 for s in seg_results_all.values()
-                if "REJECT" in (s.get("recommendation") or {}).get("status", "")
-                or "KRITIS" in (s.get("recommendation") or {}).get("status", "")
+                                area_eroded_observed_ha = float(np.sum(inside_erosion)) * cell_area / 10000.0
+                                area_eroded_predicted_ha = float(
+                                    np.sum(np.isin(y_pred_arr, ["Sedang", "Tinggi/Ekstrem"]))
+                                ) * cell_area / 10000.0
+                                acol1, acol2 = st.columns(2)
+                                acol1.metric("Luas Erosi Observasi (DXF)", f"{area_eroded_observed_ha:.2f} Ha")
+                                acol2.metric("Luas Erosi Prediksi Model (Sedang+Tinggi/Ekstrem)",
+                                             f"{area_eroded_predicted_ha:.2f} Ha")
+
+                                st.session_state["segment_results"][val_sid]["validation"] = {
+                                    "overall_accuracy": overall_acc,
+                                    "kappa": float(kappa),
+                                    "kappa_interpretation": _kappa_interpretation(kappa),
+                                    "confusion_matrix": cm_df,
+                                    "prfs": prfs_df,
+                                    "detail": None,
+                                    "n_samples": int(len(y_true_arr)),
+                                    "source": "Boundary erosi aktual (DXF)",
+                                    "area_eroded_observed_ha": area_eroded_observed_ha,
+                                    "area_eroded_predicted_ha": area_eroded_predicted_ha,
+                                }
+                                st.success(
+                                    "Hasil validasi dari DXF boundary tersimpan dan akan otomatis disertakan "
+                                    "di Executive Report."
+                                )
+
+            # ================= BANDINGKAN KETIGA METODE (Hjulström vs Shields vs Partheniades) =================
+            st.markdown("---")
+            st.markdown("#### Bandingkan Ketiga Metode Erosion Assessment")
+            _ui_caption(
+                "Menjalankan Hjulström, Shields, dan Partheniades+Flow Accumulation sekaligus pada segmen "
+                "yang sama, lalu membandingkan akurasi klasifikasi masing-masing terhadap titik sampel "
+                "lapangan yang sama — mengikuti struktur Tabel 5 & Gambar 8 pada makalah acuan. "
+                "(Fitur ini memakai tabel Titik Sampel di atas; belum mendukung boundary DXF.)"
             )
-            story.append(Paragraph("RINGKASAN EKSEKUTIF", styles["H1"]))
-            story.append(Paragraph(
-                f"Laporan ini merangkum hasil evaluasi geoteknik otomatis terhadap {n_seg} segmen "
-                f"sekat/channel berdasarkan pemodelan permukaan 3D dari data DXF, dikombinasikan dengan "
-                f"analisis hidrologi-hidrolika dan salah satu dari tiga metode erosi (Hjulström, Shields, "
-                f"atau Partheniades). Rata-rata area berpotensi erosi di seluruh segmen adalah "
-                f"<b>{avg_erosion_ratio:.1f}%</b>. Segmen dengan indeks risiko tertinggi adalah "
-                f"<b>{worst_seg['label']}</b> (indeks {worst_seg['max_zone']:.2f} dari skala 0-2). "
-                f"Dari seluruh segmen, <b>{n_reject}</b> segmen berada pada status kritis/tidak "
-                f"direkomendasikan dan memerlukan tindak lanjut prioritas. Detail metodologi, kalkulasi "
-                f"titik kritis, dan rekomendasi rekayasa per segmen disajikan pada bagian berikut.",
-                styles["Body"]
-            ))
-            story.append(Spacer(1, 6))
 
-            # tabel ringkasan seluruh segmen (perbandingan)
-            summary_header = ["Segmen", "Metode", "Erosi\n(Ha)", "Sedimentasi\n(Ha)", "Indeks\nRisiko Maks", "Level TARP"]
-            summary_rows = [summary_header]
-            for sid, seg in seg_results_all.items():
-                tarp_rows_tmp, active_idx_tmp = _tarp_rows(seg["max_zone"])
-                level_name = tarp_rows_tmp[active_idx_tmp + 1][0].split("  ←")[0] if active_idx_tmp is not None else "-"
-                summary_rows.append([
-                    seg["label"], seg["analysis_method"],
-                    f"{seg['erosion_area']:.2f}", f"{seg['sedimentation_area']:.2f}",
-                    f"{seg['max_zone']:.2f}", level_name
+            if st.button(_t("Jalankan Perbandingan 3 Metode", "Run 3-Method Comparison"), key=f"run_compare3_{val_sid}"):
+
+                gt_table_cmp = st.session_state.get(gt_key, default_gt)
+                valid_gt_rows = [
+                    r for _, r in gt_table_cmp.iterrows()
+                    if r.get("Kelas_Observasi") in RISK_CLASSES
+                ]
+
+                if len(valid_gt_rows) < 2:
+                    st.error(_t("Isi minimal 2 titik sampel lapangan (di bagian atas) sebelum membandingkan metode.", "Fill in at least 2 field sample points (above) before comparing methods."))
+                else:
+                    gx_c, gy_c = val_seg["grid_x"], val_seg["grid_y"]
+                    slope_c = val_seg["slope"]
+                    flow_density_c = val_seg["flow_density"]
+                    velocity_field_c = val_seg["velocity_field"]
+                    valid_mask_c = val_seg["valid_mask"]
+                    grain_size_c = val_seg["grain_size_mm"]
+                    rho_water_c = val_seg["rho_water"]
+                    rho_soil_c = val_seg["rho_soil"]
+                    tau_critical_c = val_seg["tau_critical"]
+                    erodibility_M_c = val_seg["erodibility_M"]
+                    flow_weight_c = val_seg["flow_weight"]
+                    flow_depth_c = val_seg["flow_depth"]
+
+                    methods_to_run = ["Hjulstrom Diagram", "Shields Diagram", "Partheniades + Flow Accumulation"]
+                    comparison_rows = []
+                    zone_maps_by_method = {}
+
+                    for method_name in methods_to_run:
+                        t0 = time.time()
+                        zmap_c = np.full(gx_c.shape, np.nan)
+
+                        if method_name == "Hjulstrom Diagram":
+                            zmap_c[valid_mask_c] = np.vectorize(hjulstrom_zone, otypes=[float])(
+                                velocity_field_c[valid_mask_c], grain_size_c
+                            )
+                        elif method_name == "Shields Diagram":
+                            zmap_c[valid_mask_c] = np.vectorize(shields_zone, otypes=[float])(
+                                velocity_field_c[valid_mask_c], slope_c[valid_mask_c],
+                                rho_water_c, rho_soil_c, grain_size_c
+                            )
+                        else:
+                            risk_map_c = partheniades_erosion(
+                                slope=slope_c, flow_density=flow_density_c, rho_water=rho_water_c,
+                                flow_depth=flow_depth_c, tau_critical=tau_critical_c,
+                                erodibility_M=erodibility_M_c, flow_weight=flow_weight_c
+                            )
+                            zmap_c = risk_map_c.copy()
+                            zmap_c = zmap_c / (np.nanpercentile(zmap_c, 99) + 1e-9)
+                            zmap_c = np.clip(zmap_c, 0, 2)
+
+                        zmap_c[~valid_mask_c] = np.nan
+                        elapsed = time.time() - t0
+                        zone_maps_by_method[method_name] = zmap_c
+
+                        # validasi metode ini terhadap titik sampel yang sama
+                        gx_flat_c = gx_c.ravel()
+                        gy_flat_c = gy_c.ravel()
+                        z_flat_c = zmap_c.ravel()
+                        yt, yp = [], []
+                        for r in valid_gt_rows:
+                            try:
+                                px, py = float(r["X"]), float(r["Y"])
+                            except (ValueError, TypeError):
+                                continue
+                            dist2 = (gx_flat_c - px) ** 2 + (gy_flat_c - py) ** 2
+                            nidx = np.nanargmin(dist2)
+                            pcls = _classify_score(z_flat_c[nidx])
+                            if pcls is None:
+                                continue
+                            yt.append(r["Kelas_Observasi"])
+                            yp.append(pcls)
+
+                        if len(yt) >= 2:
+                            acc_m = float(np.mean([a == b for a, b in zip(yt, yp)]))
+                            kappa_m = _sk_cohen_kappa(yt, yp, labels=RISK_CLASSES)
+                        else:
+                            acc_m, kappa_m = float("nan"), float("nan")
+
+                        comparison_rows.append({
+                            "Metode": method_name,
+                            "Akurasi vs Sampel Lapangan (%)": round(acc_m * 100, 1) if not np.isnan(acc_m) else "-",
+                            "Cohen's Kappa": round(kappa_m, 3) if not np.isnan(kappa_m) else "-",
+                            "Skor Risiko Maks": round(float(np.nanmax(zmap_c)), 3),
+                            "Rata-rata Skor Risiko": round(float(np.nanmean(zmap_c)), 3),
+                            "Waktu Komputasi (detik)": round(elapsed, 3),
+                        })
+
+                    comp_df = pd.DataFrame(comparison_rows)
+                    st.markdown("**Tabel Perbandingan (Tabel 5-equivalent)**")
+                    st.dataframe(comp_df, width="stretch")
+
+                    fig_cmp = go.Figure()
+                    fig_cmp.add_trace(go.Bar(
+                        x=comp_df["Metode"],
+                        y=[v if isinstance(v, (int, float)) else 0 for v in comp_df["Akurasi vs Sampel Lapangan (%)"]],
+                        text=comp_df["Akurasi vs Sampel Lapangan (%)"],
+                        textposition="outside",
+                        marker_color=["#4C78A8", "#54A24B", "#E45756"],
+                    ))
+                    fig_cmp.update_layout(
+                        title="Perbandingan Akurasi Klasifikasi Risiko 3 Metode (vs sampel lapangan Anda)",
+                        yaxis_title="Akurasi (%)", yaxis_range=[0, 100], height=420
+                    )
+                    st.plotly_chart(fig_cmp, width="stretch")
+
+                    best_method = comp_df.loc[
+                        comp_df["Akurasi vs Sampel Lapangan (%)"].apply(lambda v: v if isinstance(v, (int, float)) else -1).idxmax()
+                    ]
+                    _ui_info(
+                        f"Metode dengan akurasi tertinggi terhadap sampel lapangan Anda saat ini: "
+                        f"**{best_method['Metode']}** ({best_method['Akurasi vs Sampel Lapangan (%)']}%). "
+                        "Catatan: hasil ini bergantung penuh pada jumlah & sebaran titik sampel yang diinput — "
+                        "tambah titik sampel untuk kesimpulan yang lebih andal."
+                    )
+
+                    st.session_state["segment_results"][val_sid]["method_comparison"] = comp_df
+
+        # ================= HELPER: render formula sebagai gambar (mathtext) =================
+        def _render_formula_png(latex_expr, out_path, fontsize=15):
+            f = plt.figure(figsize=(6.2, 0.9))
+            f.text(0.02, 0.5, f"${latex_expr}$", fontsize=fontsize, va="center", ha="left")
+            plt.axis("off")
+            plt.savefig(out_path, dpi=220, bbox_inches="tight", pad_inches=0.08, transparent=False)
+            plt.close(f)
+            return out_path
+
+        # ================= HELPER: tabel TARP (Trigger Action Response Plan) =================
+        def _tarp_rows(current_score):
+            levels = [
+                ("HIJAU (Normal)", 0.0, 0.5,
+                 "Skor risiko < 0.5 — kondisi stabil",
+                 "Inspeksi rutin bulanan, pantau curah hujan",
+                 "Pertahankan geometri drainase, tanpa aksi khusus",
+                 "Tim O&M lapangan"),
+                ("KUNING (Waspada)", 0.5, 1.0,
+                 "Skor risiko 0.5-1.0 — erosi awal terdeteksi",
+                 "Inspeksi 2 minggu sekali, pasang patok monitoring",
+                 "Revegetasi, surface protection mat, perbaikan berm",
+                 "Pengawas lapangan + Geoteknik"),
+                ("ORANYE (Siaga)", 1.0, 2.0,
+                 "Skor risiko 1.0-2.0 — erosi sedang, potensi berkembang",
+                 "Inspeksi mingguan, pasang alat ukur kecepatan aliran",
+                 "Riprap D50 150-300 mm, check dam, drop structure, turunkan kecepatan < 1 m/s",
+                 "Engineer Geoteknik + Manajer Proyek"),
+                ("MERAH (Kritis)", 2.0, float("inf"),
+                 "Skor risiko > 2.0 — erosi ekstrem, risiko scouring/headcut/kegagalan drainase",
+                 "Monitoring harian/real-time, evakuasi area jika perlu",
+                 "Redesain drainase, concrete lining/reno mattress, detention pond, "
+                 "turunkan slope < 5% dan kecepatan < 1 m/s SEGERA",
+                 "Manajer Proyek + Ahli Geoteknik Bersertifikat"),
+            ]
+            rows = [["Level TARP", "Kriteria Trigger", "Aksi Monitoring", "Aksi Respons", "Penanggung Jawab"]]
+            active_level_idx = None
+            for i, (name, lo, hi, crit, monitor, action, pic) in enumerate(levels):
+                mark = ""
+                if lo <= current_score < hi:
+                    mark = "  ← KONDISI SAAT INI"
+                    active_level_idx = i
+                rows.append([name + mark, crit, monitor, action, pic])
+            return rows, active_level_idx
+
+        # ================= HELPER: bangun peta erosi/sedimentasi per segmen =================
+        def _build_segment_map_png(seg, out_path):
+            """Peta risiko erosi/sedimentasi bergaya kartografi standar (mirip layout
+            ArcGIS/QGIS): hillshade + kontur elevasi, overlay risiko, boundary,
+            scale bar (sebelumnya diimpor tapi TIDAK PERNAH dipasang di peta),
+            north arrow, graticule koordinat, neatline, dan title block."""
+
+            # Kalau overlay Citra Satelit Online diaktifkan untuk segmen ini, pakai geometri
+            # versi UTM (sudah ditransformasi dari Lokal) supaya sejajar dengan citra satelit
+            # yang selalu "north-up". Kalau tidak, tetap pakai grid Lokal seperti semula.
+            sat = seg.get("satellite_basemap")
+            if sat is not None:
+                gx, gy = seg["utm_grid_x"], seg["utm_grid_y"]
+                gz = seg["grid_z"]
+                zmap, smap = seg["zone_map"], seg["sediment_map"]
+                seg_contours = seg.get("utm_contours")
+                boundary_rings = seg.get("utm_boundary_xy") or []
+            else:
+                gx, gy, gz = seg["grid_x"], seg["grid_y"], seg["grid_z"]
+                zmap, smap, bnd = seg["zone_map"], seg["sediment_map"], seg["boundary"]
+                seg_contours = seg.get("contours")
+                boundary_rings = list(_iter_boundary_rings(bnd))
+
+            ortho = seg.get("orthophoto")
+
+            fig_s, ax_s = plt.subplots(figsize=(12, 8.5))
+            from matplotlib.colors import LightSource
+            ls = LightSource(azdeg=315, altdeg=45)
+            hillshade = ls.hillshade(gz, vert_exag=3)
+
+            if sat is not None:
+                extent = list(sat["extent"])
+            else:
+                extent = [np.nanmin(gx), np.nanmax(gx), np.nanmin(gy), np.nanmax(gy)]
+
+            if sat is not None:
+                # Citra satelit online sebagai latar (auto-update, north-up di koordinat UTM).
+                ax_s.imshow(
+                    sat["rgb"], extent=sat["extent"], origin="upper", zorder=1
+                )
+                _risk_alpha = 0.55
+                _sed_alpha = 0.40
+            elif ortho is not None:
+                # Orthophoto sebagai latar; hillshade tidak dipakai lagi supaya foto asli
+                # tidak tertutup abu-abu, dan risk map dibuat lebih transparan.
+                ax_s.imshow(
+                    ortho["rgb"], extent=ortho["extent"], origin="upper", zorder=1
+                )
+                _risk_alpha = 0.55
+                _sed_alpha = 0.40
+            else:
+                ax_s.imshow(
+                    hillshade, cmap="gray", alpha=0.45,
+                    extent=extent, origin="lower"
+                )
+                ax_s.contour(gx, gy, gz, levels=20, colors="black", linewidths=0.35, alpha=0.55)
+                _risk_alpha = 0.65
+                _sed_alpha = 0.50
+
+            erosion_plot = ax_s.contourf(gx, gy, zmap, levels=15, cmap="RdYlGn_r", alpha=_risk_alpha)
+            sedim_plot = ax_s.contourf(
+                gx, gy, smap, levels=[0.5, 0.7, 0.85, 1], cmap="Blues", alpha=_sed_alpha
+            )
+            if (sat is not None or ortho is not None) and seg_contours:
+                # Garis DXF asli digambar ulang sebagai overlay di atas citra satelit/orthophoto
+                # + risk map, supaya bentuk kontur/desain DXF tetap kelihatan jelas di atas foto udara.
+                _plot_dxf_overlay_2d(ax_s, seg_contours, color="black", linewidth=0.4, alpha=0.85)
+            for _i_bs, (bx_s, by_s) in enumerate(boundary_rings):
+                ax_s.plot(
+                    bx_s, by_s, color="black" if (ortho is None and sat is None) else "magenta", linewidth=2.2,
+                    label="Boundary Area" if _i_bs == 0 else None,
+                )
+
+            # ---- Graticule koordinat (garis bantu Easting/Northing bergaya peta teknik) ----
+            ax_s.grid(True, which="major", linestyle="--", linewidth=0.4, color="grey", alpha=0.5)
+            ax_s.tick_params(labelsize=8)
+            ax_s.ticklabel_format(style="plain", axis="both")
+            for label in ax_s.get_xticklabels():
+                label.set_rotation(30)
+
+            # ---- Colorbar ----
+            cbar = plt.colorbar(erosion_plot, ax=ax_s, shrink=0.65, pad=0.02)
+            cbar.set_label("Erosion Risk Index", fontsize=9)
+            cbar.ax.tick_params(labelsize=8)
+
+            # ---- Legend (boundary + kategori sedimentasi) ----
+            legend_handles = [
+                Patch(facecolor="none", edgecolor="black", linewidth=2.2, label="Batas Area (Boundary)"),
+                Patch(facecolor="#4d94ff", alpha=0.5, label="Potensi Sedimentasi"),
+            ]
+            ax_s.legend(
+                handles=legend_handles, loc="upper left", fontsize=8,
+                framealpha=0.9, edgecolor="black"
+            )
+
+            # ---- Scale Bar (sebelumnya diimpor tapi tidak pernah dipasang) ----
+            try:
+                scalebar = ScaleBar(
+                    1, units="m", location="lower right",
+                    box_alpha=0.8, color="black", box_color="white",
+                    font_properties={"size": 8}
+                )
+                ax_s.add_artist(scalebar)
+            except Exception:
+                pass
+
+            # ---- North Arrow ----
+            arrow_x = extent[1] - (extent[1] - extent[0]) * 0.06
+            arrow_y_base = extent[2] + (extent[3] - extent[2]) * 0.08
+            arrow_len = (extent[3] - extent[2]) * 0.08
+            ax_s.annotate(
+                "N",
+                xy=(arrow_x, arrow_y_base + arrow_len),
+                xytext=(arrow_x, arrow_y_base),
+                ha="center", va="center", fontsize=12, fontweight="bold",
+                arrowprops=dict(facecolor="black", edgecolor="black", width=3, headwidth=10, headlength=10)
+            )
+
+            # ---- Neatline (bingkai peta) ----
+            for spine in ax_s.spines.values():
+                spine.set_edgecolor("black")
+                spine.set_linewidth(1.4)
+
+            ax_s.set_title(
+                f"Peta Risiko Erosi & Sedimentasi — {seg['label']}"
+                + (" (di atas Citra Satelit Online)" if sat is not None else ""),
+                fontsize=14, fontweight="bold", pad=14
+            )
+            ax_s.set_xlabel("Easting UTM 50S (m)" if sat is not None else "Easting (m)", fontsize=9)
+            ax_s.set_ylabel("Northing UTM 50S (m)" if sat is not None else "Northing (m)", fontsize=9)
+            ax_s.set_aspect("equal", adjustable="box")
+
+            # ---- Title block kecil di bawah peta (koordinat sistem, sumber, tanggal) ----
+            _coord_sys_text = (
+                "UTM Zone 50S (hasil transformasi otomatis dari Lokal)" if sat is not None
+                else "mengikuti DXF sumber (proyeksi lokal/UTM sesuai input)"
+            )
+            fig_s.text(
+                0.5, 0.01,
+                f"Sistem Koordinat: {_coord_sys_text}  |  "
+                "Sumber: Analisis Geoteknik Otomatis"
+                + (" + Esri World Imagery" if sat is not None else "")
+                + "  |  Dibuat: " + pd.Timestamp.now().strftime("%d %b %Y"),
+                ha="center", fontsize=7.5, color="#333333"
+            )
+
+            plt.tight_layout(rect=[0, 0.02, 1, 1])
+            plt.savefig(out_path, dpi=220, bbox_inches="tight")
+            plt.close(fig_s)
+            return out_path
+
+        # ================= HELPER: peta komposit gaya "figure ilmiah" (klasifikasi + grafik + 3D) =================
+        def _build_segment_composite_map_png(seg, out_path):
+            """Layout komposit satu halaman mengikuti gaya figure laporan geoteknik/tambang:
+            - Panel besar kiri: peta klasifikasi risiko (diskrit, dengan kotak Keterangan/legend)
+              + north arrow + scale bar + boundary.
+            - Panel kanan atas: grafik luasan per kategori risiko (Ha).
+            - Dua panel kanan tengah: tampilan hillshade & zoom area kritis (pengganti foto lapangan,
+              karena foto drone/lapangan asli tidak tersedia di pipeline ini).
+            - Panel kanan bawah: render 3D model permukaan (Model 3D) berwarna sesuai indeks risiko.
+            Dibuat landscape (lebar > tinggi) supaya proporsinya pas dipasang di halaman landscape."""
+
+            from matplotlib.colors import LightSource, ListedColormap, BoundaryNorm
+            from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 (registrasi proyeksi 3d)
+
+            gx, gy, gz = seg["grid_x"], seg["grid_y"], seg["grid_z"]
+            zmap, smap, bnd = seg["zone_map"], seg["sediment_map"], seg["boundary"]
+            inside_mask = seg.get("inside")
+
+            # ---- Klasifikasi diskrit 4 kelas mengikuti ambang TARP (konsisten dgn seluruh laporan) ----
+            class_bounds = [0, 0.5, 1.0, 2.0, np.inf]
+            class_colors = ["#4CAF50", "#FFD54F", "#FF9800", "#D32F2F"]
+            class_labels = ["Stabil (Hijau)", "Waspada (Kuning)", "Siaga (Oranye)", "Kritis (Merah)"]
+            cmap_cls = ListedColormap(class_colors)
+            norm_cls = BoundaryNorm(class_bounds, cmap_cls.N)
+
+            fig = plt.figure(figsize=(15.5, 9.2))
+            gspec = fig.add_gridspec(
+                3, 3,
+                width_ratios=[2.0, 0.9, 0.9],
+                height_ratios=[1.0, 1.0, 1.0],
+                wspace=0.28, hspace=0.42
+            )
+
+            # ============ PANEL UTAMA: PETA KLASIFIKASI ============
+            ax_main = fig.add_subplot(gspec[:, 0])
+            ls = LightSource(azdeg=315, altdeg=45)
+            hillshade = ls.hillshade(gz, vert_exag=3)
+            extent = [np.nanmin(gx), np.nanmax(gx), np.nanmin(gy), np.nanmax(gy)]
+
+            ax_main.imshow(hillshade, cmap="gray", alpha=0.35, extent=extent, origin="lower")
+            ax_main.contourf(gx, gy, zmap, levels=class_bounds, cmap=cmap_cls, norm=norm_cls, alpha=0.75)
+            ax_main.contour(gx, gy, gz, levels=15, colors="black", linewidths=0.3, alpha=0.4)
+
+            _bnd_rings = list(_iter_boundary_rings(bnd))
+            for bx, by in _bnd_rings:
+                ax_main.plot(bx, by, color="black", linewidth=2.0)
+
+            # kotak "Keterangan" (legend) khas peta tematik ArcGIS, dengan judul
+            legend_handles = [Patch(facecolor=c, edgecolor="black", linewidth=0.6, label=l)
+                               for c, l in zip(class_colors, class_labels)]
+            legend_handles.append(Patch(facecolor="none", edgecolor="black", linewidth=2.0, label="Batas Area"))
+            leg = ax_main.legend(
+                handles=legend_handles, loc="upper left", fontsize=8.5,
+                title="Keterangan", title_fontsize=9.5, framealpha=0.95, edgecolor="black"
+            )
+            leg.get_frame().set_facecolor("white")
+
+            try:
+                scalebar = ScaleBar(1, units="m", location="lower right",
+                                     box_alpha=0.85, color="black", box_color="white",
+                                     font_properties={"size": 7.5})
+                ax_main.add_artist(scalebar)
+            except Exception:
+                pass
+
+            arrow_x = extent[1] - (extent[1] - extent[0]) * 0.07
+            arrow_y0 = extent[2] + (extent[3] - extent[2]) * 0.06
+            arrow_len = (extent[3] - extent[2]) * 0.07
+            ax_main.annotate(
+                "N", xy=(arrow_x, arrow_y0 + arrow_len), xytext=(arrow_x, arrow_y0),
+                ha="center", va="center", fontsize=11, fontweight="bold",
+                arrowprops=dict(facecolor="black", edgecolor="black", width=2.5, headwidth=9, headlength=9)
+            )
+            for spine in ax_main.spines.values():
+                spine.set_edgecolor("black")
+                spine.set_linewidth(1.3)
+
+            ax_main.set_title(f"Peta Sebaran Potensi Erosi & Sedimentasi\n{seg['label']}", fontsize=12, fontweight="bold")
+            ax_main.set_xlabel("Easting (m)", fontsize=8.5)
+            ax_main.set_ylabel("Northing (m)", fontsize=8.5)
+            ax_main.tick_params(labelsize=7.5)
+            ax_main.set_aspect("equal", adjustable="box")
+
+            # ============ PANEL KANAN ATAS: GRAFIK LUAS PER KATEGORI ============
+            ax_bar = fig.add_subplot(gspec[0, 1:])
+            cell_area = seg.get("cell_area", 1.0)
+            if inside_mask is not None:
+                vals = zmap[inside_mask]
+            else:
+                vals = zmap[~np.isnan(zmap)]
+            areas_ha = []
+            for lo, hi in zip(class_bounds[:-1], class_bounds[1:]):
+                n_cell = np.sum((vals >= lo) & (vals < hi))
+                areas_ha.append(n_cell * cell_area / 10000.0)
+            ax_bar.bar(class_labels, areas_ha, color=class_colors, edgecolor="black", linewidth=0.6)
+            ax_bar.set_title("Luas per Kategori Risiko (Ha)", fontsize=9.5, fontweight="bold")
+            ax_bar.tick_params(axis="x", labelsize=6.5, rotation=18)
+            ax_bar.tick_params(axis="y", labelsize=7)
+            ax_bar.spines[["top", "right"]].set_visible(False)
+            for i, v in enumerate(areas_ha):
+                ax_bar.text(i, v, f"{v:.2f}", ha="center", va="bottom", fontsize=6.5)
+
+            # ============ 2 PANEL KANAN TENGAH: HILLSHADE & ZOOM TITIK KRITIS ============
+            ax_hs = fig.add_subplot(gspec[1, 1])
+            ax_hs.imshow(hillshade, cmap="gist_earth", extent=extent, origin="lower")
+            for bx, by in _bnd_rings:
+                ax_hs.plot(bx, by, color="black", linewidth=1.0)
+            ax_hs.set_title("Topografi (Hillshade)", fontsize=8, fontweight="bold")
+            ax_hs.set_xticks([]); ax_hs.set_yticks([])
+            for spine in ax_hs.spines.values():
+                spine.set_edgecolor("black"); spine.set_linewidth(0.8)
+
+            ax_zoom = fig.add_subplot(gspec[1, 2])
+            top10 = seg.get("top10_overflow")
+            if top10 is not None and len(top10) > 0:
+                cx_, cy_ = float(top10.iloc[0]["X"]), float(top10.iloc[0]["Y"])
+                zoom_span = (extent[1] - extent[0]) * 0.12
+                ax_zoom.imshow(hillshade, cmap="gray", extent=extent, origin="lower", alpha=0.5)
+                ax_zoom.contourf(gx, gy, zmap, levels=class_bounds, cmap=cmap_cls, norm=norm_cls, alpha=0.8)
+                ax_zoom.plot(cx_, cy_, marker="*", color="black", markersize=14, markeredgecolor="white")
+                ax_zoom.set_xlim(cx_ - zoom_span, cx_ + zoom_span)
+                ax_zoom.set_ylim(cy_ - zoom_span, cy_ + zoom_span)
+            ax_zoom.set_title("Zoom Titik Kritis", fontsize=8, fontweight="bold")
+            ax_zoom.set_xticks([]); ax_zoom.set_yticks([])
+            for spine in ax_zoom.spines.values():
+                spine.set_edgecolor("black"); spine.set_linewidth(0.8)
+
+            # ============ PANEL KANAN BAWAH: MODEL 3D ============
+            ax3d = fig.add_subplot(gspec[2, 1:], projection="3d")
+            step = max(1, gx.shape[0] // 80)
+            gx_s, gy_s, gz_s, zmap_s = gx[::step, ::step], gy[::step, ::step], gz[::step, ::step], zmap[::step, ::step]
+            face_colors = cmap_cls(norm_cls(np.nan_to_num(zmap_s, nan=0)))
+            ax3d.plot_surface(
+                gx_s, gy_s, gz_s, facecolors=face_colors,
+                rstride=1, cstride=1, linewidth=0, antialiased=True, shade=True
+            )
+            ax3d.set_title("Model 3D", fontsize=9, fontweight="bold")
+            ax3d.set_xticks([]); ax3d.set_yticks([]); ax3d.set_zticks([])
+            ax3d.view_init(elev=48, azim=-60)
+            try:
+                ax3d.set_box_aspect((1, 1, 0.35))
+            except Exception:
+                pass
+
+            fig.suptitle(
+                f"Analisis Sebaran Potensi Erosi & Sedimentasi — {seg['label']} "
+                f"({pd.Timestamp.now().strftime('%d %B %Y')})",
+                fontsize=11, fontweight="bold", y=0.995
+            )
+
+            plt.savefig(out_path, dpi=200, bbox_inches="tight")
+            plt.close(fig)
+            return out_path
+
+        # ================= LEMBAR PENGESAHAN / TANDA TANGAN REVIEWER =================
+        # Diisi SEBELUM laporan digenerate/diunduh, supaya tanda tangan reviewer sudah
+        # tercantum di dalam PDF final -- bukan ditempel manual setelah PDF jadi.
+        st.markdown("---")
+        _sub_header(_t("Lembar Pengesahan (Reviewer)", "Approval Sheet (Reviewer)"))
+        st.caption(
+            "Opsional -- isi data reviewer dan unggah gambar tanda tangan (PNG/JPG, sebaiknya "
+            "latar transparan) untuk disertakan di halaman pengesahan laporan PDF, sebelum diunduh."
+        )
+        sign_col1, sign_col2 = st.columns(2)
+        with sign_col1:
+            reviewer_name = st.text_input("Nama Reviewer", key="reviewer_name")
+            reviewer_role = st.text_input("Jabatan / Peran", key="reviewer_role",
+                                           placeholder="mis. Ahli Geoteknik Bersertifikat")
+        with sign_col2:
+            reviewer_date = st.date_input("Tanggal Review", key="reviewer_date", value=pd.Timestamp.now())
+            reviewer_signature_file = st.file_uploader(
+                "Unggah Tanda Tangan (PNG/JPG)", type=["png", "jpg", "jpeg"], key="reviewer_signature_file"
+            )
+
+        reviewer_signature_path = None
+        if reviewer_signature_file is not None:
+            reviewer_signature_path = f"reviewer_signature.{reviewer_signature_file.name.split('.')[-1]}"
+            with open(reviewer_signature_path, "wb") as _f_sig:
+                _f_sig.write(reviewer_signature_file.getbuffer())
+            st.image(reviewer_signature_path, caption="Pratinjau tanda tangan", width=220)
+
+        if st.session_state.get("analysis_done", False) and st.button(_t("GENERATE EXECUTIVE REPORT", "GENERATE EXECUTIVE REPORT")):
+
+            seg_results_all = st.session_state.get("segment_results", {})
+
+            if not seg_results_all:
+                st.error(_t("Belum ada hasil analisis segmen yang tersimpan. Jalankan analisis dulu.", "No saved segment analysis results yet. Please run the analysis first."))
+            else:
+                _ui_info(f"Menyusun laporan teknis untuk {len(seg_results_all)} segmen...")
+
+                # ================= PAGE / STYLE SETUP (format artikel jurnal, A4; peta = landscape) =================
+                PAGE_W, PAGE_H = A4
+                LAND_W, LAND_H = landscape(A4)
+                MARGIN = 2.1 * cm
+                CONTENT_W = PAGE_W - 2 * MARGIN
+                LAND_CONTENT_W = LAND_W - 2 * MARGIN
+
+                pdf_file = "Executive_Report.pdf"
+
+                frame_portrait = Frame(
+                    MARGIN, MARGIN, PAGE_W - 2 * MARGIN, PAGE_H - 2 * MARGIN - 0.4 * cm,
+                    id="portrait_frame", topPadding=0.4 * cm
+                )
+                frame_landscape = Frame(
+                    MARGIN, MARGIN, LAND_W - 2 * MARGIN, LAND_H - 2 * MARGIN - 0.4 * cm,
+                    id="landscape_frame", topPadding=0.4 * cm
+                )
+
+                def _header_footer_portrait(canvas, doc_):
+                    _draw_header_footer(canvas, doc_, PAGE_W, PAGE_H)
+
+                def _header_footer_landscape(canvas, doc_):
+                    _draw_header_footer(canvas, doc_, LAND_W, LAND_H)
+
+                doc = BaseDocTemplate(
+                    pdf_file,
+                    pagesize=A4,
+                    leftMargin=MARGIN, rightMargin=MARGIN,
+                    topMargin=2.3 * cm, bottomMargin=2.2 * cm,
+                    title="Laporan Teknis Analisis Erosi & Sedimentasi",
+                    author="Geotechnical Intelligence Platform"
+                )
+                doc.addPageTemplates([
+                    PageTemplate(id="Portrait", frames=[frame_portrait], pagesize=A4, onPage=_header_footer_portrait),
+                    PageTemplate(id="Landscape", frames=[frame_landscape], pagesize=landscape(A4), onPage=_header_footer_landscape),
                 ])
 
-            story.append(Paragraph("Tabel 1. Ringkasan Perbandingan Antar Segmen", styles["H2"]))
-            story.append(_build_table(
-                summary_rows,
-                col_widths=[CONTENT_W*0.22, CONTENT_W*0.26, CONTENT_W*0.13, CONTENT_W*0.15, CONTENT_W*0.13, CONTENT_W*0.11]
-            ))
-            story.append(Paragraph(
-                "Sumber: hasil RUN ANALYSIS pada platform, tanggal sebagaimana tercantum pada header laporan.",
-                styles["Caption"]
-            ))
-            story.append(PageBreak())
+                base = getSampleStyleSheet()
+                styles = {
+                    "Title": ParagraphStyle(
+                        "ArtTitle", parent=base["Title"], fontName="Helvetica-Bold",
+                        fontSize=18, leading=22, alignment=TA_CENTER, spaceAfter=4,
+                        textColor=colors.HexColor("#0B3D2E")
+                    ),
+                    "Subtitle": ParagraphStyle(
+                        "ArtSubtitle", parent=base["Normal"], fontName="Helvetica",
+                        fontSize=9.5, leading=13, alignment=TA_CENTER,
+                        textColor=colors.HexColor("#555555")
+                    ),
+                    "H1": ParagraphStyle(
+                        "ArtH1", parent=base["Heading1"], fontName="Helvetica-Bold",
+                        fontSize=13.5, leading=17, spaceBefore=16, spaceAfter=6,
+                        textColor=colors.HexColor("#0B3D2E")
+                    ),
+                    "H2": ParagraphStyle(
+                        "ArtH2", parent=base["Heading2"], fontName="Helvetica-Bold",
+                        fontSize=10.5, leading=14, spaceBefore=10, spaceAfter=5,
+                        textColor=colors.HexColor("#12523D")
+                    ),
+                    "Body": ParagraphStyle(
+                        "ArtBody", parent=base["BodyText"], fontName="Helvetica",
+                        fontSize=9.3, leading=13.5, alignment=TA_JUSTIFY, spaceAfter=6
+                    ),
+                    "BodyItalic": ParagraphStyle(
+                        "ArtBodyItalic", parent=base["BodyText"], fontName="Helvetica-Oblique",
+                        fontSize=8.8, leading=12.5, alignment=TA_JUSTIFY,
+                        textColor=colors.HexColor("#444444"), spaceAfter=6
+                    ),
+                    "Caption": ParagraphStyle(
+                        "ArtCaption", parent=base["Normal"], fontName="Helvetica-Oblique",
+                        fontSize=8, leading=11, alignment=TA_CENTER,
+                        textColor=colors.HexColor("#666666"), spaceBefore=3, spaceAfter=10
+                    ),
+                    "Bullet": ParagraphStyle(
+                        "ArtBullet", parent=base["BodyText"], fontName="Helvetica",
+                        fontSize=9.1, leading=13, leftIndent=10, spaceAfter=3
+                    ),
+                    "TblHeader": ParagraphStyle(
+                        "TblHeader", parent=base["Normal"], fontName="Helvetica-Bold",
+                        fontSize=7.6, leading=9.5, textColor=colors.white, alignment=TA_LEFT
+                    ),
+                    "TblCell": ParagraphStyle(
+                        "TblCell", parent=base["Normal"], fontName="Helvetica",
+                        fontSize=7.4, leading=9.6, alignment=TA_LEFT
+                    ),
+                    "TblCellBold": ParagraphStyle(
+                        "TblCellBold", parent=base["Normal"], fontName="Helvetica-Bold",
+                        fontSize=7.4, leading=9.6, alignment=TA_LEFT
+                    ),
+                }
 
-            # ===================== CROSS SECTION (jika ada) =====================
-            if "section_distance" in st.session_state:
-                fig_sec, ax_sec = plt.subplots(figsize=(9, 3.6))
-                ax_sec.plot(st.session_state["section_distance"], st.session_state["section_elevation"], linewidth=1.8, color="#0B3D2E")
-                ax_sec.fill_between(st.session_state["section_distance"], st.session_state["section_elevation"],
-                                     alpha=0.12, color="#0B3D2E")
-                ax_sec.set_title("Cross Section A-A'", fontsize=11, fontweight="bold")
-                ax_sec.set_xlabel("Jarak (m)", fontsize=9)
-                ax_sec.set_ylabel("Elevasi (m)", fontsize=9)
-                ax_sec.grid(alpha=0.3, linestyle="--", linewidth=0.5)
-                ax_sec.tick_params(labelsize=8)
-                plt.tight_layout()
-                plt.savefig("CrossSection.png", dpi=220)
-                plt.close(fig_sec)
+                def _p(text, style="Body"):
+                    return Paragraph(text, styles[style])
 
-                story.append(Paragraph("PENAMPANG MELINTANG (CROSS SECTION A-A')", styles["H1"]))
+                def _divider():
+                    return HRFlowable(
+                        width="100%", thickness=0.8, color=colors.HexColor("#0B3D2E"),
+                        spaceBefore=2, spaceAfter=10
+                    )
+
+                def _fit_image(path, max_width=CONTENT_W, max_height=None):
+                    """Skala gambar proporsional (tanpa distorsi & tanpa sisa ruang kosong
+                    dari rasio yang dipaksakan) berdasarkan dimensi asli file."""
+                    try:
+                        with PILImage.open(path) as im:
+                            iw, ih = im.size
+                    except Exception:
+                        return Image(path, width=max_width, height=max_width * 0.6)
+
+                    ratio = ih / iw if iw else 0.6
+                    w = max_width
+                    h = w * ratio
+                    if max_height and h > max_height:
+                        h = max_height
+                        w = h / ratio if ratio else max_width
+                    return Image(path, width=w, height=h)
+
+                def _wrap_row(row, header=False, bold_cols=None):
+                    bold_cols = bold_cols or []
+                    out = []
+                    for ci, cell in enumerate(row):
+                        txt = str(cell)
+                        if header:
+                            out.append(Paragraph(txt, styles["TblHeader"]))
+                        elif ci in bold_cols:
+                            out.append(Paragraph(txt, styles["TblCellBold"]))
+                        else:
+                            out.append(Paragraph(txt, styles["TblCell"]))
+                    return out
+
+                def _build_table(rows, col_widths, bold_cols=None, highlight_row=None):
+                    """Tabel standar artikel: header hijau tua, isi ter-wrap rapi (tidak overflow),
+                    baris selang-seling, opsional highlight 1 baris (mis. status TARP aktif)."""
+                    wrapped = [_wrap_row(rows[0], header=True)]
+                    for r in rows[1:]:
+                        wrapped.append(_wrap_row(r, bold_cols=bold_cols))
+
+                    t = Table(wrapped, colWidths=col_widths, hAlign="CENTER", repeatRows=1)
+                    cmds = [
+                        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0B3D2E")),
+                        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#BBBBBB")),
+                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                        ("TOPPADDING", (0, 0), (-1, -1), 3.5),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 3.5),
+                        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F2F6F4")]),
+                    ]
+                    if highlight_row is not None:
+                        cmds.append(("BACKGROUND", (0, highlight_row), (-1, highlight_row), colors.HexColor("#FFE3B0")))
+                    t.setStyle(TableStyle(cmds))
+                    return t
+
+                def _draw_header_footer(canvas, doc_, page_w, page_h):
+                    canvas.saveState()
+                    canvas.setStrokeColor(colors.HexColor("#0B3D2E"))
+                    canvas.setLineWidth(0.6)
+                    canvas.line(MARGIN, page_h - 1.5 * cm, page_w - MARGIN, page_h - 1.5 * cm)
+                    canvas.setFont("Helvetica", 7.5)
+                    canvas.setFillColor(colors.HexColor("#666666"))
+                    canvas.drawString(MARGIN, page_h - 1.3 * cm, "Laporan Teknis Analisis Erosi & Sedimentasi")
+                    canvas.drawRightString(
+                        page_w - MARGIN, page_h - 1.3 * cm,
+                        pd.Timestamp.now().strftime("%d %B %Y")
+                    )
+                    canvas.line(MARGIN, 1.5 * cm, page_w - MARGIN, 1.5 * cm)
+                    canvas.drawString(MARGIN, 1.15 * cm, "Geotechnical Intelligence Platform — Dokumen Hasil Analisis Otomatis")
+                    canvas.drawRightString(page_w - MARGIN, 1.15 * cm, f"Halaman {doc_.page}")
+                    canvas.restoreState()
+
+                story = []
+
+                rain_meta_global = st.session_state.get("online_rainfall_meta")
+                rain_val_global = st.session_state.get("online_rainfall")
+
+                # ===================== COVER / RINGKASAN EKSEKUTIF =====================
+                story.append(Paragraph("LAPORAN TEKNIS ANALISIS EROSI & SEDIMENTASI", styles["Title"]))
+                story.append(Paragraph("Evaluasi Geoteknik Sekat/Channel Berbasis Model Numerik DXF", styles["Subtitle"]))
+                story.append(Spacer(1, 4))
+                story.append(Paragraph(
+                    f"Diterbitkan {pd.Timestamp.now().strftime('%d %B %Y, %H:%M')} WIB &nbsp;|&nbsp; "
+                    f"{len(seg_results_all)} segmen dianalisis &nbsp;|&nbsp; "
+                    f"Sumber hujan: {(rain_meta_global or {}).get('source', 'tidak tersedia')}",
+                    styles["Subtitle"]
+                ))
+                story.append(Spacer(1, 10))
                 story.append(_divider())
-                story.append(_fit_image("CrossSection.png", max_width=CONTENT_W))
-                story.append(Paragraph("Gambar 1. Profil elevasi sepanjang garis penampang A-A' yang dipilih pada alat Cross Section.", styles["Caption"]))
-                story.append(PageBreak())
 
-            # ===================== PER-SEGMEN =====================
-            for seg_i, (sid, seg) in enumerate(seg_results_all.items()):
-
-                story.append(Paragraph(f"{seg_i + 1}. SEGMEN: {seg['label'].upper()}", styles["H1"]))
-                story.append(_divider())
-
-                # --- data & parameter input ---
-                param_rows = [
-                    ["Parameter", "Nilai"],
-                    ["Jenis kondisi", seg["design_type"]],
-                    ["Metode analisis", seg["analysis_method"]],
-                    ["Luas area (Ha)", f"{seg['boundary_area_ha']:.2f}"],
-                    ["Ukuran butir (grain size)", f"{seg['grain_size_mm']:.3f} mm"],
-                    ["Kecepatan aliran representatif", f"{seg['velocity_hulu']:.3f} m/s"],
-                    ["Tegangan geser kritis (tau_critical)", f"{seg['tau_critical']:.3f}"],
-                    ["Faktor hujan ekstrem", f"{seg['rain_factor']:.2f}x"],
-                    ["Hujan desain terpakai", f"{seg['online_rainfall']:.2f} mm/hari" if seg.get("online_rainfall") else "tidak tersedia"],
-                    ["Sumber hujan", (seg.get('online_rainfall_meta') or {}).get('source', '-')],
-                ]
-                cd = seg.get("contour_diag") or {}
-                if cd:
-                    param_rows.append(["Titik kontur DXF terbaca", f"{cd.get('n_raw_points', '-')}"])
-                    param_rows.append(["Titik blunder terdeteksi", f"{cd.get('n_blunder_points', 0)}"])
-
-                story.append(Paragraph("Data & Parameter Input", styles["H2"]))
-                story.append(_build_table(param_rows, col_widths=[CONTENT_W*0.45, CONTENT_W*0.55]))
-
-                if cd.get("all_z_zero"):
-                    story.append(Spacer(1, 4))
-                    story.append(Paragraph(
-                        "<b>PERINGATAN:</b> Semua titik kontur input pada segmen ini memiliki elevasi Z=0. "
-                        "Hasil surface 3D dan analisis pada segmen ini berpotensi TIDAK MEWAKILI kondisi "
-                        "topografi aktual. Disarankan verifikasi ulang data DXF sumber.",
-                        styles["Body"]
-                    ))
+                # --- ringkasan eksekutif naratif (abstrak) ---
+                n_seg = len(seg_results_all)
+                worst_seg = max(seg_results_all.values(), key=lambda s: s["max_zone"])
+                avg_erosion_ratio = np.mean([s["erosion_ratio"] for s in seg_results_all.values()]) * 100
+                n_reject = sum(
+                    1 for s in seg_results_all.values()
+                    if "REJECT" in (s.get("recommendation") or {}).get("status", "")
+                    or "KRITIS" in (s.get("recommendation") or {}).get("status", "")
+                )
+                story.append(Paragraph("RINGKASAN EKSEKUTIF", styles["H1"]))
+                story.append(Paragraph(
+                    f"Laporan ini merangkum hasil evaluasi geoteknik otomatis terhadap {n_seg} segmen "
+                    f"sekat/channel berdasarkan pemodelan permukaan 3D dari data DXF, dikombinasikan dengan "
+                    f"analisis hidrologi-hidrolika dan salah satu dari tiga metode erosi (Hjulström, Shields, "
+                    f"atau Partheniades). Rata-rata area berpotensi erosi di seluruh segmen adalah "
+                    f"<b>{avg_erosion_ratio:.1f}%</b>. Segmen dengan indeks risiko tertinggi adalah "
+                    f"<b>{worst_seg['label']}</b> (indeks {worst_seg['max_zone']:.2f} dari skala 0-2). "
+                    f"Dari seluruh segmen, <b>{n_reject}</b> segmen berada pada status kritis/tidak "
+                    f"direkomendasikan dan memerlukan tindak lanjut prioritas. Detail metodologi, kalkulasi "
+                    f"titik kritis, dan rekomendasi rekayasa per segmen disajikan pada bagian berikut.",
+                    styles["Body"]
+                ))
                 story.append(Spacer(1, 6))
 
-                # --- hidrologi & hidrolika (jika diaktifkan) ---
-                hydro = seg.get("hydraulics_result")
-                if seg.get("use_hydraulics") and hydro:
-                    story.append(Paragraph("Hidrologi &amp; Hidrolika (Rational Method + Manning's Equation)", styles["H2"]))
-                    hydro_rows = [
+                # tabel ringkasan seluruh segmen (perbandingan)
+                summary_header = ["Segmen", "Metode", "Erosi\n(Ha)", "Sedimentasi\n(Ha)", "Indeks\nRisiko Maks", "Level TARP"]
+                summary_rows = [summary_header]
+                for sid, seg in seg_results_all.items():
+                    tarp_rows_tmp, active_idx_tmp = _tarp_rows(seg["max_zone"])
+                    level_name = tarp_rows_tmp[active_idx_tmp + 1][0].split("  ←")[0] if active_idx_tmp is not None else "-"
+                    summary_rows.append([
+                        seg["label"], seg["analysis_method"],
+                        f"{seg['erosion_area']:.2f}", f"{seg['sedimentation_area']:.2f}",
+                        f"{seg['max_zone']:.2f}", level_name
+                    ])
+
+                story.append(Paragraph("Tabel 1. Ringkasan Perbandingan Antar Segmen", styles["H2"]))
+                story.append(_build_table(
+                    summary_rows,
+                    col_widths=[CONTENT_W*0.22, CONTENT_W*0.26, CONTENT_W*0.13, CONTENT_W*0.15, CONTENT_W*0.13, CONTENT_W*0.11]
+                ))
+                story.append(Paragraph(
+                    "Sumber: hasil RUN ANALYSIS pada platform, tanggal sebagaimana tercantum pada header laporan.",
+                    styles["Caption"]
+                ))
+                story.append(PageBreak())
+
+                # ===================== CROSS SECTION (jika ada) =====================
+                if "section_distance" in st.session_state:
+                    fig_sec, ax_sec = plt.subplots(figsize=(9, 3.6))
+                    ax_sec.plot(st.session_state["section_distance"], st.session_state["section_elevation"], linewidth=1.8, color="#0B3D2E")
+                    ax_sec.fill_between(st.session_state["section_distance"], st.session_state["section_elevation"],
+                                         alpha=0.12, color="#0B3D2E")
+                    ax_sec.set_title("Cross Section A-A'", fontsize=11, fontweight="bold")
+                    ax_sec.set_xlabel("Jarak (m)", fontsize=9)
+                    ax_sec.set_ylabel("Elevasi (m)", fontsize=9)
+                    ax_sec.grid(alpha=0.3, linestyle="--", linewidth=0.5)
+                    ax_sec.tick_params(labelsize=8)
+                    plt.tight_layout()
+                    plt.savefig("CrossSection.png", dpi=220)
+                    plt.close(fig_sec)
+
+                    story.append(Paragraph("PENAMPANG MELINTANG (CROSS SECTION A-A')", styles["H1"]))
+                    story.append(_divider())
+                    story.append(_fit_image("CrossSection.png", max_width=CONTENT_W))
+                    story.append(Paragraph("Gambar 1. Profil elevasi sepanjang garis penampang A-A' yang dipilih pada alat Cross Section.", styles["Caption"]))
+                    story.append(PageBreak())
+
+                # ===================== PER-SEGMEN =====================
+                for seg_i, (sid, seg) in enumerate(seg_results_all.items()):
+
+                    story.append(Paragraph(f"{seg_i + 1}. SEGMEN: {seg['label'].upper()}", styles["H1"]))
+                    story.append(_divider())
+
+                    # --- data & parameter input ---
+                    param_rows = [
                         ["Parameter", "Nilai"],
-                        ["Intensitas hujan (Mononobe)", f"{hydro['intensity_mm_hr']:.1f} mm/jam"],
-                        ["Debit rencana Q (Rational Method)", f"{hydro['q_design_m3s']:.3f} m3/s"],
-                        ["Kedalaman normal h (Manning's)", f"{hydro['h_normal_m']:.3f} m"],
-                        ["Kecepatan normal V (Manning's)", f"{hydro['v_normal_ms']:.3f} m/s"],
-                        ["Froude Number", f"{hydro['froude']:.2f} - {hydro['flow_regime']}" if hydro.get("froude") else "-"],
-                        ["Freeboard tersedia", f"{hydro['freeboard_m']:.2f} m"],
-                        ["Freeboard minimum disarankan", f"{hydro['min_freeboard_m']:.2f} m"],
-                        ["Status freeboard", "CUKUP" if hydro["freeboard_ok"] else "KURANG — perlu redesain tinggi/lebar channel"],
+                        ["Jenis kondisi", seg["design_type"]],
+                        ["Metode analisis", seg["analysis_method"]],
+                        ["Luas area (Ha)", f"{seg['boundary_area_ha']:.2f}"],
+                        ["Ukuran butir (grain size)", f"{seg['grain_size_mm']:.3f} mm"],
+                        ["Kecepatan aliran representatif", f"{seg['velocity_hulu']:.3f} m/s"],
+                        ["Tegangan geser kritis (tau_critical)", f"{seg['tau_critical']:.3f}"],
+                        ["Faktor hujan ekstrem", f"{seg['rain_factor']:.2f}x"],
+                        ["Hujan desain terpakai", f"{seg['online_rainfall']:.2f} mm/hari" if seg.get("online_rainfall") else "tidak tersedia"],
+                        ["Sumber hujan", (seg.get('online_rainfall_meta') or {}).get('source', '-')],
                     ]
-                    story.append(_build_table(
-                        hydro_rows, col_widths=[CONTENT_W*0.5, CONTENT_W*0.5],
-                        highlight_row=8
-                    ))
-                    story.append(Paragraph(
-                        "Kecepatan aliran &amp; kedalaman pada analisis erosi segmen ini dihitung dari hasil "
-                        "Manning's Equation di atas (bukan input manual), diturunkan dari debit rencana Metode "
-                        "Rasional dengan intensitas hujan estimasi rumus Mononobe.",
-                        styles["BodyItalic"]
-                    ))
+                    cd = seg.get("contour_diag") or {}
+                    if cd:
+                        param_rows.append(["Titik kontur DXF terbaca", f"{cd.get('n_raw_points', '-')}"])
+                        param_rows.append(["Titik blunder terdeteksi", f"{cd.get('n_blunder_points', 0)}"])
+
+                    story.append(Paragraph("Data & Parameter Input", styles["H2"]))
+                    story.append(_build_table(param_rows, col_widths=[CONTENT_W*0.45, CONTENT_W*0.55]))
+
+                    if cd.get("all_z_zero"):
+                        story.append(Spacer(1, 4))
+                        story.append(Paragraph(
+                            "<b>PERINGATAN:</b> Semua titik kontur input pada segmen ini memiliki elevasi Z=0. "
+                            "Hasil surface 3D dan analisis pada segmen ini berpotensi TIDAK MEWAKILI kondisi "
+                            "topografi aktual. Disarankan verifikasi ulang data DXF sumber.",
+                            styles["Body"]
+                        ))
                     story.append(Spacer(1, 6))
 
-                # --- peta risiko (ringkas, portrait) ---
-                map_path = f"Erosion_Map_{sid}.png"
-                _build_segment_map_png(seg, map_path)
-                story.append(Paragraph("Peta Risiko Erosi & Sedimentasi", styles["H2"]))
-                story.append(_fit_image(map_path, max_width=CONTENT_W))
-                story.append(Paragraph(
-                    f"Gambar {seg_i + 2}. Peta risiko erosi (kontur merah-hijau), potensi sedimentasi (biru), "
-                    f"hillshade topografi, dan boundary area untuk {seg['label']}. Versi peta komposit "
-                    f"lengkap (klasifikasi + grafik + model 3D) disajikan pada lembar landscape berikut.",
-                    styles["Caption"]
-                ))
-
-                # --- peta komposit (LANDSCAPE, mengikuti gaya figure referensi pengguna) ---
-                composite_path = f"Composite_Map_{sid}.png"
-                _build_segment_composite_map_png(seg, composite_path)
-
-                story.append(NextPageTemplate("Landscape"))
-                story.append(PageBreak())
-                story.append(Paragraph(
-                    f"LEMBAR PETA — SEBARAN POTENSI EROSI & SEDIMENTASI: {seg['label'].upper()}",
-                    styles["H1"]
-                ))
-                story.append(_divider())
-                story.append(_fit_image(composite_path, max_width=LAND_CONTENT_W, max_height=LAND_H - 5.5 * cm))
-                story.append(Paragraph(
-                    f"Gambar {seg_i + 2}a. Peta komposit {seg['label']}: klasifikasi risiko erosi/sedimentasi "
-                    "4 kelas (kiri), grafik luas per kategori (kanan atas), topografi hillshade & zoom titik "
-                    "kritis (kanan tengah), dan model permukaan 3D berwarna indeks risiko (kanan bawah).",
-                    styles["Caption"]
-                ))
-                story.append(NextPageTemplate("Portrait"))
-                story.append(PageBreak())
-
-                # --- metodologi & formula ---
-                story.append(Paragraph("Metodologi & Formula", styles["H2"]))
-                if seg["analysis_method"] == "Hjulstrom Diagram":
-                    story.append(Paragraph(
-                        "Klasifikasi risiko erosi/deposisi menggunakan pendekatan diagram Hjulström, yang "
-                        "membandingkan kecepatan aliran aktual terhadap ambang kecepatan erosi dan deposisi "
-                        "sebagai fungsi diameter butir sedimen (d, dalam meter). <i>Catatan keterbatasan: "
-                        "pendekatan power-law ini tidak menangkap efek kohesi pada material lempung/lanau "
-                        "halus (&lt;0,1 mm), di mana kurva Hjulström asli menunjukkan partikel sangat halus "
-                        "justru lebih tahan erosi karena kohesi.</i>",
-                        styles["Body"]
-                    ))
-                    f1_path = f"formula_verosion_{sid}.png"
-                    f2_path = f"formula_vdep_{sid}.png"
-                    f3_path = f"formula_score_{sid}.png"
-                    _render_formula_png(r"v_{erosion} = 0.1 \times d^{-0.4}", f1_path)
-                    _render_formula_png(r"v_{deposition} = 0.01 \times d^{-0.2}", f2_path)
-                    _render_formula_png(
-                        r"Skor = clip\left(2 \times \frac{v - v_{deposition}}{v_{erosion} - v_{deposition}},\ 0,\ 2\right)",
-                        f3_path
-                    )
-                    story.append(_fit_image(f1_path, max_width=CONTENT_W*0.55))
-                    story.append(_fit_image(f2_path, max_width=CONTENT_W*0.55))
-                    story.append(_fit_image(f3_path, max_width=CONTENT_W*0.85))
-                    story.append(Paragraph(
-                        "Skor 0 = zona deposisi dominan, skor 2 = zona erosi ekstrem. Nilai d dikonversi "
-                        "dari mm ke meter sebelum dihitung.",
-                        styles["Body"]
-                    ))
-                elif seg["analysis_method"] == "Shields Diagram":
-                    story.append(Paragraph(
-                        "Klasifikasi mobilitas sedimen menggunakan parameter Shields tak berdimensi (θ), yang "
-                        "membandingkan gaya penggerak aliran terhadap gaya penahan berat butiran terendam "
-                        "(Shields, 1936). Tegangan geser dasar dihitung memakai depth-slope product (dengan "
-                        "kedalaman aliran h), bukan hanya kemiringan S — koreksi ini penting karena tanpa "
-                        "suku h, τ₀ tidak bersatuan Pascal yang valid secara dimensional.",
-                        styles["Body"]
-                    ))
-                    fs1_path = f"formula_tau0_shields_{sid}.png"
-                    fs2_path = f"formula_theta_{sid}.png"
-                    _render_formula_png(r"\tau_0 = \rho_w \times g \times h \times S", fs1_path)
-                    _render_formula_png(
-                        r"\theta = \frac{\tau_0}{(\rho_s - \rho_w) \times g \times D_{50}}",
-                        fs2_path
-                    )
-                    story.append(_fit_image(fs1_path, max_width=CONTENT_W*0.55))
-                    story.append(_fit_image(fs2_path, max_width=CONTENT_W*0.65))
-                    story.append(Paragraph(
-                        f"dengan τ₀ tegangan geser dasar aktual (N/m²), h = kedalaman aliran = "
-                        f"{seg['flow_depth']:.2f} m, ρw dan ρs densitas air dan sedimen (kg/m³), g = 9,81 m/s², "
-                        f"dan D50 diameter butiran median (mm). Klasifikasi: θ &lt; 0,03 → stabil/deposisi "
-                        "(skor 0); 0,03 ≤ θ &lt; 0,06 → transisi (skor 1); θ ≥ 0,06 → erosi aktif (skor 2).",
-                        styles["Body"]
-                    ))
-                elif seg["analysis_method"] == "Partheniades + Flow Accumulation":
-                    story.append(Paragraph(
-                        "Laju erosi dihitung sebagai fungsi linear selisih tegangan geser aktual terhadap "
-                        "tegangan geser kritis material (Partheniades, 1965), dikombinasikan dengan bobot "
-                        "flow accumulation ternormalisasi untuk merepresentasikan efek konsentrasi aliran.",
-                        styles["Body"]
-                    ))
-                    fp1_path = f"formula_tau0_parth_{sid}.png"
-                    fp2_path = f"formula_erate_{sid}.png"
-                    fp3_path = f"formula_riskidx_{sid}.png"
-                    _render_formula_png(r"\tau_0 = \rho_w \times g \times h \times S", fp1_path)
-                    _render_formula_png(
-                        r"E = M \times \left(\frac{\tau_0}{\tau_c} - 1\right),\ \ untuk\ \tau_0 > \tau_c",
-                        fp2_path
-                    )
-                    _render_formula_png(
-                        r"RiskIndex = clip\left(\frac{E \times FlowAccum_{norm}}{P_{99}(E \times FlowAccum_{norm})},\ 0,\ 2\right)",
-                        fp3_path, fontsize=12
-                    )
-                    story.append(_fit_image(fp1_path, max_width=CONTENT_W*0.55))
-                    story.append(_fit_image(fp2_path, max_width=CONTENT_W*0.75))
-                    story.append(_fit_image(fp3_path, max_width=CONTENT_W*0.9))
-                    story.append(Paragraph(
-                        f"dengan h = kedalaman aliran = {seg['flow_depth']:.2f} m, M = koefisien erodibilitas "
-                        f"= {seg['erodibility_M']:.4f} kg/m²·s, τc = tegangan geser kritis = "
-                        f"{seg['tau_critical']:.3f} N/m². Apabila τ₀ ≤ τc, laju erosi E diasumsikan nol (zona "
-                        "stabil/deposisi). RiskIndex dinormalisasi terhadap persentil ke-99 hasil kali laju "
-                        "erosi dengan flow accumulation ternormalisasi, lalu di-clip ke rentang [0,2].",
-                        styles["Body"]
-                    ))
-                else:
-                    story.append(Paragraph(
-                        f"Metode analisis yang digunakan pada segmen ini: <b>{seg['analysis_method']}</b>. "
-                        "Formula detail mengikuti definisi standar metode tersebut sebagaimana diterapkan pada modul.",
-                        styles["Body"]
-                    ))
-
-                # --- perhitungan titik paling kritis ---
-                story.append(Paragraph("Perhitungan pada Titik Paling Kritis", styles["H2"]))
-                top10 = seg["top10_overflow"]
-                if top10 is not None and len(top10) > 0:
-                    crit = top10.iloc[0]
-                    if seg["analysis_method"] == "Hjulstrom Diagram":
-                        d_m = seg["grain_size_mm"] / 1000.0 + 1e-6
-                        v_ero_crit = 0.1 * (d_m ** -0.4)
-                        v_dep_crit = 0.01 * (d_m ** -0.2)
-                        v_actual = crit.get("Velocity_ms", float("nan"))
+                    # --- hidrologi & hidrolika (jika diaktifkan) ---
+                    hydro = seg.get("hydraulics_result")
+                    if seg.get("use_hydraulics") and hydro:
+                        story.append(Paragraph("Hidrologi &amp; Hidrolika (Rational Method + Manning's Equation)", styles["H2"]))
+                        hydro_rows = [
+                            ["Parameter", "Nilai"],
+                            ["Intensitas hujan (Mononobe)", f"{hydro['intensity_mm_hr']:.1f} mm/jam"],
+                            ["Debit rencana Q (Rational Method)", f"{hydro['q_design_m3s']:.3f} m3/s"],
+                            ["Kedalaman normal h (Manning's)", f"{hydro['h_normal_m']:.3f} m"],
+                            ["Kecepatan normal V (Manning's)", f"{hydro['v_normal_ms']:.3f} m/s"],
+                            ["Froude Number", f"{hydro['froude']:.2f} - {hydro['flow_regime']}" if hydro.get("froude") else "-"],
+                            ["Freeboard tersedia", f"{hydro['freeboard_m']:.2f} m"],
+                            ["Freeboard minimum disarankan", f"{hydro['min_freeboard_m']:.2f} m"],
+                            ["Status freeboard", "CUKUP" if hydro["freeboard_ok"] else "KURANG — perlu redesain tinggi/lebar channel"],
+                        ]
+                        story.append(_build_table(
+                            hydro_rows, col_widths=[CONTENT_W*0.5, CONTENT_W*0.5],
+                            highlight_row=8
+                        ))
                         story.append(Paragraph(
-                            f"Titik kritis berada pada koordinat X={crit['X']:.2f}, Y={crit['Y']:.2f}, "
-                            f"elevasi (RL)={crit['RL']:.2f} m, dengan skor risiko = {crit.get('RiskScore', float('nan')):.2f}. "
-                            f"Diameter butir d = {seg['grain_size_mm']:.3f} mm = {d_m:.6f} m. "
-                            f"v_erosion = 0,1 × ({d_m:.6f})^-0,4 = <b>{v_ero_crit:.4f} m/s</b>. "
-                            f"v_deposition = 0,01 × ({d_m:.6f})^-0,2 = <b>{v_dep_crit:.4f} m/s</b>. "
-                            f"Kecepatan aliran aktual pada titik ini = <b>{v_actual:.4f} m/s</b>. "
-                            + (
-                                "Kecepatan aktual MELEBIHI ambang erosi → titik ini aktif tererosi."
-                                if v_actual >= v_ero_crit else
-                                "Kecepatan aktual berada di bawah ambang deposisi → titik ini cenderung deposisi."
-                                if v_actual <= v_dep_crit else
-                                "Kecepatan aktual berada di zona transisi (antara ambang deposisi dan erosi)."
-                            ),
+                            "Kecepatan aliran &amp; kedalaman pada analisis erosi segmen ini dihitung dari hasil "
+                            "Manning's Equation di atas (bukan input manual), diturunkan dari debit rencana Metode "
+                            "Rasional dengan intensitas hujan estimasi rumus Mononobe.",
+                            styles["BodyItalic"]
+                        ))
+                        story.append(Spacer(1, 6))
+
+                    # --- Sebaran Risk Index (10 titik prioritas mitigasi) ---
+                    # Gambar ini sebelumnya hanya tampil di layar (bagian "Numerical Modelling"
+                    # di app) dan tidak pernah ikut masuk ke laporan PDF.
+                    if seg.get("risk_index_chart_path"):
+                        story.append(Paragraph("Sebaran Risk Index — 10 Titik Prioritas Mitigasi", styles["H2"]))
+                        story.append(_fit_image(seg["risk_index_chart_path"], max_width=CONTENT_W))
+                        story.append(Paragraph(
+                            f"Gambar {seg_i + 2}b. Sebaran nilai Risk Index pada 10 titik prioritas mitigasi "
+                            f"untuk {seg['label']}, dikelompokkan berdasarkan jenis risiko dominan.",
+                            styles["Caption"]
+                        ))
+                        story.append(Spacer(1, 8))
+
+                    # --- Numerical Modelling (3D) -- 3 sudut pandang ---
+                    # Sebelumnya chart 3D "Numerical Modelling" hanya tampil interaktif di layar
+                    # dan tidak pernah masuk ke laporan PDF. Sekarang disertakan 3 sudut pandang:
+                    # overall, mengarah ke titik paling kritis, dan sudut pandang lain.
+                    num_views = seg.get("numerical_modelling_views") or {}
+                    if any(num_views.get(k) for k in ("overall", "critical_point", "alternate")):
+                        story.append(NextPageTemplate("Landscape"))
+                        story.append(PageBreak())
+                        story.append(Paragraph(
+                            f"NUMERICAL MODELLING (3D) — {seg['label'].upper()}", styles["H1"]
+                        ))
+                        story.append(_divider())
+                        _view_labels = {
+                            "overall": "(a) Tampilan Keseluruhan (Overall)",
+                            "critical_point": "(b) Tampilan Mengarah ke Titik Paling Kritis",
+                            "alternate": "(c) Tampilan Sudut Lain",
+                        }
+                        for _vk in ("overall", "critical_point", "alternate"):
+                            _vp = num_views.get(_vk)
+                            if _vp:
+                                story.append(Paragraph(_view_labels[_vk], styles["H2"]))
+                                story.append(_fit_image(_vp, max_width=LAND_CONTENT_W, max_height=LAND_H - 8.5 * cm))
+                                story.append(Spacer(1, 6))
+                        story.append(Paragraph(
+                            f"Gambar {seg_i + 2}c. Hasil Numerical Modelling 3D {seg['label']} dari tiga sudut "
+                            "pandang: keseluruhan model, terarah ke titik prioritas mitigasi paling kritis "
+                            "(FlowDensity tertinggi), dan sudut pandang lain sebagai pembanding bentuk model.",
+                            styles["Caption"]
+                        ))
+                        story.append(NextPageTemplate("Portrait"))
+                        story.append(PageBreak())
+
+                    # --- 2D Risk Map ---
+                    # Sebelumnya chart 2D Risk Map (fig2) hanya tampil interaktif di layar dan
+                    # tidak pernah ikut masuk ke laporan PDF.
+                    if seg.get("risk_map_2d_path"):
+                        story.append(Paragraph("2D Risk Map", styles["H2"]))
+                        story.append(_fit_image(seg["risk_map_2d_path"], max_width=CONTENT_W))
+                        story.append(Paragraph(
+                            f"Gambar {seg_i + 2}d. 2D Risk Map {seg['label']}: garis kontur DXF, boundary area, "
+                            "sebaran titik erosi, titik overflow, dan zona konvergensi aliran.",
+                            styles["Caption"]
+                        ))
+                        story.append(Spacer(1, 8))
+
+                    # --- peta risiko (ringkas, portrait) ---
+                    map_path = f"Erosion_Map_{sid}.png"
+                    _build_segment_map_png(seg, map_path)
+                    story.append(Paragraph("Peta Risiko Erosi & Sedimentasi", styles["H2"]))
+                    story.append(_fit_image(map_path, max_width=CONTENT_W))
+                    story.append(Paragraph(
+                        f"Gambar {seg_i + 2}. Peta risiko erosi (kontur merah-hijau), potensi sedimentasi (biru), "
+                        f"hillshade topografi, dan boundary area untuk {seg['label']}. Versi peta komposit "
+                        f"lengkap (klasifikasi + grafik + model 3D) disajikan pada lembar landscape berikut.",
+                        styles["Caption"]
+                    ))
+
+                    # --- peta komposit (LANDSCAPE, mengikuti gaya figure referensi pengguna) ---
+                    composite_path = f"Composite_Map_{sid}.png"
+                    _build_segment_composite_map_png(seg, composite_path)
+
+                    story.append(NextPageTemplate("Landscape"))
+                    story.append(PageBreak())
+                    story.append(Paragraph(
+                        f"LEMBAR PETA — SEBARAN POTENSI EROSI & SEDIMENTASI: {seg['label'].upper()}",
+                        styles["H1"]
+                    ))
+                    story.append(_divider())
+                    story.append(_fit_image(composite_path, max_width=LAND_CONTENT_W, max_height=LAND_H - 5.5 * cm))
+                    story.append(Paragraph(
+                        f"Gambar {seg_i + 2}a. Peta komposit {seg['label']}: klasifikasi risiko erosi/sedimentasi "
+                        "4 kelas (kiri), grafik luas per kategori (kanan atas), topografi hillshade & zoom titik "
+                        "kritis (kanan tengah), dan model permukaan 3D berwarna indeks risiko (kanan bawah).",
+                        styles["Caption"]
+                    ))
+                    story.append(NextPageTemplate("Portrait"))
+                    story.append(PageBreak())
+
+                    # --- metodologi & formula ---
+                    story.append(Paragraph("Metodologi & Formula", styles["H2"]))
+                    if seg["analysis_method"] == "Hjulstrom Diagram":
+                        story.append(Paragraph(
+                            "Klasifikasi risiko erosi/deposisi menggunakan pendekatan diagram Hjulström, yang "
+                            "membandingkan kecepatan aliran aktual terhadap ambang kecepatan erosi dan deposisi "
+                            "sebagai fungsi diameter butir sedimen (d, dalam meter). <i>Catatan keterbatasan: "
+                            "pendekatan power-law ini tidak menangkap efek kohesi pada material lempung/lanau "
+                            "halus (&lt;0,1 mm), di mana kurva Hjulström asli menunjukkan partikel sangat halus "
+                            "justru lebih tahan erosi karena kohesi.</i>",
+                            styles["Body"]
+                        ))
+                        f1_path = f"formula_verosion_{sid}.png"
+                        f2_path = f"formula_vdep_{sid}.png"
+                        f3_path = f"formula_score_{sid}.png"
+                        _render_formula_png(r"v_{erosion} = 0.1 \times d^{-0.4}", f1_path)
+                        _render_formula_png(r"v_{deposition} = 0.01 \times d^{-0.2}", f2_path)
+                        _render_formula_png(
+                            r"Skor = clip\left(2 \times \frac{v - v_{deposition}}{v_{erosion} - v_{deposition}},\ 0,\ 2\right)",
+                            f3_path
+                        )
+                        story.append(_fit_image(f1_path, max_width=CONTENT_W*0.55))
+                        story.append(_fit_image(f2_path, max_width=CONTENT_W*0.55))
+                        story.append(_fit_image(f3_path, max_width=CONTENT_W*0.85))
+                        story.append(Paragraph(
+                            "Skor 0 = zona deposisi dominan, skor 2 = zona erosi ekstrem. Nilai d dikonversi "
+                            "dari mm ke meter sebelum dihitung.",
                             styles["Body"]
                         ))
                     elif seg["analysis_method"] == "Shields Diagram":
-                        g_grav = 9.81
-                        d_m = seg["grain_size_mm"] / 1000.0 + 1e-9
-                        slope_at_crit = float(crit.get("Slope", 0.0))
-                        h_for_crit = seg.get("flow_depth", 0.3)
-                        tau0_crit = seg["rho_water"] * g_grav * h_for_crit * slope_at_crit
-                        theta_crit = tau0_crit / (
-                            (seg["rho_soil"] - seg["rho_water"]) * g_grav * d_m + 1e-9
-                        )
-                        theta_class = (
-                            "stabil/deposisi (θ &lt; 0,03)" if theta_crit < 0.03 else
-                            "transisi (0,03 ≤ θ &lt; 0,06)" if theta_crit < 0.06 else
-                            "erosi aktif (θ ≥ 0,06)"
-                        )
                         story.append(Paragraph(
-                            f"Titik kritis pada koordinat X={crit['X']:.2f}, Y={crit['Y']:.2f}, "
-                            f"RL={crit['RL']:.2f} m, kemiringan lokal S={slope_at_crit:.4f} m/m, "
-                            f"kedalaman aliran h={h_for_crit:.2f} m. "
-                            f"τ₀ = {seg['rho_water']:.0f} × 9,81 × {h_for_crit:.2f} × {slope_at_crit:.4f} = "
-                            f"<b>{tau0_crit:.4f} N/m²</b>. "
-                            f"θ = {tau0_crit:.4f} / [({seg['rho_soil']:.0f} − {seg['rho_water']:.0f}) × 9,81 × "
-                            f"{d_m:.6f}] = <b>{theta_crit:.4f}</b>. "
-                            f"Klasifikasi: <b>{theta_class}</b>.",
+                            "Klasifikasi mobilitas sedimen menggunakan parameter Shields tak berdimensi (θ), yang "
+                            "membandingkan gaya penggerak aliran terhadap gaya penahan berat butiran terendam "
+                            "(Shields, 1936). Tegangan geser dasar dihitung memakai depth-slope product (dengan "
+                            "kedalaman aliran h), bukan hanya kemiringan S — koreksi ini penting karena tanpa "
+                            "suku h, τ₀ tidak bersatuan Pascal yang valid secara dimensional.",
+                            styles["Body"]
+                        ))
+                        fs1_path = f"formula_tau0_shields_{sid}.png"
+                        fs2_path = f"formula_theta_{sid}.png"
+                        _render_formula_png(r"\tau_0 = \rho_w \times g \times h \times S", fs1_path)
+                        _render_formula_png(
+                            r"\theta = \frac{\tau_0}{(\rho_s - \rho_w) \times g \times D_{50}}",
+                            fs2_path
+                        )
+                        story.append(_fit_image(fs1_path, max_width=CONTENT_W*0.55))
+                        story.append(_fit_image(fs2_path, max_width=CONTENT_W*0.65))
+                        story.append(Paragraph(
+                            f"dengan τ₀ tegangan geser dasar aktual (N/m²), h = kedalaman aliran = "
+                            f"{seg['flow_depth']:.2f} m, ρw dan ρs densitas air dan sedimen (kg/m³), g = 9,81 m/s², "
+                            f"dan D50 diameter butiran median (mm). Klasifikasi: θ &lt; 0,03 → stabil/deposisi "
+                            "(skor 0); 0,03 ≤ θ &lt; 0,06 → transisi (skor 1); θ ≥ 0,06 → erosi aktif (skor 2).",
                             styles["Body"]
                         ))
                     elif seg["analysis_method"] == "Partheniades + Flow Accumulation":
-                        g_grav = 9.81
-                        slope_at_crit = float(crit.get("Slope", 0.0))
-                        tau0_crit = seg["rho_water"] * g_grav * seg["flow_depth"] * slope_at_crit
-                        tau_c = seg["tau_critical"]
-                        if tau0_crit > tau_c:
-                            e_rate = seg["erodibility_M"] * (tau0_crit / tau_c - 1.0)
-                            e_text = f"<b>{e_rate:.5f} kg/m²·s</b> (aktif tererosi, τ₀ &gt; τc)"
-                        else:
-                            e_text = "0 kg/m²·s (τ₀ ≤ τc → zona stabil/deposisi)"
                         story.append(Paragraph(
-                            f"Titik kritis pada koordinat X={crit['X']:.2f}, Y={crit['Y']:.2f}, "
-                            f"RL={crit['RL']:.2f} m, kemiringan lokal S={slope_at_crit:.4f} m/m, "
-                            f"kepadatan aliran={crit.get('FlowDensity', float('nan')):.3f}. "
-                            f"τ₀ = {seg['rho_water']:.0f} × 9,81 × {seg['flow_depth']:.2f} × "
-                            f"{slope_at_crit:.4f} = <b>{tau0_crit:.4f} N/m²</b> (τc = {tau_c:.3f} N/m²). "
-                            f"Laju erosi E = {e_text}. "
-                            f"Skor risiko akhir (setelah bobot flow accumulation & normalisasi) = "
-                            f"<b>{crit.get('RiskScore', float('nan')):.2f}</b>.",
+                            "Laju erosi dihitung sebagai fungsi linear selisih tegangan geser aktual terhadap "
+                            "tegangan geser kritis material (Partheniades, 1965), dikombinasikan dengan bobot "
+                            "flow accumulation ternormalisasi untuk merepresentasikan efek konsentrasi aliran.",
+                            styles["Body"]
+                        ))
+                        fp1_path = f"formula_tau0_parth_{sid}.png"
+                        fp2_path = f"formula_erate_{sid}.png"
+                        fp3_path = f"formula_riskidx_{sid}.png"
+                        _render_formula_png(r"\tau_0 = \rho_w \times g \times h \times S", fp1_path)
+                        _render_formula_png(
+                            r"E = M \times \left(\frac{\tau_0}{\tau_c} - 1\right),\ \ untuk\ \tau_0 > \tau_c",
+                            fp2_path
+                        )
+                        _render_formula_png(
+                            r"RiskIndex = clip\left(\frac{E \times FlowAccum_{norm}}{P_{99}(E \times FlowAccum_{norm})},\ 0,\ 2\right)",
+                            fp3_path, fontsize=12
+                        )
+                        story.append(_fit_image(fp1_path, max_width=CONTENT_W*0.55))
+                        story.append(_fit_image(fp2_path, max_width=CONTENT_W*0.75))
+                        story.append(_fit_image(fp3_path, max_width=CONTENT_W*0.9))
+                        story.append(Paragraph(
+                            f"dengan h = kedalaman aliran = {seg['flow_depth']:.2f} m, M = koefisien erodibilitas "
+                            f"= {seg['erodibility_M']:.4f} kg/m²·s, τc = tegangan geser kritis = "
+                            f"{seg['tau_critical']:.3f} N/m². Apabila τ₀ ≤ τc, laju erosi E diasumsikan nol (zona "
+                            "stabil/deposisi). RiskIndex dinormalisasi terhadap persentil ke-99 hasil kali laju "
+                            "erosi dengan flow accumulation ternormalisasi, lalu di-clip ke rentang [0,2].",
                             styles["Body"]
                         ))
                     else:
                         story.append(Paragraph(
-                            f"Titik kritis berada pada koordinat X={crit['X']:.2f}, Y={crit['Y']:.2f}, "
-                            f"elevasi (RL)={crit['RL']:.2f} m, kepadatan aliran={crit['FlowDensity']:.3f}.",
+                            f"Metode analisis yang digunakan pada segmen ini: <b>{seg['analysis_method']}</b>. "
+                            "Formula detail mengikuti definisi standar metode tersebut sebagaimana diterapkan pada modul.",
                             styles["Body"]
                         ))
 
-                    # tabel 10 titik prioritas mitigasi
-                    table_cols = [c for c in
-                                  ["Rank", "ID_Titik", "X", "Y", "RL", "JenisRisikoDominan",
-                                   "RiskScore", "Rekomendasi"]
-                                  if c in top10.columns]
-                    crit_rows = [table_cols] + top10[table_cols].head(10).round(3).astype(str).values.tolist()
-                    n_cols = len(table_cols)
-                    # lebar proporsional: kolom teks panjang (Rekomendasi) dapat porsi terbesar
-                    base_w = {
-                        "Rank": 0.05, "ID_Titik": 0.09, "X": 0.09, "Y": 0.09, "RL": 0.08,
-                        "JenisRisikoDominan": 0.15, "RiskScore": 0.08, "Rekomendasi": 0.37
-                    }
-                    col_w = [CONTENT_W * base_w.get(c, 1.0/n_cols) for c in table_cols]
+                    # --- perhitungan titik paling kritis ---
+                    story.append(Paragraph("Perhitungan pada Titik Paling Kritis", styles["H2"]))
+                    top10 = seg["top10_overflow"]
+                    if top10 is not None and len(top10) > 0:
+                        crit = top10.iloc[0]
+                        if seg["analysis_method"] == "Hjulstrom Diagram":
+                            d_m = seg["grain_size_mm"] / 1000.0 + 1e-6
+                            v_ero_crit = 0.1 * (d_m ** -0.4)
+                            v_dep_crit = 0.01 * (d_m ** -0.2)
+                            v_actual = crit.get("Velocity_ms", float("nan"))
+                            story.append(Paragraph(
+                                f"Titik kritis berada pada koordinat X={crit['X']:.2f}, Y={crit['Y']:.2f}, "
+                                f"elevasi (RL)={crit['RL']:.2f} m, dengan skor risiko = {crit.get('RiskScore', float('nan')):.2f}. "
+                                f"Diameter butir d = {seg['grain_size_mm']:.3f} mm = {d_m:.6f} m. "
+                                f"v_erosion = 0,1 × ({d_m:.6f})^-0,4 = <b>{v_ero_crit:.4f} m/s</b>. "
+                                f"v_deposition = 0,01 × ({d_m:.6f})^-0,2 = <b>{v_dep_crit:.4f} m/s</b>. "
+                                f"Kecepatan aliran aktual pada titik ini = <b>{v_actual:.4f} m/s</b>. "
+                                + (
+                                    "Kecepatan aktual MELEBIHI ambang erosi → titik ini aktif tererosi."
+                                    if v_actual >= v_ero_crit else
+                                    "Kecepatan aktual berada di bawah ambang deposisi → titik ini cenderung deposisi."
+                                    if v_actual <= v_dep_crit else
+                                    "Kecepatan aktual berada di zona transisi (antara ambang deposisi dan erosi)."
+                                ),
+                                styles["Body"]
+                            ))
+                        elif seg["analysis_method"] == "Shields Diagram":
+                            g_grav = 9.81
+                            d_m = seg["grain_size_mm"] / 1000.0 + 1e-9
+                            slope_at_crit = float(crit.get("Slope", 0.0))
+                            h_for_crit = seg.get("flow_depth", 0.3)
+                            tau0_crit = seg["rho_water"] * g_grav * h_for_crit * slope_at_crit
+                            theta_crit = tau0_crit / (
+                                (seg["rho_soil"] - seg["rho_water"]) * g_grav * d_m + 1e-9
+                            )
+                            theta_class = (
+                                "stabil/deposisi (θ &lt; 0,03)" if theta_crit < 0.03 else
+                                "transisi (0,03 ≤ θ &lt; 0,06)" if theta_crit < 0.06 else
+                                "erosi aktif (θ ≥ 0,06)"
+                            )
+                            story.append(Paragraph(
+                                f"Titik kritis pada koordinat X={crit['X']:.2f}, Y={crit['Y']:.2f}, "
+                                f"RL={crit['RL']:.2f} m, kemiringan lokal S={slope_at_crit:.4f} m/m, "
+                                f"kedalaman aliran h={h_for_crit:.2f} m. "
+                                f"τ₀ = {seg['rho_water']:.0f} × 9,81 × {h_for_crit:.2f} × {slope_at_crit:.4f} = "
+                                f"<b>{tau0_crit:.4f} N/m²</b>. "
+                                f"θ = {tau0_crit:.4f} / [({seg['rho_soil']:.0f} − {seg['rho_water']:.0f}) × 9,81 × "
+                                f"{d_m:.6f}] = <b>{theta_crit:.4f}</b>. "
+                                f"Klasifikasi: <b>{theta_class}</b>.",
+                                styles["Body"]
+                            ))
+                        elif seg["analysis_method"] == "Partheniades + Flow Accumulation":
+                            g_grav = 9.81
+                            slope_at_crit = float(crit.get("Slope", 0.0))
+                            tau0_crit = seg["rho_water"] * g_grav * seg["flow_depth"] * slope_at_crit
+                            tau_c = seg["tau_critical"]
+                            if tau0_crit > tau_c:
+                                e_rate = seg["erodibility_M"] * (tau0_crit / tau_c - 1.0)
+                                e_text = f"<b>{e_rate:.5f} kg/m²·s</b> (aktif tererosi, τ₀ &gt; τc)"
+                            else:
+                                e_text = "0 kg/m²·s (τ₀ ≤ τc → zona stabil/deposisi)"
+                            story.append(Paragraph(
+                                f"Titik kritis pada koordinat X={crit['X']:.2f}, Y={crit['Y']:.2f}, "
+                                f"RL={crit['RL']:.2f} m, kemiringan lokal S={slope_at_crit:.4f} m/m, "
+                                f"kepadatan aliran={crit.get('FlowDensity', float('nan')):.3f}. "
+                                f"τ₀ = {seg['rho_water']:.0f} × 9,81 × {seg['flow_depth']:.2f} × "
+                                f"{slope_at_crit:.4f} = <b>{tau0_crit:.4f} N/m²</b> (τc = {tau_c:.3f} N/m²). "
+                                f"Laju erosi E = {e_text}. "
+                                f"Skor risiko akhir (setelah bobot flow accumulation & normalisasi) = "
+                                f"<b>{crit.get('RiskScore', float('nan')):.2f}</b>.",
+                                styles["Body"]
+                            ))
+                        else:
+                            story.append(Paragraph(
+                                f"Titik kritis berada pada koordinat X={crit['X']:.2f}, Y={crit['Y']:.2f}, "
+                                f"elevasi (RL)={crit['RL']:.2f} m, kepadatan aliran={crit['FlowDensity']:.3f}.",
+                                styles["Body"]
+                            ))
 
-                    story.append(Paragraph(
-                        "Sepuluh titik prioritas mitigasi, diurutkan berdasar kepadatan aliran, dengan "
-                        "klasifikasi jenis risiko dominan dan rekomendasi spesifik per titik:",
-                        styles["Body"]
+                        # tabel 10 titik prioritas mitigasi
+                        table_cols = [c for c in
+                                      ["Rank", "ID_Titik", "X", "Y", "RL", "JenisRisikoDominan",
+                                       "RiskScore", "Rekomendasi"]
+                                      if c in top10.columns]
+                        crit_rows = [table_cols] + top10[table_cols].head(10).round(3).astype(str).values.tolist()
+                        n_cols = len(table_cols)
+                        # lebar proporsional: kolom teks panjang (Rekomendasi) dapat porsi terbesar
+                        base_w = {
+                            "Rank": 0.05, "ID_Titik": 0.09, "X": 0.09, "Y": 0.09, "RL": 0.08,
+                            "JenisRisikoDominan": 0.15, "RiskScore": 0.08, "Rekomendasi": 0.37
+                        }
+                        col_w = [CONTENT_W * base_w.get(c, 1.0/n_cols) for c in table_cols]
+
+                        story.append(Paragraph(
+                            "Sepuluh titik prioritas mitigasi, diurutkan berdasar kepadatan aliran, dengan "
+                            "klasifikasi jenis risiko dominan dan rekomendasi spesifik per titik:",
+                            styles["Body"]
+                        ))
+                        story.append(_build_table(crit_rows, col_widths=col_w))
+                        story.append(Paragraph(
+                            f"Tabel {seg_i + 2}. Titik prioritas mitigasi — {seg['label']}.",
+                            styles["Caption"]
+                        ))
+                    else:
+                        story.append(Paragraph("Tidak ada titik overflow/kritis signifikan terdeteksi pada segmen ini.", styles["Body"]))
+
+                    # --- TARP ---
+                    story.append(Paragraph("TARP (Trigger Action Response Plan)", styles["H2"]))
+                    tarp_rows, active_idx = _tarp_rows(seg["max_zone"])
+                    tarp_col_w = [CONTENT_W*0.15, CONTENT_W*0.22, CONTENT_W*0.20, CONTENT_W*0.28, CONTENT_W*0.15]
+                    story.append(_build_table(
+                        tarp_rows, col_widths=tarp_col_w,
+                        highlight_row=(active_idx + 1) if active_idx is not None else None
                     ))
-                    story.append(_build_table(crit_rows, col_widths=col_w))
+
+                    # --- validasi lapangan ---
+                    validation = seg.get("validation")
+                    if validation:
+                        story.append(Paragraph("Validasi Lapangan (Ground-Truth)", styles["H2"]))
+                        _val_source = validation.get("source", "Titik sampel")
+                        story.append(Paragraph(
+                            f"Sumber data observasi: <b>{_val_source}</b>. Validasi terhadap "
+                            f"{validation['n_samples']} sampel/sel observasi lapangan: "
+                            f"Overall Accuracy = <b>{validation['overall_accuracy']*100:.1f}%</b>, "
+                            f"Cohen's Kappa (κ) = <b>{validation['kappa']:.2f}</b> "
+                            f"(kategori: {validation['kappa_interpretation']}, mengikuti skala Landis & Koch, 1977).",
+                            styles["Body"]
+                        ))
+                        if validation.get("area_eroded_observed_ha") is not None:
+                            story.append(Paragraph(
+                                f"Luas erosi observasi (DXF): <b>{validation['area_eroded_observed_ha']:.2f} Ha</b>; "
+                                f"luas erosi prediksi model (kelas Sedang+Tinggi/Ekstrem): "
+                                f"<b>{validation['area_eroded_predicted_ha']:.2f} Ha</b>.",
+                                styles["Body"]
+                            ))
+                        cm_df_r = validation["confusion_matrix"].reset_index().rename(columns={"index": "Observasi\\Prediksi"})
+                        cm_rows_r = [list(cm_df_r.columns)] + cm_df_r.astype(str).values.tolist()
+                        n_cm_cols = len(cm_rows_r[0])
+                        story.append(_build_table(cm_rows_r, col_widths=[CONTENT_W/n_cm_cols]*n_cm_cols))
+                        story.append(Spacer(1, 6))
+
+                        prfs_df_r = validation["prfs"]
+                        prfs_rows_r = [list(prfs_df_r.columns)] + prfs_df_r.astype(str).values.tolist()
+                        n_pr_cols = len(prfs_rows_r[0])
+                        story.append(Paragraph("Precision, Recall, F1-Score per kelas:", styles["Body"]))
+                        story.append(_build_table(prfs_rows_r, col_widths=[CONTENT_W/n_pr_cols]*n_pr_cols))
+                    else:
+                        story.append(Paragraph(
+                            "Validasi lapangan belum dijalankan untuk segmen ini. Disarankan menjalankan modul "
+                            "Validasi Lapangan dengan minimal beberapa titik sampel ground-truth sebelum hasil ini "
+                            "dipakai sebagai dasar keputusan operasional final.",
+                            styles["BodyItalic"]
+                        ))
+
+                    # --- perbandingan 3 metode ---
+                    method_comparison = seg.get("method_comparison")
+                    if method_comparison is not None and len(method_comparison) > 0:
+                        story.append(Paragraph("Perbandingan 3 Metode Erosion Assessment", styles["H2"]))
+                        mc_rows = [list(method_comparison.columns)] + method_comparison.astype(str).values.tolist()
+                        n_mc_cols = len(mc_rows[0])
+                        story.append(_build_table(mc_rows, col_widths=[CONTENT_W/n_mc_cols]*n_mc_cols))
+
+                    # --- rekomendasi (AI + rule-based status) ---
+                    story.append(Paragraph("Rekomendasi Rekayasa (Analisis Berbasis AI)", styles["H2"]))
+                    rekom = seg.get("recommendation") or {}
+                    ai_rekom = seg.get("ai_recommendation") or {}
+                    if rekom.get("status"):
+                        story.append(Paragraph(f"<b>Status Klasifikasi (TARP):</b> {rekom['status']}", styles["Body"]))
+                    if ai_rekom.get("narrative"):
+                        story.append(Paragraph(ai_rekom["narrative"].replace("\n", "<br/>"), styles["Body"]))
+                    for rec in ai_rekom.get("recommendations", []):
+                        story.append(Paragraph(f"• {rec}", styles["Bullet"]))
                     story.append(Paragraph(
-                        f"Tabel {seg_i + 2}. Titik prioritas mitigasi — {seg['label']}.",
+                        f"<i>Sumber narasi: {ai_rekom.get('source', 'rule-based')}</i>",
                         styles["Caption"]
                     ))
-                else:
-                    story.append(Paragraph("Tidak ada titik overflow/kritis signifikan terdeteksi pada segmen ini.", styles["Body"]))
 
-                # --- TARP ---
-                story.append(Paragraph("TARP (Trigger Action Response Plan)", styles["H2"]))
-                tarp_rows, active_idx = _tarp_rows(seg["max_zone"])
-                tarp_col_w = [CONTENT_W*0.15, CONTENT_W*0.22, CONTENT_W*0.20, CONTENT_W*0.28, CONTENT_W*0.15]
-                story.append(_build_table(
-                    tarp_rows, col_widths=tarp_col_w,
-                    highlight_row=(active_idx + 1) if active_idx is not None else None
-                ))
+                    story.append(PageBreak())
 
-                # --- validasi lapangan ---
-                validation = seg.get("validation")
-                if validation:
-                    story.append(Paragraph("Validasi Lapangan (Ground-Truth)", styles["H2"]))
+                # ===================== LEMBAR PENGESAHAN (REVIEWER SIGN-OFF) =====================
+                if reviewer_name or reviewer_role or reviewer_signature_path:
+                    story.append(Paragraph("LEMBAR PENGESAHAN", styles["H1"]))
+                    story.append(_divider())
                     story.append(Paragraph(
-                        f"Validasi terhadap {validation['n_samples']} titik sampel observasi lapangan: "
-                        f"Overall Accuracy = <b>{validation['overall_accuracy']*100:.1f}%</b>, "
-                        f"Cohen's Kappa (κ) = <b>{validation['kappa']:.2f}</b> "
-                        f"(kategori: {validation['kappa_interpretation']}, mengikuti skala Landis & Koch, 1977).",
+                        "Laporan teknis ini telah ditinjau (reviewed) oleh pihak berikut sebelum diunduh/didistribusikan:",
                         styles["Body"]
                     ))
-                    cm_df_r = validation["confusion_matrix"].reset_index().rename(columns={"index": "Observasi\\Prediksi"})
-                    cm_rows_r = [list(cm_df_r.columns)] + cm_df_r.astype(str).values.tolist()
-                    n_cm_cols = len(cm_rows_r[0])
-                    story.append(_build_table(cm_rows_r, col_widths=[CONTENT_W/n_cm_cols]*n_cm_cols))
-                    story.append(Spacer(1, 6))
+                    story.append(Spacer(1, 10))
+                    if reviewer_signature_path:
+                        try:
+                            story.append(_fit_image(reviewer_signature_path, max_width=5 * cm))
+                        except Exception:
+                            pass
+                    story.append(Spacer(1, 4))
+                    sign_rows = [
+                        ["Item", "Keterangan"],
+                        ["Nama Reviewer", reviewer_name or "-"],
+                        ["Jabatan / Peran", reviewer_role or "-"],
+                        ["Tanggal Review", reviewer_date.strftime("%d %B %Y") if reviewer_date else "-"],
+                    ]
+                    story.append(_build_table(sign_rows, col_widths=[CONTENT_W * 0.35, CONTENT_W * 0.65]))
+                    story.append(PageBreak())
 
-                    prfs_df_r = validation["prfs"]
-                    prfs_rows_r = [list(prfs_df_r.columns)] + prfs_df_r.astype(str).values.tolist()
-                    n_pr_cols = len(prfs_rows_r[0])
-                    story.append(Paragraph("Precision, Recall, F1-Score per kelas:", styles["Body"]))
-                    story.append(_build_table(prfs_rows_r, col_widths=[CONTENT_W/n_pr_cols]*n_pr_cols))
-                else:
-                    story.append(Paragraph(
-                        "Validasi lapangan belum dijalankan untuk segmen ini. Disarankan menjalankan modul "
-                        "Validasi Lapangan dengan minimal beberapa titik sampel ground-truth sebelum hasil ini "
-                        "dipakai sebagai dasar keputusan operasional final.",
-                        styles["BodyItalic"]
-                    ))
+                story.append(Paragraph("REFERENSI METODOLOGI", styles["H2"]))
+                for ref in [
+                    "Hjulström, F. (1935). Studies of the morphological activity of rivers as illustrated by the "
+                    "River Fyris. Bulletin of the Geological Institute of Uppsala, 25, 221-527.",
+                    "Shields, A. (1936). Anwendung der Ähnlichkeitsmechanik und der Turbulenzforschung auf die "
+                    "Geschiebebewegung. Mitteilungen der Preußischen Versuchsanstalt für Wasserbau und Schiffbau, Berlin.",
+                    "Partheniades, E. (1965). Erosion and deposition of cohesive soils. Journal of the Hydraulics "
+                    "Division, ASCE, 91(1), 105-139.",
+                    "Chow, V.T. (1959). Open-Channel Hydraulics. McGraw-Hill, New York. (persamaan Manning)",
+                    "Mononobe (dalam Suripin, 2004). Sistem Drainase Perkotaan yang Berkelanjutan — rumus "
+                    "intensitas hujan dari data hujan harian.",
+                    "Cohen, J. (1960). A coefficient of agreement for nominal scales. Educational and Psychological "
+                    "Measurement, 20(1), 37-46.",
+                    "Landis, J.R., & Koch, G.G. (1977). The measurement of observer agreement for categorical data. "
+                    "Biometrics, 33(1), 159-174.",
+                ]:
+                    story.append(Paragraph(f"• {ref}", styles["Body"]))
 
-                # --- perbandingan 3 metode ---
-                method_comparison = seg.get("method_comparison")
-                if method_comparison is not None and len(method_comparison) > 0:
-                    story.append(Paragraph("Perbandingan 3 Metode Erosion Assessment", styles["H2"]))
-                    mc_rows = [list(method_comparison.columns)] + method_comparison.astype(str).values.tolist()
-                    n_mc_cols = len(mc_rows[0])
-                    story.append(_build_table(mc_rows, col_widths=[CONTENT_W/n_mc_cols]*n_mc_cols))
+                doc.build(story)
 
-                # --- rekomendasi (AI + rule-based status) ---
-                story.append(Paragraph("Rekomendasi Rekayasa (Analisis Berbasis AI)", styles["H2"]))
-                rekom = seg.get("recommendation") or {}
-                ai_rekom = seg.get("ai_recommendation") or {}
-                if rekom.get("status"):
-                    story.append(Paragraph(f"<b>Status Klasifikasi (TARP):</b> {rekom['status']}", styles["Body"]))
-                if ai_rekom.get("narrative"):
-                    story.append(Paragraph(ai_rekom["narrative"].replace("\n", "<br/>"), styles["Body"]))
-                for rec in ai_rekom.get("recommendations", []):
-                    story.append(Paragraph(f"• {rec}", styles["Bullet"]))
-                story.append(Paragraph(
-                    f"<i>Sumber narasi: {ai_rekom.get('source', 'rule-based')}</i>",
-                    styles["Caption"]
-                ))
-
-                story.append(PageBreak())
-
-            # ===================== DISCLAIMER =====================
-            story.append(Paragraph("CATATAN & KETERBATASAN", styles["H1"]))
-            story.append(_divider())
-            story.append(Paragraph(
-                "Laporan ini dihasilkan otomatis dari model numerik berbasis data topografi (DXF) dan data "
-                "hujan yang diinput/diambil secara online pada tanggal pembuatan laporan. Narasi rekomendasi "
-                "pada tiap segmen dapat dihasilkan oleh model AI (Claude) berdasarkan angka hasil running "
-                "aktual segmen tersebut; klasifikasi status/TARP tetap mengikuti aturan deterministik agar "
-                "dapat diaudit. Akurasi hasil bergantung langsung pada kelengkapan dan ketelitian data survei "
-                "sumber. Verifikasi lapangan oleh Ahli Geoteknik/Sumber Daya Air bersertifikat tetap "
-                "diperlukan sebelum keputusan desain final diambil, khususnya untuk segmen yang mendapat "
-                "peringatan kualitas data pada bagian Data & Parameter Input.",
-                styles["Body"]
-            ))
-
-            story.append(Paragraph("REFERENSI METODOLOGI", styles["H2"]))
-            for ref in [
-                "Hjulström, F. (1935). Studies of the morphological activity of rivers as illustrated by the "
-                "River Fyris. Bulletin of the Geological Institute of Uppsala, 25, 221-527.",
-                "Shields, A. (1936). Anwendung der Ähnlichkeitsmechanik und der Turbulenzforschung auf die "
-                "Geschiebebewegung. Mitteilungen der Preußischen Versuchsanstalt für Wasserbau und Schiffbau, Berlin.",
-                "Partheniades, E. (1965). Erosion and deposition of cohesive soils. Journal of the Hydraulics "
-                "Division, ASCE, 91(1), 105-139.",
-                "Chow, V.T. (1959). Open-Channel Hydraulics. McGraw-Hill, New York. (persamaan Manning)",
-                "Mononobe (dalam Suripin, 2004). Sistem Drainase Perkotaan yang Berkelanjutan — rumus "
-                "intensitas hujan dari data hujan harian.",
-                "Cohen, J. (1960). A coefficient of agreement for nominal scales. Educational and Psychological "
-                "Measurement, 20(1), 37-46.",
-                "Landis, J.R., & Koch, G.G. (1977). The measurement of observer agreement for categorical data. "
-                "Biometrics, 33(1), 159-174.",
-            ]:
-                story.append(Paragraph(f"• {ref}", styles["Body"]))
-
-            doc.build(story)
-
-            with open(pdf_file, "rb") as f:
-                st.download_button(
-                    label="Download Laporan Teknis Lengkap (PDF)",
-                    data=f,
-                    file_name="Laporan_Teknis_Erosi_Sedimentasi.pdf",
-                    mime="application/pdf"
-                )
+                with open(pdf_file, "rb") as f:
+                    st.download_button(
+                        label="Download Laporan Teknis Lengkap (PDF)",
+                        data=f,
+                        file_name="Laporan_Teknis_Erosi_Sedimentasi.pdf",
+                        mime="application/pdf"
+                    )
 
 
 
@@ -6802,7 +8700,7 @@ if st.session_state.get("analysis_done", False):
 # =========================================================
 with tab2:
 
-    st.subheader("Submit Data Training")
+    _sub_header("Submit Data Training")
     train_file = st.file_uploader("Upload CSV / Excel", type=["csv", "xlsx"])
 
     if train_file:
@@ -6817,7 +8715,7 @@ with tab2:
 
 
         # ================= CLEANING =================
-        st.subheader("Data Cleaning")
+        _sub_header("Data Cleaning")
         clean_option = st.radio("Cleaning", ["Tanpa Cleaning", "Hapus Outlier (IQR)"])
 
         df_clean = df.copy()
@@ -6835,7 +8733,7 @@ with tab2:
             removed = len(df_clean) - np.sum(mask)
             df_clean = df_clean[mask]
 
-            st.warning(f"Outlier terhapus: {removed} data")
+            _ui_warning(f"Outlier terhapus: {removed} data")
 
         st.dataframe(df_clean)
 
@@ -6848,7 +8746,7 @@ with tab2:
                 return "STABLE"
 
          # ================= VISUAL AWAL =================
-        st.subheader("Correlation Heatmap")
+        _sub_header("Correlation Heatmap")
         corr = df.select_dtypes(include=np.number).corr()
         fig_corr = go.Figure(data=go.Heatmap(
             z=corr.values,
@@ -6868,9 +8766,9 @@ with tab2:
             yaxis_title="Parameter"
             )
 
-        st.plotly_chart(fig_corr, use_container_width=True)
+        st.plotly_chart(fig_corr, width="stretch")
 
-        st.subheader("Scatter Plot + Trendline")
+        _sub_header("Scatter Plot + Trendline")
 
         num_cols = df_clean.select_dtypes(include=np.number).columns
 
@@ -6937,13 +8835,13 @@ with tab2:
                 legend=dict(orientation="h")
             )
 
-            st.plotly_chart(fig_scatter, use_container_width=True)
+            st.plotly_chart(fig_scatter, width="stretch")
         else:
-            st.info("Pilih minimal 1 X dan 1 Y")
+            _ui_info("Pilih minimal 1 X dan 1 Y")
 
         # ================= TIME SERIES =================
         if "Date" in df.columns:
-            st.subheader("Time Series")
+            _sub_header("Time Series")
             df["Date"] = pd.to_datetime(df["Date"])
 
             ts_cols = st.multiselect("Parameter TS", df.columns,
@@ -6952,10 +8850,10 @@ with tab2:
             fig_ts = go.Figure()
             for c in ts_cols:
                 fig_ts.add_trace(go.Scatter(x=df["Date"], y=df[c], mode='lines', name=c))
-            st.plotly_chart(fig_ts, use_container_width=True)
+            st.plotly_chart(fig_ts, width="stretch")
 
          # ================= VIOLIN (PINDAH KE ATAS) =================
-        st.subheader("Violin Plot")
+        _sub_header("Violin Plot")
 
         cols_multi = st.multiselect("Pilih Parameter", num_cols, default=list(num_cols[:2]))
 
@@ -6963,11 +8861,11 @@ with tab2:
             fig_v = go.Figure()
             for col in cols_multi:
                 fig_v.add_trace(go.Violin(y=df_clean[col], name=col, box_visible=True))
-            st.plotly_chart(fig_v, use_container_width=True)
+            st.plotly_chart(fig_v, width="stretch")
         # ================= AUTO MODEL =================
-        st.subheader("Auto Model Selection")
+        _sub_header("Auto Model Selection")
 
-        if st.button("Cek Model Terbaik"):
+        if st.button(_t("Cek Model Terbaik", "Check Best Model")):
 
             X = df_clean[features]
             y = df_clean[target]
@@ -7010,7 +8908,7 @@ with tab2:
             st.session_state["best_model"] = df_result.iloc[0]["Model"]
 
         # ================= TRAIN =================
-        st.subheader("Train Model")
+        _sub_header("Train Model")
 
         model_choice = st.selectbox(
             "Model",
@@ -7064,7 +8962,7 @@ with tab2:
             st.session_state["features"] = features
 
             # ================= EVALUATION =================
-            st.subheader("Model Evaluation")
+            _sub_header("Model Evaluation")
 
             if model_type == "Regression":
                 r2 = r2_score(y_test, y_pred)
@@ -7085,7 +8983,7 @@ with tab2:
                 st.dataframe(confusion_matrix(y_test, y_pred))
 
     # ================= PREDIKSI =================
-    st.subheader("Submit Data Prediksi")
+    _sub_header(_t("Submit Data Prediksi", "Submit Prediction Data"))
 
     pred_file = st.file_uploader("Upload Data Baru", type=["csv", "xlsx"], key="predict")
 
@@ -7200,13 +9098,13 @@ with tab2:
                 margin=dict(l=20, r=20, t=40, b=20)
             )
 
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
         else:
-            st.warning("Kolom 'Date' tidak ditemukan di data prediksi")
+            _ui_warning("Kolom 'Date' tidak ditemukan di data prediksi")
 
     else:
-        st.info("Upload data prediksi dulu untuk menampilkan grafik")
+        _ui_info("Upload data prediksi dulu untuk menampilkan grafik")
 
 
 
@@ -7716,463 +9614,1953 @@ def _smp_deviation_score(before_entry, after_entry):
 # =========================================================
 # ============ TAB 3: MONITORING DEVIATION =================
 # =========================================================
-with tab3:
+if tab3 is not None:
+    with tab3:
 
-    st.subheader("Monitoring Deviation — Peta Kontur Deviasi")
+        _sub_header("Monitoring Deviation — Peta Kontur Deviasi")
+        st.caption(
+            "Upload 2 PDF Slope Monitoring Map (before & after). Hanya titik yang "
+            "benar-benar berubah status/nilai yang akan diinterpolasi jadi kontur "
+            "rainbow di atas peta — titik yang tetap sama tidak ikut diinterpolasi."
+        )
+
+        if not _SMP_FITZ_OK:
+            st.error(
+                "Fitur ini butuh library **PyMuPDF**. Jalankan `pip install pymupdf` "
+                "lalu restart aplikasi.\n\nDetail error: " + str(_SMP_FITZ_ERR)
+            )
+            st.stop()
+
+        col_up1, col_up2 = st.columns(2)
+        with col_up1:
+            md_before_file = st.file_uploader("PDF Sebelum (Before)", type=["pdf"], key="md_before_pdf")
+        with col_up2:
+            md_after_file = st.file_uploader("PDF Sesudah (After)", type=["pdf"], key="md_after_pdf")
+
+        if md_before_file and md_after_file:
+            if st.button(_t("Proses Peta Deviasi", "Process Deviation Map"), key="md_process_btn"):
+                with st.spinner("Membaca PDF & mengekstrak titik pemantauan..."):
+                    tmp_dir = _tempfile_smp.mkdtemp()
+                    before_path = _os_smp.path.join(tmp_dir, "before.pdf")
+                    after_path = _os_smp.path.join(tmp_dir, "after.pdf")
+                    with open(before_path, "wb") as f:
+                        f.write(md_before_file.getbuffer())
+                    with open(after_path, "wb") as f:
+                        f.write(md_after_file.getbuffer())
+
+                    try:
+                        before_pts = _smp_extract_points(before_path)
+                        after_pts = _smp_extract_points(after_path)
+                    except Exception as e:
+                        st.error(_t(f"Gagal membaca PDF: {e}", f"Failed to read PDF: {e}"))
+                        before_pts, after_pts = {}, {}
+
+                    # --- koreksi posisi: pakai koordinat "Block N/E" di kotak callout,
+                    # bukan posisi teks label ID (yang sering jauh dari titik asli
+                    # karena dihubungkan lewat leader line panjang) ---
+                    n_corrected_before = n_corrected_after = 0
+                    calib_ok = False
+                    try:
+                        words_before = _smp_pdf_to_bbox_words(before_path)
+                        calib = _smp_calibrate_grid_axes(words_before)
+                        calib_ok = calib is not None
+                        if calib_ok:
+                            block_ne_before = _smp_extract_block_ne(before_path)
+                            block_ne_after = _smp_extract_block_ne(after_path)
+                            before_pts, n_corrected_before = _smp_apply_block_ne_positions(
+                                before_pts, block_ne_before, calib
+                            )
+                            after_pts, n_corrected_after = _smp_apply_block_ne_positions(
+                                after_pts, block_ne_after, calib
+                            )
+                    except Exception as e:
+                        _ui_warning(f"Kalibrasi grid / koordinat Block N-E gagal, pakai posisi label: {e}")
+
+                    st.session_state["md_before_pts"] = before_pts
+                    st.session_state["md_after_pts"] = after_pts
+                    st.session_state["md_before_path"] = before_path
+                    st.session_state["md_after_path"] = after_path
+                    st.session_state["md_calib_ok"] = calib_ok
+                    st.session_state["md_n_corrected"] = (n_corrected_before, n_corrected_after)
+                    st.session_state.pop("md_before_override", None)
+                    st.session_state.pop("md_after_override", None)
+
+                    if not calib_ok:
+                        _ui_warning(
+                            "Kalibrasi sumbu grid peta (angka 0..21000 / -3000..12000) tidak "
+                            "berhasil dibaca otomatis — posisi titik yang leader-line-nya panjang "
+                            "kemungkinan masih meleset (pakai posisi label). Jalankan "
+                            "`_smp_debug_dump_blocks(pdf_path)` untuk cek pola teks aslinya."
+                        )
+                    elif n_corrected_before == 0 and n_corrected_after == 0:
+                        _ui_warning(
+                            "Sumbu grid berhasil dikalibrasi, tapi tidak ada teks 'Block N/E' yang "
+                            "cocok dengan pola regex di kotak callout — cek format teks aslinya "
+                            "lewat `_smp_debug_dump_blocks(pdf_path)` dan sesuaikan _RE_SMP_BLOCK_NE."
+                        )
+                    else:
+                        st.success(
+                            f"Posisi {n_corrected_before} titik (before) & {n_corrected_after} titik "
+                            f"(after) dikoreksi pakai koordinat Block N/E asli (bukan posisi label)."
+                        )
+
+        if st.session_state.get("md_before_pts"):
+
+            before_pts = st.session_state["md_before_pts"]
+            after_pts = st.session_state["md_after_pts"]
+
+            # override dari koreksi manual (kalau ada), tetap pakai posisi hasil ekstraksi asli
+            before_ov = st.session_state.get("md_before_override", {})
+            after_ov = st.session_state.get("md_after_override", {})
+
+            before_use = {pid: {**v, **before_ov.get(pid, {})} for pid, v in before_pts.items()}
+            after_use = {pid: {**v, **after_ov.get(pid, {})} for pid, v in after_pts.items()}
+
+            mode = st.radio(
+                "Sumber deviasi untuk peta kontur",
+                ["Marker di gambar peta (bandingkan ikon before vs after)", "Teks kotak callout (cara lama)"],
+                index=0, key="md_source_mode",
+                help="Tabel data mentah di bawah selalu pakai hasil ekstraksi teks, "
+                     "terlepas dari mode yang dipilih di sini.",
+            )
+            use_image_mode = mode.startswith("Marker")
+
+            # n_naik dihitung dari data teks (tabel), independen dari mode peta kontur
+            n_naik = 0
+            for pid in sorted(set(before_use) | set(after_use)):
+                _, cat_tmp = _smp_deviation_score(before_use.get(pid), after_use.get(pid))
+                if cat_tmp in ("Naik Drastis (>=2 level)", "Naik 1 Level"):
+                    n_naik += 1
+
+            if use_image_mode:
+                # ================= MODE BARU: deteksi marker dari gambar peta =================
+                only_color_change = st.checkbox(
+                    "Hanya tampilkan marker yang WARNANYA berubah di posisi yang sama "
+                    "(sembunyikan marker 'baru'/'hilang' — biasanya cuma gagal cocok posisi, bukan perubahan asli)",
+                    value=True, key="md_only_color_change",
+                )
+                with st.expander(_t("Parameter deteksi marker (atur kalau hasil kurang pas)", "Marker detection parameters (adjust if results are off)")):
+                    c1, c2, c3 = st.columns(3)
+                    with c1:
+                        min_area = st.number_input("Luas minimal marker (px^2)", 1, 500, 8, key="md_min_area")
+                        max_area = st.number_input("Luas maksimal marker (px^2)", 5, 2000, 260, key="md_max_area")
+                    with c2:
+                        sat_thresh = st.slider("Ambang saturasi warna", 0, 150, 55, key="md_sat_thresh")
+                        val_thresh = st.slider("Ambang kecerahan minimal", 0, 200, 60, key="md_val_thresh")
+                    with c3:
+                        max_dist_px = st.slider("Toleransi jarak pencocokan (px)", 2, 50, 25, key="md_max_dist_px")
+                        color_change_thresh = st.slider("Ambang 'warna dianggap berubah'", 5, 150, 45, key="md_color_thresh")
+                    show_debug = st.checkbox("Tampilkan overlay deteksi (buat verifikasi)", value=False, key="md_show_debug")
+
+                try:
+                    before_png = _smp_render_page_png(st.session_state["md_before_path"], dpi=130)
+                    after_png = _smp_render_page_png(st.session_state["md_after_path"], dpi=130)
+                    before_img = PILImage.open(before_png)
+                    after_img = PILImage.open(after_png)
+
+                    boxes_before = _smp_find_callout_boxes(before_img)
+                    boxes_after = _smp_find_callout_boxes(after_img)
+
+                    markers_before = _smp_detect_markers(before_img, boxes_before, min_area, max_area,
+                                                          sat_thresh, val_thresh)
+                    markers_after = _smp_detect_markers(after_img, boxes_after, min_area, max_area,
+                                                         sat_thresh, val_thresh)
+
+                    pairs = _smp_match_markers(markers_before, markers_after, max_dist_px, color_change_thresh)
+                    if only_color_change:
+                        changed_pairs = [p for p in pairs if p["status"] == "changed"]
+                    else:
+                        changed_pairs = [p for p in pairs if p["status"] in ("changed", "new", "removed")]
+
+                    n_changed_only = len([p for p in pairs if p["status"] == "changed"])
+                    n_new = len([p for p in pairs if p["status"] == "new"])
+                    n_removed = len([p for p in pairs if p["status"] == "removed"])
+                    st.caption(
+                        f"{len(markers_before)} marker terdeteksi di peta before, {len(markers_after)} di after — "
+                        f"**{n_changed_only} warna berubah**"
+                        + ("" if only_color_change else f", {n_new} baru, {n_removed} hilang")
+                        + "."
+                    )
+                    if not only_color_change and (n_new + n_removed) > n_changed_only * 3:
+                        _ui_warning(
+                            "Jumlah 'baru'/'hilang' jauh lebih banyak dari 'warna berubah' — kemungkinan besar "
+                            "itu bukan perubahan asli, cuma gagal dicocokkan (coba naikkan 'Toleransi jarak "
+                            "pencocokan' di parameter). Checkbox di atas (default aktif) menyembunyikan ini."
+                        )
+                    if show_debug:
+                        dcol1, dcol2 = st.columns(2)
+                        with dcol1:
+                            st.image(_smp_debug_marker_overlay(before_img, markers_before, boxes_before),
+                                     caption="Deteksi - Before (kotak merah = callout diabaikan, titik cyan = marker)")
+                        with dcol2:
+                            st.image(_smp_debug_marker_overlay(after_img, markers_after, boxes_after),
+                                     caption="Deteksi - After")
+
+                    W, H = before_img.width, before_img.height
+                    fig, ax = plt.subplots(figsize=(16, 11))
+                    ax.imshow(before_img)
+                    ax.axis("off")
+
+                    if len(changed_pairs) > 0:
+                        import numpy as _np_smp
+                        from scipy.spatial import cKDTree as _KDTree_smp
+
+                        res = 3
+                        gx = _np_smp.linspace(0, W, max(W // res, 2))
+                        gy = _np_smp.linspace(0, H, max(H // res, 2))
+                        GX, GY = _np_smp.meshgrid(gx, gy)
+                        grid_pts = _np_smp.column_stack([GX.ravel(), GY.ravel()])
+
+                        sigma_px = 30
+                        cutoff_px = 2.2 * sigma_px
+
+                        colorable = [p for p in changed_pairs if p["status"] in ("changed", "new")]
+                        removed_pts = [p for p in changed_pairs if p["status"] == "removed"]
+
+                        if colorable:
+                            pts_xy = _np_smp.array([[p["x"], p["y"]] for p in colorable])
+                            tree = _KDTree_smp(pts_xy)
+                            dist, idx = tree.query(grid_pts, k=1)
+                            dist = dist.reshape(GX.shape)
+                            idx = idx.reshape(GX.shape)
+
+                            alpha = _np_smp.clip(1 - dist / cutoff_px, 0, 1) ** 1.4 * 0.75
+                            alpha[dist > cutoff_px] = 0.0
+
+                            colors_arr = _np_smp.array(
+                                [[c / 255.0 for c in (p["after_color"] or p["before_color"])] for p in colorable]
+                            )
+                            rgba = _np_smp.zeros((*GX.shape, 4))
+                            rgba[..., :3] = colors_arr[idx]
+                            rgba[..., 3] = alpha
+                            ax.imshow(rgba, extent=(0, W, H, 0), origin="upper", zorder=2)
+
+                        for p in colorable:
+                            color01 = tuple(c / 255.0 for c in (p["after_color"] or p["before_color"]))
+                            edge = "blue" if p["status"] == "new" else "black"
+                            lw = 1.4 if p["status"] == "new" else 0.6
+                            ax.scatter(p["x"], p["y"], s=32, facecolor=color01, edgecolor=edge,
+                                       linewidth=lw, zorder=4)
+
+                        for p in removed_pts:
+                            ax.scatter(p["x"], p["y"], s=45, facecolor="none", edgecolor="black",
+                                       linewidth=1.3, marker="x", zorder=4)
+
+                        legend_handles = []
+                        if colorable:
+                            label_txt = "Warna marker berubah (isi = warna after)"
+                            legend_handles.append(Patch(facecolor="#888888", edgecolor="black", label=label_txt))
+                            if not only_color_change and any(p["status"] == "new" for p in colorable):
+                                legend_handles.append(Patch(facecolor="none", edgecolor="blue", label="Marker baru"))
+                        if removed_pts:
+                            legend_handles.append(Patch(facecolor="none", edgecolor="black", label="Marker hilang (x)"))
+                        if legend_handles:
+                            ax.legend(handles=legend_handles, loc="lower left", fontsize=7, framealpha=0.9)
+
+                        ax.set_title("Kontur Deviasi - Perbandingan Marker Peta (Before vs After)", fontsize=14)
+                    else:
+                        ax.set_title("Tidak ada marker yang berbeda antara before & after", fontsize=14)
+
+                    st.pyplot(fig)
+                    out_path = "/tmp/monitoring_deviation.png"
+                    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+                    with open(out_path, "rb") as f:
+                        st.download_button("Download Peta Deviasi (PNG)", f, file_name="monitoring_deviation.png",
+                                            key="md_dl_image_mode")
+
+                except Exception as e:
+                    st.error(_t(f"Gagal membuat peta deviasi (mode marker gambar): {e}", f"Failed to build deviation map (image marker mode): {e}"))
+
+            else:
+                # ================= MODE LAMA: teks kotak callout =================
+                only_calibrated = st.checkbox(
+                    "Hanya tampilkan/konturkan titik yang posisinya berhasil dikalibrasi ke "
+                    "koordinat Block N/E asli (rekomendasi — hindari kontur nongol di kotak callout)",
+                    value=True, key="md_only_calibrated",
+                )
+
+                all_ids = sorted(set(before_use) | set(after_use))
+                deviation_points = []
+                n_skipped_uncalibrated = 0
+                for pid in all_ids:
+                    b = before_use.get(pid)
+                    a = after_use.get(pid)
+                    score, cat = _smp_deviation_score(b, a)
+                    if cat == "Tetap / Stabil":
+                        continue
+                    pos_src = a or b
+                    is_calibrated = pos_src.get("_pos_source") == "block_ne"
+                    if only_calibrated and not is_calibrated:
+                        n_skipped_uncalibrated += 1
+                        continue
+                    magnitude = score if score > 0 else 1.0
+                    deviation_points.append({
+                        "id": pid, "score": magnitude, "cat": cat,
+                        "x": pos_src["_x"], "y": pos_src["_y"],
+                        "calibrated": is_calibrated,
+                    })
+
+                st.caption(
+                    f"{len(before_pts)} titik (before) / {len(after_pts)} titik (after) terbaca — "
+                    f"**{len(deviation_points)} titik mengalami perubahan status** dari total {len(all_ids)} titik gabungan."
+                )
+                if n_skipped_uncalibrated > 0:
+                    calib_ok_state = st.session_state.get("md_calib_ok", None)
+                    if calib_ok_state is False:
+                        _ui_warning(
+                            f"Kalibrasi sumbu grid peta gagal total, jadi SEMUA {n_skipped_uncalibrated} "
+                            f"titik disembunyikan (posisinya cuma dari label callout, pasti tidak akurat). "
+                            f"Cek `_smp_debug_dump_blocks(pdf_path)` untuk lihat teks sumbu grid aslinya."
+                        )
+                    else:
+                        _ui_info(
+                            f"{n_skipped_uncalibrated} titik deviasi disembunyikan dari peta kontur karena "
+                            f"posisinya belum berhasil dikalibrasi ke koordinat Block N/E asli (masih posisi "
+                            f"label callout) — matikan checkbox di atas kalau tetap mau menampilkannya "
+                            f"(dengan risiko posisi meleset ke kotak callout)."
+                        )
+
+                try:
+                    bg_png = _smp_render_page_png(st.session_state["md_before_path"], dpi=130)
+                    bg_img = PILImage.open(bg_png)
+                    page_w_pts, page_h_pts = _smp_get_page_size(st.session_state["md_before_path"])
+                    scale_x = bg_img.width / page_w_pts
+                    scale_y = bg_img.height / page_h_pts
+                    W, H = bg_img.width, bg_img.height
+
+                    fig, ax = plt.subplots(figsize=(16, 11))
+                    ax.imshow(bg_img)
+                    ax.axis("off")
+
+                    if len(deviation_points) > 0:
+                        import numpy as _np_smp
+                        import matplotlib.colors as _mcolors_smp
+
+                        res = 3  # downsample grid demi kecepatan
+                        gx = _np_smp.linspace(0, W, max(W // res, 2))
+                        gy = _np_smp.linspace(0, H, max(H // res, 2))
+                        GX, GY = _np_smp.meshgrid(gx, gy)
+
+                        sigma_px = 30               # radius pengaruh tiap titik (px)
+                        cutoff_px = 2.2 * sigma_px  # HARD cutoff
+
+                        cats_present = []
+                        for pt in deviation_points:
+                            if pt["cat"] not in cats_present:
+                                cats_present.append(pt["cat"])
+
+                        for cat_name in cats_present:
+                            pts_in_cat = [p for p in deviation_points if p["cat"] == cat_name]
+                            field = _np_smp.zeros_like(GX, dtype=float)
+                            min_dist = _np_smp.full_like(GX, _np_smp.inf)
+                            for pt in pts_in_cat:
+                                px, py = pt["x"] * scale_x, pt["y"] * scale_y
+                                d2 = (GX - px) ** 2 + (GY - py) ** 2
+                                d = _np_smp.sqrt(d2)
+                                contrib = pt["score"] * _np_smp.exp(-d2 / (2 * sigma_px ** 2))
+                                contrib[d > cutoff_px] = 0.0
+                                field += contrib
+                                min_dist = _np_smp.minimum(min_dist, d)
+
+                            field = gaussian_filter(field, sigma=1.0)
+                            if field.max() <= 0:
+                                continue
+                            mask = (min_dist > cutoff_px) | (field < field.max() * 0.18)
+                            norm_field = _np_smp.clip(field / field.max(), 0, 1)
+
+                            color_rgb = _mcolors_smp.to_rgb(_SMP_STATUS_COLOR.get(cat_name, "#999999"))
+                            rgba = _np_smp.zeros((*field.shape, 4))
+                            rgba[..., 0] = color_rgb[0]
+                            rgba[..., 1] = color_rgb[1]
+                            rgba[..., 2] = color_rgb[2]
+                            rgba[..., 3] = _np_smp.where(mask, 0.0, norm_field * 0.72)
+
+                            ax.imshow(rgba, extent=(0, W, H, 0), origin="upper", zorder=2)
+                            field_masked = _np_smp.ma.masked_where(mask, field)
+                            ax.contour(GX, GY, field_masked, levels=4,
+                                       colors=[_SMP_STATUS_COLOR.get(cat_name, "#999999")],
+                                       linewidths=0.5, alpha=0.55, zorder=3)
+
+                        legend_handles = [
+                            Patch(facecolor=_SMP_STATUS_COLOR.get(c, "#999999"), edgecolor="black", label=c)
+                            for c in cats_present
+                        ]
+                        ax.legend(handles=legend_handles, loc="lower left", fontsize=7,
+                                  framealpha=0.9, title="Perubahan Status (Before -> After)")
+
+                        for pt in deviation_points:
+                            px, py = pt["x"] * scale_x, pt["y"] * scale_y
+                            face = _SMP_STATUS_COLOR.get(pt["cat"], "#999999")
+                            if pt.get("calibrated", False):
+                                edge, lw = "black", 0.6
+                            else:
+                                edge, lw = "#FF00FF", 1.3
+                            ax.scatter(px, py, s=30, facecolor=face, edgecolor=edge,
+                                       linewidth=lw, zorder=4)
+                            label_txt = pt["id"] + ("" if pt.get("calibrated", False) else " (?)")
+                            ax.annotate(label_txt, (px, py), fontsize=6, color="black",
+                                        xytext=(3, 3), textcoords="offset points", zorder=4)
+
+                        ax.set_title("Kontur Deviasi Monitoring (Before -> After)", fontsize=14)
+                    else:
+                        ax.set_title("Tidak ada titik yang mengalami deviasi", fontsize=14)
+
+                    st.pyplot(fig)
+
+                    out_path = "/tmp/monitoring_deviation.png"
+                    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+                    with open(out_path, "rb") as f:
+                        st.download_button("Download Peta Deviasi (PNG)", f, file_name="monitoring_deviation.png",
+                                            key="md_dl_text_mode")
+
+                except Exception as e:
+                    st.error(_t(f"Gagal membuat peta deviasi: {e}", f"Failed to build deviation map: {e}"))
+
+            if n_naik > 0:
+                st.error(_t(f"{n_naik} titik menunjukkan kenaikan status pergerakan — perlu perhatian.", f"{n_naik} point(s) show an increased movement status — needs attention."))
+            else:
+                st.success(_t("Tidak ada titik yang naik status pergerakan secara signifikan.", "No points show a significant increase in movement status."))
+
+            # --- data mentah & koreksi manual, disembunyikan biar peta jadi fokus utama ---
+            with st.expander(_t("Data mentah hasil ekstraksi & koreksi manual (opsional)", "Raw extracted data & manual correction (optional)")):
+                st.caption(
+                    "Peta ini padat teks sehingga sesekali ada salah baca. Kalau ada nilai "
+                    "yang keliru, koreksi di sini lalu klik 'Update Peta dari Koreksi'."
+                )
+                col_t1, col_t2 = st.columns(2)
+                with col_t1:
+                    st.markdown("**" + _t("Titik Before", "Before Points") + "**")
+                    df_before_edit = st.data_editor(
+                        pd.DataFrame(
+                            [{"ID Titik": v["ID Titik"], "Nilai (mm/day)": v["Nilai (mm/day)"], "Status": v["Status"]}
+                             for v in before_use.values()]
+                        ).sort_values("ID Titik"),
+                        num_rows="fixed", width="stretch", key="md_before_editor",
+                        column_config={"Status": st.column_config.SelectboxColumn(
+                            options=["Stabil", "Hati-hati", "Waspada", "Evakuasi", "Tidak terbaca"])}
+                    )
+                with col_t2:
+                    st.markdown("**" + _t("Titik After", "After Points") + "**")
+                    df_after_edit = st.data_editor(
+                        pd.DataFrame(
+                            [{"ID Titik": v["ID Titik"], "Nilai (mm/day)": v["Nilai (mm/day)"], "Status": v["Status"]}
+                             for v in after_use.values()]
+                        ).sort_values("ID Titik"),
+                        num_rows="fixed", width="stretch", key="md_after_editor",
+                        column_config={"Status": st.column_config.SelectboxColumn(
+                            options=["Stabil", "Hati-hati", "Waspada", "Evakuasi", "Tidak terbaca"])}
+                    )
+
+                if st.button(_t("Update Peta dari Koreksi", "Update Map from Correction"), key="md_update_btn"):
+                    new_before_ov = {}
+                    for _, row in df_before_edit.iterrows():
+                        new_before_ov[row["ID Titik"]] = {
+                            "Nilai (mm/day)": row["Nilai (mm/day)"], "Status": row["Status"],
+                            "_rank": _SMP_STATUS_RANK.get(row["Status"]),
+                        }
+                    new_after_ov = {}
+                    for _, row in df_after_edit.iterrows():
+                        new_after_ov[row["ID Titik"]] = {
+                            "Nilai (mm/day)": row["Nilai (mm/day)"], "Status": row["Status"],
+                            "_rank": _SMP_STATUS_RANK.get(row["Status"]),
+                        }
+                    st.session_state["md_before_override"] = new_before_ov
+                    st.session_state["md_after_override"] = new_after_ov
+                    st.rerun()
+
+        else:
+            _ui_info("Upload kedua PDF (before & after), lalu klik 'Proses Peta Deviasi' untuk memulai.")
+
+    # =========================================================
+    # =============== TAB 4: BACK ANALYSIS ===================
+    # =========================================================
+    def _load_simple_boundary_from_dxf(uploaded_file):
+        """Baca DXF minimal: gabungkan semua polyline TERTUTUP (closed) dari semua
+        layer jadi satu boundary (union). Dipakai khusus di Back Analysis untuk upload
+        boundary erosi aktual -- sengaja tidak pakai pemilihan layer seperti di tab
+        Erosion Mapping supaya alurnya singkat (upload langsung jadi), karena di sini
+        cuma butuh outline kasar area yang benar-benar tererosi, bukan topografi detail.
+        """
+        uploaded_file.seek(0)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".dxf") as tmp:
+            tmp.write(uploaded_file.read())
+            tmp_path = tmp.name
+
+        doc = ezdxf.readfile(tmp_path)
+        msp = doc.modelspace()
+
+        polys = []
+        for e in msp:
+            pts = None
+            if e.dxftype() == "LWPOLYLINE":
+                pts = [(p[0], p[1]) for p in e.get_points()]
+                is_closed = bool(e.closed)
+            elif e.dxftype() == "POLYLINE":
+                pts = [(v.dxf.location.x, v.dxf.location.y) for v in e.vertices]
+                is_closed = bool(e.is_closed)
+            else:
+                continue
+            if pts and len(pts) >= 3 and is_closed:
+                try:
+                    poly = Polygon(pts)
+                    if not poly.is_valid:
+                        poly = make_valid(poly)
+                    if not poly.is_empty:
+                        polys.append(poly)
+                except Exception:
+                    continue
+
+        if not polys:
+            return None
+        return unary_union(polys)
+
+
+with tab4:
+
+    _sub_header(_t("Back Analysis — Diagnosis Penyebab Erosi & Sedimentasi", "Back Analysis — Diagnosing Erosion & Sedimentation Causes"))
     st.caption(
-        "Upload 2 PDF Slope Monitoring Map (before & after). Hanya titik yang "
-        "benar-benar berubah status/nilai yang akan diinterpolasi jadi kontur "
-        "rainbow di atas peta — titik yang tetap sama tidak ikut diinterpolasi."
+        "Beda dengan tab 'Erosion Mapping' (memprediksi risiko KE DEPAN berdasarkan desain), "
+        "tab ini dipakai SETELAH erosi/sedimentasi benar-benar terjadi di lapangan — untuk "
+        "melacak balik apa penyebab paling mungkin, berbasis hasil RUN ANALYSIS yang sudah ada."
     )
 
-    if not _SMP_FITZ_OK:
-        st.error(
-            "Fitur ini butuh library **PyMuPDF**. Jalankan `pip install pymupdf` "
-            "lalu restart aplikasi.\n\nDetail error: " + str(_SMP_FITZ_ERR)
+    _seg_results_ba = st.session_state.get("segment_results", {})
+
+    if not _seg_results_ba:
+        _ui_warning(
+            "Belum ada hasil RUN ANALYSIS tersimpan. Jalankan analisis di tab 'Erosion Mapping' "
+            "dulu untuk minimal satu segmen, baru kembali ke sini."
         )
-        st.stop()
-
-    col_up1, col_up2 = st.columns(2)
-    with col_up1:
-        md_before_file = st.file_uploader("PDF Sebelum (Before)", type=["pdf"], key="md_before_pdf")
-    with col_up2:
-        md_after_file = st.file_uploader("PDF Sesudah (After)", type=["pdf"], key="md_after_pdf")
-
-    if md_before_file and md_after_file:
-        if st.button("Proses Peta Deviasi", key="md_process_btn"):
-            with st.spinner("Membaca PDF & mengekstrak titik pemantauan..."):
-                tmp_dir = _tempfile_smp.mkdtemp()
-                before_path = _os_smp.path.join(tmp_dir, "before.pdf")
-                after_path = _os_smp.path.join(tmp_dir, "after.pdf")
-                with open(before_path, "wb") as f:
-                    f.write(md_before_file.getbuffer())
-                with open(after_path, "wb") as f:
-                    f.write(md_after_file.getbuffer())
-
-                try:
-                    before_pts = _smp_extract_points(before_path)
-                    after_pts = _smp_extract_points(after_path)
-                except Exception as e:
-                    st.error(f"Gagal membaca PDF: {e}")
-                    before_pts, after_pts = {}, {}
-
-                # --- koreksi posisi: pakai koordinat "Block N/E" di kotak callout,
-                # bukan posisi teks label ID (yang sering jauh dari titik asli
-                # karena dihubungkan lewat leader line panjang) ---
-                n_corrected_before = n_corrected_after = 0
-                calib_ok = False
-                try:
-                    words_before = _smp_pdf_to_bbox_words(before_path)
-                    calib = _smp_calibrate_grid_axes(words_before)
-                    calib_ok = calib is not None
-                    if calib_ok:
-                        block_ne_before = _smp_extract_block_ne(before_path)
-                        block_ne_after = _smp_extract_block_ne(after_path)
-                        before_pts, n_corrected_before = _smp_apply_block_ne_positions(
-                            before_pts, block_ne_before, calib
-                        )
-                        after_pts, n_corrected_after = _smp_apply_block_ne_positions(
-                            after_pts, block_ne_after, calib
-                        )
-                except Exception as e:
-                    st.warning(f"Kalibrasi grid / koordinat Block N-E gagal, pakai posisi label: {e}")
-
-                st.session_state["md_before_pts"] = before_pts
-                st.session_state["md_after_pts"] = after_pts
-                st.session_state["md_before_path"] = before_path
-                st.session_state["md_after_path"] = after_path
-                st.session_state["md_calib_ok"] = calib_ok
-                st.session_state["md_n_corrected"] = (n_corrected_before, n_corrected_after)
-                st.session_state.pop("md_before_override", None)
-                st.session_state.pop("md_after_override", None)
-
-                if not calib_ok:
-                    st.warning(
-                        "Kalibrasi sumbu grid peta (angka 0..21000 / -3000..12000) tidak "
-                        "berhasil dibaca otomatis — posisi titik yang leader-line-nya panjang "
-                        "kemungkinan masih meleset (pakai posisi label). Jalankan "
-                        "`_smp_debug_dump_blocks(pdf_path)` untuk cek pola teks aslinya."
-                    )
-                elif n_corrected_before == 0 and n_corrected_after == 0:
-                    st.warning(
-                        "Sumbu grid berhasil dikalibrasi, tapi tidak ada teks 'Block N/E' yang "
-                        "cocok dengan pola regex di kotak callout — cek format teks aslinya "
-                        "lewat `_smp_debug_dump_blocks(pdf_path)` dan sesuaikan _RE_SMP_BLOCK_NE."
-                    )
-                else:
-                    st.success(
-                        f"Posisi {n_corrected_before} titik (before) & {n_corrected_after} titik "
-                        f"(after) dikoreksi pakai koordinat Block N/E asli (bukan posisi label)."
-                    )
-
-    if st.session_state.get("md_before_pts"):
-
-        before_pts = st.session_state["md_before_pts"]
-        after_pts = st.session_state["md_after_pts"]
-
-        # override dari koreksi manual (kalau ada), tetap pakai posisi hasil ekstraksi asli
-        before_ov = st.session_state.get("md_before_override", {})
-        after_ov = st.session_state.get("md_after_override", {})
-
-        before_use = {pid: {**v, **before_ov.get(pid, {})} for pid, v in before_pts.items()}
-        after_use = {pid: {**v, **after_ov.get(pid, {})} for pid, v in after_pts.items()}
-
-        mode = st.radio(
-            "Sumber deviasi untuk peta kontur",
-            ["Marker di gambar peta (bandingkan ikon before vs after)", "Teks kotak callout (cara lama)"],
-            index=0, key="md_source_mode",
-            help="Tabel data mentah di bawah selalu pakai hasil ekstraksi teks, "
-                 "terlepas dari mode yang dipilih di sini.",
-        )
-        use_image_mode = mode.startswith("Marker")
-
-        # n_naik dihitung dari data teks (tabel), independen dari mode peta kontur
-        n_naik = 0
-        for pid in sorted(set(before_use) | set(after_use)):
-            _, cat_tmp = _smp_deviation_score(before_use.get(pid), after_use.get(pid))
-            if cat_tmp in ("Naik Drastis (>=2 level)", "Naik 1 Level"):
-                n_naik += 1
-
-        if use_image_mode:
-            # ================= MODE BARU: deteksi marker dari gambar peta =================
-            only_color_change = st.checkbox(
-                "Hanya tampilkan marker yang WARNANYA berubah di posisi yang sama "
-                "(sembunyikan marker 'baru'/'hilang' — biasanya cuma gagal cocok posisi, bukan perubahan asli)",
-                value=True, key="md_only_color_change",
-            )
-            with st.expander("Parameter deteksi marker (atur kalau hasil kurang pas)"):
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    min_area = st.number_input("Luas minimal marker (px^2)", 1, 500, 8, key="md_min_area")
-                    max_area = st.number_input("Luas maksimal marker (px^2)", 5, 2000, 260, key="md_max_area")
-                with c2:
-                    sat_thresh = st.slider("Ambang saturasi warna", 0, 150, 55, key="md_sat_thresh")
-                    val_thresh = st.slider("Ambang kecerahan minimal", 0, 200, 60, key="md_val_thresh")
-                with c3:
-                    max_dist_px = st.slider("Toleransi jarak pencocokan (px)", 2, 50, 25, key="md_max_dist_px")
-                    color_change_thresh = st.slider("Ambang 'warna dianggap berubah'", 5, 150, 45, key="md_color_thresh")
-                show_debug = st.checkbox("Tampilkan overlay deteksi (buat verifikasi)", value=False, key="md_show_debug")
-
-            try:
-                before_png = _smp_render_page_png(st.session_state["md_before_path"], dpi=130)
-                after_png = _smp_render_page_png(st.session_state["md_after_path"], dpi=130)
-                before_img = PILImage.open(before_png)
-                after_img = PILImage.open(after_png)
-
-                boxes_before = _smp_find_callout_boxes(before_img)
-                boxes_after = _smp_find_callout_boxes(after_img)
-
-                markers_before = _smp_detect_markers(before_img, boxes_before, min_area, max_area,
-                                                      sat_thresh, val_thresh)
-                markers_after = _smp_detect_markers(after_img, boxes_after, min_area, max_area,
-                                                     sat_thresh, val_thresh)
-
-                pairs = _smp_match_markers(markers_before, markers_after, max_dist_px, color_change_thresh)
-                if only_color_change:
-                    changed_pairs = [p for p in pairs if p["status"] == "changed"]
-                else:
-                    changed_pairs = [p for p in pairs if p["status"] in ("changed", "new", "removed")]
-
-                n_changed_only = len([p for p in pairs if p["status"] == "changed"])
-                n_new = len([p for p in pairs if p["status"] == "new"])
-                n_removed = len([p for p in pairs if p["status"] == "removed"])
-                st.caption(
-                    f"{len(markers_before)} marker terdeteksi di peta before, {len(markers_after)} di after — "
-                    f"**{n_changed_only} warna berubah**"
-                    + ("" if only_color_change else f", {n_new} baru, {n_removed} hilang")
-                    + "."
-                )
-                if not only_color_change and (n_new + n_removed) > n_changed_only * 3:
-                    st.warning(
-                        "Jumlah 'baru'/'hilang' jauh lebih banyak dari 'warna berubah' — kemungkinan besar "
-                        "itu bukan perubahan asli, cuma gagal dicocokkan (coba naikkan 'Toleransi jarak "
-                        "pencocokan' di parameter). Checkbox di atas (default aktif) menyembunyikan ini."
-                    )
-                if show_debug:
-                    dcol1, dcol2 = st.columns(2)
-                    with dcol1:
-                        st.image(_smp_debug_marker_overlay(before_img, markers_before, boxes_before),
-                                 caption="Deteksi - Before (kotak merah = callout diabaikan, titik cyan = marker)")
-                    with dcol2:
-                        st.image(_smp_debug_marker_overlay(after_img, markers_after, boxes_after),
-                                 caption="Deteksi - After")
-
-                W, H = before_img.width, before_img.height
-                fig, ax = plt.subplots(figsize=(16, 11))
-                ax.imshow(before_img)
-                ax.axis("off")
-
-                if len(changed_pairs) > 0:
-                    import numpy as _np_smp
-                    from scipy.spatial import cKDTree as _KDTree_smp
-
-                    res = 3
-                    gx = _np_smp.linspace(0, W, max(W // res, 2))
-                    gy = _np_smp.linspace(0, H, max(H // res, 2))
-                    GX, GY = _np_smp.meshgrid(gx, gy)
-                    grid_pts = _np_smp.column_stack([GX.ravel(), GY.ravel()])
-
-                    sigma_px = 30
-                    cutoff_px = 2.2 * sigma_px
-
-                    colorable = [p for p in changed_pairs if p["status"] in ("changed", "new")]
-                    removed_pts = [p for p in changed_pairs if p["status"] == "removed"]
-
-                    if colorable:
-                        pts_xy = _np_smp.array([[p["x"], p["y"]] for p in colorable])
-                        tree = _KDTree_smp(pts_xy)
-                        dist, idx = tree.query(grid_pts, k=1)
-                        dist = dist.reshape(GX.shape)
-                        idx = idx.reshape(GX.shape)
-
-                        alpha = _np_smp.clip(1 - dist / cutoff_px, 0, 1) ** 1.4 * 0.75
-                        alpha[dist > cutoff_px] = 0.0
-
-                        colors_arr = _np_smp.array(
-                            [[c / 255.0 for c in (p["after_color"] or p["before_color"])] for p in colorable]
-                        )
-                        rgba = _np_smp.zeros((*GX.shape, 4))
-                        rgba[..., :3] = colors_arr[idx]
-                        rgba[..., 3] = alpha
-                        ax.imshow(rgba, extent=(0, W, H, 0), origin="upper", zorder=2)
-
-                    for p in colorable:
-                        color01 = tuple(c / 255.0 for c in (p["after_color"] or p["before_color"]))
-                        edge = "blue" if p["status"] == "new" else "black"
-                        lw = 1.4 if p["status"] == "new" else 0.6
-                        ax.scatter(p["x"], p["y"], s=32, facecolor=color01, edgecolor=edge,
-                                   linewidth=lw, zorder=4)
-
-                    for p in removed_pts:
-                        ax.scatter(p["x"], p["y"], s=45, facecolor="none", edgecolor="black",
-                                   linewidth=1.3, marker="x", zorder=4)
-
-                    legend_handles = []
-                    if colorable:
-                        label_txt = "Warna marker berubah (isi = warna after)"
-                        legend_handles.append(Patch(facecolor="#888888", edgecolor="black", label=label_txt))
-                        if not only_color_change and any(p["status"] == "new" for p in colorable):
-                            legend_handles.append(Patch(facecolor="none", edgecolor="blue", label="Marker baru"))
-                    if removed_pts:
-                        legend_handles.append(Patch(facecolor="none", edgecolor="black", label="Marker hilang (x)"))
-                    if legend_handles:
-                        ax.legend(handles=legend_handles, loc="lower left", fontsize=7, framealpha=0.9)
-
-                    ax.set_title("Kontur Deviasi - Perbandingan Marker Peta (Before vs After)", fontsize=14)
-                else:
-                    ax.set_title("Tidak ada marker yang berbeda antara before & after", fontsize=14)
-
-                st.pyplot(fig)
-                out_path = "/tmp/monitoring_deviation.png"
-                fig.savefig(out_path, dpi=150, bbox_inches="tight")
-                with open(out_path, "rb") as f:
-                    st.download_button("Download Peta Deviasi (PNG)", f, file_name="monitoring_deviation.png",
-                                        key="md_dl_image_mode")
-
-            except Exception as e:
-                st.error(f"Gagal membuat peta deviasi (mode marker gambar): {e}")
-
-        else:
-            # ================= MODE LAMA: teks kotak callout =================
-            only_calibrated = st.checkbox(
-                "Hanya tampilkan/konturkan titik yang posisinya berhasil dikalibrasi ke "
-                "koordinat Block N/E asli (rekomendasi — hindari kontur nongol di kotak callout)",
-                value=True, key="md_only_calibrated",
-            )
-
-            all_ids = sorted(set(before_use) | set(after_use))
-            deviation_points = []
-            n_skipped_uncalibrated = 0
-            for pid in all_ids:
-                b = before_use.get(pid)
-                a = after_use.get(pid)
-                score, cat = _smp_deviation_score(b, a)
-                if cat == "Tetap / Stabil":
-                    continue
-                pos_src = a or b
-                is_calibrated = pos_src.get("_pos_source") == "block_ne"
-                if only_calibrated and not is_calibrated:
-                    n_skipped_uncalibrated += 1
-                    continue
-                magnitude = score if score > 0 else 1.0
-                deviation_points.append({
-                    "id": pid, "score": magnitude, "cat": cat,
-                    "x": pos_src["_x"], "y": pos_src["_y"],
-                    "calibrated": is_calibrated,
-                })
-
-            st.caption(
-                f"{len(before_pts)} titik (before) / {len(after_pts)} titik (after) terbaca — "
-                f"**{len(deviation_points)} titik mengalami perubahan status** dari total {len(all_ids)} titik gabungan."
-            )
-            if n_skipped_uncalibrated > 0:
-                calib_ok_state = st.session_state.get("md_calib_ok", None)
-                if calib_ok_state is False:
-                    st.warning(
-                        f"Kalibrasi sumbu grid peta gagal total, jadi SEMUA {n_skipped_uncalibrated} "
-                        f"titik disembunyikan (posisinya cuma dari label callout, pasti tidak akurat). "
-                        f"Cek `_smp_debug_dump_blocks(pdf_path)` untuk lihat teks sumbu grid aslinya."
-                    )
-                else:
-                    st.info(
-                        f"{n_skipped_uncalibrated} titik deviasi disembunyikan dari peta kontur karena "
-                        f"posisinya belum berhasil dikalibrasi ke koordinat Block N/E asli (masih posisi "
-                        f"label callout) — matikan checkbox di atas kalau tetap mau menampilkannya "
-                        f"(dengan risiko posisi meleset ke kotak callout)."
-                    )
-
-            try:
-                bg_png = _smp_render_page_png(st.session_state["md_before_path"], dpi=130)
-                bg_img = PILImage.open(bg_png)
-                page_w_pts, page_h_pts = _smp_get_page_size(st.session_state["md_before_path"])
-                scale_x = bg_img.width / page_w_pts
-                scale_y = bg_img.height / page_h_pts
-                W, H = bg_img.width, bg_img.height
-
-                fig, ax = plt.subplots(figsize=(16, 11))
-                ax.imshow(bg_img)
-                ax.axis("off")
-
-                if len(deviation_points) > 0:
-                    import numpy as _np_smp
-                    import matplotlib.colors as _mcolors_smp
-
-                    res = 3  # downsample grid demi kecepatan
-                    gx = _np_smp.linspace(0, W, max(W // res, 2))
-                    gy = _np_smp.linspace(0, H, max(H // res, 2))
-                    GX, GY = _np_smp.meshgrid(gx, gy)
-
-                    sigma_px = 30               # radius pengaruh tiap titik (px)
-                    cutoff_px = 2.2 * sigma_px  # HARD cutoff
-
-                    cats_present = []
-                    for pt in deviation_points:
-                        if pt["cat"] not in cats_present:
-                            cats_present.append(pt["cat"])
-
-                    for cat_name in cats_present:
-                        pts_in_cat = [p for p in deviation_points if p["cat"] == cat_name]
-                        field = _np_smp.zeros_like(GX, dtype=float)
-                        min_dist = _np_smp.full_like(GX, _np_smp.inf)
-                        for pt in pts_in_cat:
-                            px, py = pt["x"] * scale_x, pt["y"] * scale_y
-                            d2 = (GX - px) ** 2 + (GY - py) ** 2
-                            d = _np_smp.sqrt(d2)
-                            contrib = pt["score"] * _np_smp.exp(-d2 / (2 * sigma_px ** 2))
-                            contrib[d > cutoff_px] = 0.0
-                            field += contrib
-                            min_dist = _np_smp.minimum(min_dist, d)
-
-                        field = gaussian_filter(field, sigma=1.0)
-                        if field.max() <= 0:
-                            continue
-                        mask = (min_dist > cutoff_px) | (field < field.max() * 0.18)
-                        norm_field = _np_smp.clip(field / field.max(), 0, 1)
-
-                        color_rgb = _mcolors_smp.to_rgb(_SMP_STATUS_COLOR.get(cat_name, "#999999"))
-                        rgba = _np_smp.zeros((*field.shape, 4))
-                        rgba[..., 0] = color_rgb[0]
-                        rgba[..., 1] = color_rgb[1]
-                        rgba[..., 2] = color_rgb[2]
-                        rgba[..., 3] = _np_smp.where(mask, 0.0, norm_field * 0.72)
-
-                        ax.imshow(rgba, extent=(0, W, H, 0), origin="upper", zorder=2)
-                        field_masked = _np_smp.ma.masked_where(mask, field)
-                        ax.contour(GX, GY, field_masked, levels=4,
-                                   colors=[_SMP_STATUS_COLOR.get(cat_name, "#999999")],
-                                   linewidths=0.5, alpha=0.55, zorder=3)
-
-                    legend_handles = [
-                        Patch(facecolor=_SMP_STATUS_COLOR.get(c, "#999999"), edgecolor="black", label=c)
-                        for c in cats_present
-                    ]
-                    ax.legend(handles=legend_handles, loc="lower left", fontsize=7,
-                              framealpha=0.9, title="Perubahan Status (Before -> After)")
-
-                    for pt in deviation_points:
-                        px, py = pt["x"] * scale_x, pt["y"] * scale_y
-                        face = _SMP_STATUS_COLOR.get(pt["cat"], "#999999")
-                        if pt.get("calibrated", False):
-                            edge, lw = "black", 0.6
-                        else:
-                            edge, lw = "#FF00FF", 1.3
-                        ax.scatter(px, py, s=30, facecolor=face, edgecolor=edge,
-                                   linewidth=lw, zorder=4)
-                        label_txt = pt["id"] + ("" if pt.get("calibrated", False) else " (?)")
-                        ax.annotate(label_txt, (px, py), fontsize=6, color="black",
-                                    xytext=(3, 3), textcoords="offset points", zorder=4)
-
-                    ax.set_title("Kontur Deviasi Monitoring (Before -> After)", fontsize=14)
-                else:
-                    ax.set_title("Tidak ada titik yang mengalami deviasi", fontsize=14)
-
-                st.pyplot(fig)
-
-                out_path = "/tmp/monitoring_deviation.png"
-                fig.savefig(out_path, dpi=150, bbox_inches="tight")
-                with open(out_path, "rb") as f:
-                    st.download_button("Download Peta Deviasi (PNG)", f, file_name="monitoring_deviation.png",
-                                        key="md_dl_text_mode")
-
-            except Exception as e:
-                st.error(f"Gagal membuat peta deviasi: {e}")
-
-        if n_naik > 0:
-            st.error(f"{n_naik} titik menunjukkan kenaikan status pergerakan — perlu perhatian.")
-        else:
-            st.success("Tidak ada titik yang naik status pergerakan secara signifikan.")
-
-        # --- data mentah & koreksi manual, disembunyikan biar peta jadi fokus utama ---
-        with st.expander("Data mentah hasil ekstraksi & koreksi manual (opsional)"):
-            st.caption(
-                "Peta ini padat teks sehingga sesekali ada salah baca. Kalau ada nilai "
-                "yang keliru, koreksi di sini lalu klik 'Update Peta dari Koreksi'."
-            )
-            col_t1, col_t2 = st.columns(2)
-            with col_t1:
-                st.markdown("**Titik Before**")
-                df_before_edit = st.data_editor(
-                    pd.DataFrame(
-                        [{"ID Titik": v["ID Titik"], "Nilai (mm/day)": v["Nilai (mm/day)"], "Status": v["Status"]}
-                         for v in before_use.values()]
-                    ).sort_values("ID Titik"),
-                    num_rows="fixed", use_container_width=True, key="md_before_editor",
-                    column_config={"Status": st.column_config.SelectboxColumn(
-                        options=["Stabil", "Hati-hati", "Waspada", "Evakuasi", "Tidak terbaca"])}
-                )
-            with col_t2:
-                st.markdown("**Titik After**")
-                df_after_edit = st.data_editor(
-                    pd.DataFrame(
-                        [{"ID Titik": v["ID Titik"], "Nilai (mm/day)": v["Nilai (mm/day)"], "Status": v["Status"]}
-                         for v in after_use.values()]
-                    ).sort_values("ID Titik"),
-                    num_rows="fixed", use_container_width=True, key="md_after_editor",
-                    column_config={"Status": st.column_config.SelectboxColumn(
-                        options=["Stabil", "Hati-hati", "Waspada", "Evakuasi", "Tidak terbaca"])}
-                )
-
-            if st.button("Update Peta dari Koreksi", key="md_update_btn"):
-                new_before_ov = {}
-                for _, row in df_before_edit.iterrows():
-                    new_before_ov[row["ID Titik"]] = {
-                        "Nilai (mm/day)": row["Nilai (mm/day)"], "Status": row["Status"],
-                        "_rank": _SMP_STATUS_RANK.get(row["Status"]),
-                    }
-                new_after_ov = {}
-                for _, row in df_after_edit.iterrows():
-                    new_after_ov[row["ID Titik"]] = {
-                        "Nilai (mm/day)": row["Nilai (mm/day)"], "Status": row["Status"],
-                        "_rank": _SMP_STATUS_RANK.get(row["Status"]),
-                    }
-                st.session_state["md_before_override"] = new_before_ov
-                st.session_state["md_after_override"] = new_after_ov
-                st.rerun()
-
     else:
-        st.info("Upload kedua PDF (before & after), lalu klik 'Proses Peta Deviasi' untuk memulai.")
+        _ba_sid = st.selectbox(
+            "Segmen yang mengalami kejadian erosi/sedimentasi",
+            list(_seg_results_ba.keys()),
+            format_func=lambda s: _seg_results_ba[s].get("label", s),
+            key="ba_segment_choice",
+        )
+        _ba_res = _seg_results_ba[_ba_sid]
 
-# ================= MQG AI =================
+        _ba_mode = st.radio(
+            "Mode analisis",
+            [
+                _t("Mode A — Ranking Penyebab (diagnostik cepat)", "Mode A — Cause Ranking (quick diagnostic)"),
+                _t("Mode B — Back-Calculation Parameter (kuantitatif)", "Mode B — Back-Calculation Parameter (quantitative)"),
+            ],
+            key="ba_mode_choice",
+            horizontal=True,
+        )
+
+        st.markdown("---")
+
+        # =================================================
+        # MODE A — RANKING PENYEBAB
+        # =================================================
+        if _ba_mode.startswith("Mode A"):
+
+            st.markdown("#### " + _t("Mode A — Ranking Penyebab", "Mode A — Cause Ranking"))
+            st.caption(
+                "Tandai titik lokasi kejadian di peta di bawah. App mengambil semua faktor risiko "
+                "yang sudah dihitung di titik itu (kecepatan aliran, slope, konvergensi, overflow, "
+                "risiko komposit), membandingkannya ke distribusi seluruh segmen, lalu meranking "
+                "faktor mana yang paling menyimpang dari normal — mirip laporan diagnosis."
+            )
+
+            _kejadian_type = st.radio(
+                "Jenis kejadian yang diamati di lapangan",
+                ["Erosi", "Sedimentasi"],
+                key=f"ba_kejadian_type_{_ba_sid}",
+                horizontal=True,
+            )
+
+            _grid_x_ba = _ba_res.get("grid_x")
+            _grid_y_ba = _ba_res.get("grid_y")
+            _zone_map_ba = _ba_res.get("zone_map")
+            _boundary_ba = _ba_res.get("boundary")
+            _inside_ba = _ba_res.get("inside")
+
+            if _grid_x_ba is None or _boundary_ba is None:
+                st.error(
+                    "Hasil segmen ini tidak lengkap (grid/boundary tidak tersimpan) — jalankan "
+                    "ulang RUN ANALYSIS untuk segmen ini."
+                )
+            else:
+                _sub_header(_t("Tandai Lokasi Kejadian", "Mark Event Location"))
+
+                _loc_method_ba = st.radio(
+                    "Cara menandai lokasi kejadian",
+                    ["Klik di peta", "Input koordinat manual", "Upload boundary area erosi (DXF)"],
+                    key=f"ba_loc_method_{_ba_sid}",
+                    horizontal=True,
+                )
+
+                _bnds_ba = _boundary_ba.bounds  # (minx, miny, maxx, maxy)
+
+                if _loc_method_ba == "Input koordinat manual":
+                    st.caption(
+                        f"Masukkan koordinat X,Y hasil pengukuran lapangan (dalam sistem "
+                        f"koordinat yang sama dengan DXF desain). Rentang area kajian: "
+                        f"X [{_bnds_ba[0]:.1f} – {_bnds_ba[2]:.1f}], "
+                        f"Y [{_bnds_ba[1]:.1f} – {_bnds_ba[3]:.1f}]."
+                    )
+                    _mc1, _mc2, _mc3 = st.columns([1, 1, 0.6])
+                    with _mc1:
+                        _man_x = st.number_input(
+                            "Koordinat X (Easting)", value=float((_bnds_ba[0] + _bnds_ba[2]) / 2),
+                            format="%.3f", key=f"ba_manual_x_{_ba_sid}",
+                        )
+                    with _mc2:
+                        _man_y = st.number_input(
+                            "Koordinat Y (Northing)", value=float((_bnds_ba[1] + _bnds_ba[3]) / 2),
+                            format="%.3f", key=f"ba_manual_y_{_ba_sid}",
+                        )
+                    with _mc3:
+                        st.write("")
+                        st.write("")
+                        if st.button(_t("Set titik ini", "Set this point"), key=f"ba_manual_set_{_ba_sid}"):
+                            st.session_state[f"ba_click_xy_{_ba_sid}"] = (float(_man_x), float(_man_y))
+
+                elif _loc_method_ba == "Upload boundary area erosi (DXF)":
+                    st.caption(
+                        "Upload file DXF berisi outline/polygon area yang benar-benar tererosi di "
+                        "lapangan (hasil survei/pengukuran). Semua polyline TERTUTUP dalam file akan "
+                        "digabung jadi satu boundary erosi, dan diagnosis dihitung dari RATA-RATA "
+                        "seluruh titik grid yang ada di dalam boundary tersebut — bukan cuma satu titik."
+                    )
+                    _erosi_dxf = st.file_uploader(
+                        "DXF boundary erosi aktual", type=["dxf"], key=f"ba_erosi_dxf_{_ba_sid}",
+                    )
+                    if _erosi_dxf is not None:
+                        try:
+                            _erosi_poly = _load_simple_boundary_from_dxf(_erosi_dxf)
+                        except Exception as _e_erosi:
+                            _erosi_poly = None
+                            st.error(_t(f"Gagal membaca DXF: {_e_erosi}", f"Failed to read DXF: {_e_erosi}"))
+                        if _erosi_poly is not None and not _erosi_poly.is_empty:
+                            _erosi_c = _erosi_poly.centroid
+                            st.session_state[f"ba_erosi_boundary_{_ba_sid}"] = _erosi_poly
+                            st.session_state[f"ba_click_xy_{_ba_sid}"] = (float(_erosi_c.x), float(_erosi_c.y))
+                            st.success(
+                                f"Boundary erosi terbaca — luas ≈{_erosi_poly.area:.1f} m², "
+                                f"centroid X={_erosi_c.x:.2f}, Y={_erosi_c.y:.2f}. Diagnosis di bawah "
+                                f"memakai rata-rata seluruh titik di dalam boundary ini."
+                            )
+                        elif _erosi_poly is not None:
+                            st.error(
+                                "Tidak ditemukan polyline TERTUTUP yang valid di DXF ini — pastikan "
+                                "outline area erosi berupa polyline closed/loop."
+                            )
+                else:
+                    st.caption(
+                        "Klik satu titik pada peta risiko komposit di bawah ini — titik magenta = "
+                        "boundary area kajian, warna latar = indeks risiko hasil analisis desain."
+                    )
+
+                fig_ba = go.Figure()
+
+                # heatmap risiko komposit sebagai konteks visual. Orientasi grid_x/grid_y di app
+                # ini: grid_x bervariasi sepanjang axis-0 (baris), grid_y sepanjang axis-1 (kolom)
+                # -- lihat pola indexing yang sama dipakai di bagian flow accumulation. Makanya di
+                # sini z ditranspose supaya cocok dengan konvensi go.Heatmap (baris=y, kolom=x).
+                fig_ba.add_trace(go.Heatmap(
+                    x=_grid_x_ba[:, 0], y=_grid_y_ba[0, :], z=_zone_map_ba.T,
+                    colorscale="YlOrRd", showscale=True,
+                    colorbar=dict(title="Risiko"),
+                    hovertemplate="X=%{x:.2f}, Y=%{y:.2f}<br>Risiko=%{z:.2f}<extra></extra>",
+                ))
+
+                _bax, _bay = _boundary_xy_flat(_boundary_ba)
+                fig_ba.add_trace(go.Scatter(
+                    x=_bax, y=_bay, mode="lines",
+                    line=dict(color="magenta", width=2), name="Boundary",
+                    hoverinfo="skip",
+                ))
+
+                _erosi_poly_shown = st.session_state.get(f"ba_erosi_boundary_{_ba_sid}")
+                if _erosi_poly_shown is not None:
+                    _eex, _eey = _boundary_xy_flat(_erosi_poly_shown)
+                    fig_ba.add_trace(go.Scatter(
+                        x=_eex, y=_eey, mode="lines",
+                        line=dict(color="red", width=2, dash="dash"), name="Boundary erosi aktual",
+                        hoverinfo="skip",
+                    ))
+
+                # grid titik tipis TAK-TERLIHAT (opacity ~0) sebagai target klik -- sama seperti
+                # pola "Klik di Peta Desain" di tab Erosion Mapping. go.Heatmap SENDIRI tidak
+                # menghasilkan event seleksi titik di Streamlit (on_select hanya menangkap titik
+                # dari trace bertipe marker/scatter), jadi tanpa overlay ini klik di peta risiko
+                # tidak akan pernah terbaca dan hasil diagnosis tidak akan pernah muncul.
+                if _loc_method_ba == "Klik di peta":
+                    _ba_pick_step = max(1, _grid_x_ba.shape[0] // 60)
+                    _gx_ba_s = _grid_x_ba[::_ba_pick_step, ::_ba_pick_step]
+                    _gy_ba_s = _grid_y_ba[::_ba_pick_step, ::_ba_pick_step]
+                    _inside_ba_s = (
+                        _inside_ba[::_ba_pick_step, ::_ba_pick_step]
+                        if _inside_ba is not None
+                        else np.ones_like(_gx_ba_s, dtype=bool)
+                    )
+                    fig_ba.add_trace(go.Scatter(
+                        x=_gx_ba_s[_inside_ba_s].ravel(), y=_gy_ba_s[_inside_ba_s].ravel(),
+                        mode="markers",
+                        marker=dict(size=14, color="rgba(0,150,255,0.08)"),
+                        name="(area klik)", showlegend=False,
+                        hovertemplate="X=%{x:.2f}, Y=%{y:.2f}<extra></extra>",
+                    ))
+
+                _prev_bx, _prev_by = st.session_state.get(f"ba_click_xy_{_ba_sid}", (None, None))
+                if _prev_bx is not None:
+                    fig_ba.add_trace(go.Scatter(
+                        x=[_prev_bx], y=[_prev_by], mode="markers",
+                        marker=dict(size=16, color="cyan", symbol="x",
+                                    line=dict(color="black", width=1.5)),
+                        name="Titik kejadian", hoverinfo="skip",
+                    ))
+
+                fig_ba.update_layout(
+                    height=480, dragmode="pan",
+                    xaxis_title="Easting (m)", yaxis_title="Northing (m)",
+                    yaxis=dict(scaleanchor="x", scaleratio=1),
+                    margin=dict(l=10, r=10, t=10, b=10),
+                    clickmode="event+select",
+                )
+
+                if _loc_method_ba == "Klik di peta":
+                    try:
+                        _ev_ba = st.plotly_chart(
+                            fig_ba, width="stretch",
+                            on_select="rerun", selection_mode="points",
+                            key=f"ba_click_map_{_ba_sid}",
+                        )
+                        _sel_pts_ba = (_ev_ba or {}).get("selection", {}).get("points", [])
+                        if _sel_pts_ba:
+                            _cx_new = _sel_pts_ba[-1].get("x")
+                            _cy_new = _sel_pts_ba[-1].get("y")
+                            if _cx_new is not None and _cy_new is not None:
+                                # TIDAK panggil st.rerun() manual di sini -- on_select="rerun"
+                                # SUDAH otomatis memicu rerun begitu event klik terjadi. Memanggil
+                                # st.rerun() lagi menyebabkan double-rerun yang bisa membuat event
+                                # klik pertama "hilang"/tidak sempat kebaca sebelum discard.
+                                st.session_state[f"ba_click_xy_{_ba_sid}"] = (float(_cx_new), float(_cy_new))
+                    except TypeError:
+                        st.plotly_chart(fig_ba, width="stretch")
+                        _ui_warning(
+                            "Versi Streamlit di server ini belum mendukung klik-pilih pada grafik "
+                            "(butuh Streamlit >= 1.35) -- gunakan opsi 'Input koordinat manual' di atas."
+                        )
+                else:
+                    st.plotly_chart(fig_ba, width="stretch")
+
+                _clicked_ba = st.session_state.get(f"ba_click_xy_{_ba_sid}")
+
+                if _clicked_ba is None:
+                    _ui_info("Klik titik lokasi kejadian pada peta di atas untuk melihat hasil diagnosis.")
+                else:
+                    _cx, _cy = _clicked_ba
+
+                    if not _boundary_ba.contains(Point(_cx, _cy)):
+                        st.error(_t("Titik yang dipilih berada di luar boundary area kajian.", "The selected point is outside the study area boundary."))
+                    else:
+                        _erosi_poly_diag = st.session_state.get(f"ba_erosi_boundary_{_ba_sid}")
+
+                        _ix_ba = int(np.abs(_grid_x_ba[:, 0] - _cx).argmin())
+                        _iy_ba = int(np.abs(_grid_y_ba[0, :] - _cy).argmin())
+
+                        _erosi_mask_ba = None
+                        if _erosi_poly_diag is not None:
+                            try:
+                                _erosi_mask_ba = vectorized.contains(_erosi_poly_diag, _grid_x_ba, _grid_y_ba)
+                                if _inside_ba is not None:
+                                    _erosi_mask_ba = _erosi_mask_ba & _inside_ba
+                                if not _erosi_mask_ba.any():
+                                    _erosi_mask_ba = None
+                            except Exception:
+                                _erosi_mask_ba = None
+
+                        if _erosi_mask_ba is not None:
+                            st.success(
+                                f"Boundary erosi aktif: diagnosis dihitung dari rata-rata "
+                                f"{int(_erosi_mask_ba.sum())} titik grid di dalam boundary erosi."
+                            )
+                        else:
+                            st.success(_t(f"Titik kejadian ditandai: X = {_cx:.2f}, Y = {_cy:.2f}", f"Event point marked: X = {_cx:.2f}, Y = {_cy:.2f}"))
+
+                        def _ba_pct_at(_grid, _mask, _ix, _iy, _area_mask=_erosi_mask_ba):
+                            if _grid is None:
+                                return None, None
+                            _grid = np.asarray(_grid, dtype=float)
+                            _valid_vals = _grid[_mask] if _mask is not None else _grid.ravel()
+                            _valid_vals = _valid_vals[~np.isnan(_valid_vals)]
+                            if len(_valid_vals) == 0:
+                                return None, None
+                            if _area_mask is not None:
+                                _area_vals = _grid[_area_mask]
+                                _area_vals = _area_vals[~np.isnan(_area_vals)]
+                                if len(_area_vals) == 0:
+                                    return None, None
+                                _val_here = float(np.mean(_area_vals))
+                            else:
+                                _val_here = _grid[_ix, _iy]
+                                if np.isnan(_val_here):
+                                    return None, None
+                            _pct = float((_valid_vals <= _val_here).mean() * 100.0)
+                            return float(_val_here), _pct
+
+                        _factors = []
+
+                        _v, _p = _ba_pct_at(_ba_res.get("velocity_field"), _inside_ba, _ix_ba, _iy_ba)
+                        if _v is not None:
+                            _factors.append(("Kecepatan aliran", _v, "m/s", _p))
+
+                        _v, _p = _ba_pct_at(_ba_res.get("slope"), _inside_ba, _ix_ba, _iy_ba)
+                        if _v is not None:
+                            _factors.append(("Kemiringan lereng (slope)", _v, "", _p))
+
+                        _v, _p = _ba_pct_at(_ba_res.get("flow_density"), _inside_ba, _ix_ba, _iy_ba)
+                        if _v is not None:
+                            _factors.append(("Konvergensi aliran", _v, "", _p))
+
+                        _v, _p = _ba_pct_at(_ba_res.get("overflow_index"), _inside_ba, _ix_ba, _iy_ba)
+                        if _v is not None:
+                            _factors.append(("Indeks overflow", _v, "", _p))
+
+                        if _kejadian_type == "Sedimentasi":
+                            _v, _p = _ba_pct_at(_ba_res.get("sediment_map"), _inside_ba, _ix_ba, _iy_ba)
+                            if _v is not None:
+                                _factors.append(("Laju sedimentasi", _v, "", _p))
+
+                        _v, _p = _ba_pct_at(_ba_res.get("zone_map"), _inside_ba, _ix_ba, _iy_ba)
+                        if _v is not None:
+                            _factors.append(("Indeks risiko komposit", _v, "", _p))
+
+                        # ---- faktor skalar (grain size & hujan): dibandingkan ke asumsi desain,
+                        # BUKAN persentil spasial, karena keduanya bukan data per-titik di app ini ----
+                        _sub_header(_t("Faktor Skalar (dibandingkan ke asumsi desain)", "Scalar Factor (compared to design assumptions)"))
+                        _cga, _cgb = st.columns(2)
+
+                        _grain_actual = _ba_res.get("grain_size_mm")
+                        with _cga:
+                            _grain_design = st.number_input(
+                                "Asumsi grain size desain awal (mm)",
+                                min_value=0.001,
+                                value=float(_grain_actual) if _grain_actual else 2.0,
+                                step=0.1, key=f"ba_grain_design_{_ba_sid}",
+                                help="Grain size aktual didapat dari hasil sampling lapangan yang "
+                                     "sudah diinput di tab Erosion Mapping.",
+                            )
+                        if _grain_actual and _grain_actual > 0:
+                            _grain_ratio = _grain_design / _grain_actual
+                            _factors.append((
+                                f"Grain size (sampling {_grain_actual:.3f}mm vs asumsi desain {_grain_design:.3f}mm)",
+                                _grain_ratio,
+                                "x lebih halus dari asumsi" if _grain_ratio > 1 else "x lebih kasar dari asumsi",
+                                float(min(99.0, abs(_grain_ratio - 1) * 60.0)),
+                            ))
+
+                        _rain_design = _ba_res.get("r24_mm_extreme") or _ba_res.get("r24_mm")
+                        _rain_actual = _ba_res.get("online_rainfall")
+                        with _cgb:
+                            st.metric(
+                                "Curah hujan tercatat (event)",
+                                f"{_rain_actual:.1f} mm" if _rain_actual else "Belum ada data",
+                            )
+                            st.metric(
+                                "Curah hujan asumsi desain (R24 × faktor ekstrem)",
+                                f"{_rain_design:.1f} mm" if _rain_design else "N/A (hidraulika belum diaktifkan)",
+                            )
+                        if _rain_design and _rain_actual and _rain_design > 0:
+                            _rain_ratio = _rain_actual / _rain_design
+                            _factors.append((
+                                f"Curah hujan (aktual {_rain_actual:.1f}mm vs desain {_rain_design:.1f}mm)",
+                                _rain_ratio,
+                                "x lebih besar dari desain" if _rain_ratio > 1 else "x lebih kecil dari desain",
+                                float(min(99.0, abs(_rain_ratio - 1) * 60.0)),
+                            ))
+
+                        # ---- ranking ----
+                        _factors_sorted = sorted(
+                            [f for f in _factors if f[3] is not None],
+                            key=lambda f: f[3], reverse=True,
+                        )
+
+                        _sub_header(_t("Hasil Ranking Kemungkinan Penyebab", "Probable Cause Ranking Results"))
+
+                        if not _factors_sorted:
+                            _ui_warning(
+                                "Tidak ada faktor yang bisa dihitung di titik ini — kemungkinan hasil "
+                                "segmen tidak lengkap."
+                            )
+                        else:
+                            for _rank, (_name, _val, _unit, _score) in enumerate(_factors_sorted, start=1):
+                                if _score >= 90:
+                                    _tag, _tag_color = "SANGAT MENYIMPANG", "#C62828"
+                                elif _score >= 75:
+                                    _tag, _tag_color = "MENYIMPANG", "#F5811F"
+                                elif _score >= 50:
+                                    _tag, _tag_color = "SEDIKIT DI ATAS NORMAL", "#B7950B"
+                                else:
+                                    _tag, _tag_color = "NORMAL", "#2E7D32"
+
+                                st.markdown(
+                                    f"""
+                                    <div style="display:flex; justify-content:space-between; align-items:center;
+                                                border:1px solid rgba(128,128,128,0.35); border-radius:10px;
+                                                padding:10px 16px; margin-bottom:8px;">
+                                        <div>
+                                            <b>#{_rank}. {_name}</b><br>
+                                            <span style="font-size:13px; opacity:0.8;">
+                                                Nilai: {_val:.3f} {_unit} — Persentil/skor: {_score:.0f}%
+                                            </span>
+                                        </div>
+                                        <span style="background:{_tag_color}; color:white; padding:4px 14px;
+                                                     border-radius:999px; font-size:12px; font-weight:700;
+                                                     white-space:nowrap;">{_tag}</span>
+                                    </div>
+                                    """,
+                                    unsafe_allow_html=True
+                                )
+
+                            _ui_caption(
+                                "Persentil dihitung relatif terhadap seluruh area segmen ini (bukan skala "
+                                "absolut baku) — jadi ini menunjukkan faktor mana yang PALING TIDAK BIASA "
+                                "di titik ini dibanding sekitarnya, bukan tingkat bahaya mutlak. Faktor "
+                                "grain size & curah hujan pakai skor heuristik berbasis rasio terhadap "
+                                "asumsi desain (bukan persentil spasial), karena keduanya bukan data per-titik."
+                            )
+
+                            # ---- normalisasi jadi persentase kontribusi relatif (total = 100%) ----
+                            st.markdown("---")
+                            _sub_header(_t("Persentase Kontribusi Relatif Antar Parameter", "Relative Contribution Percentage Between Parameters"))
+                            _ui_caption(
+                                "Skor tiap faktor di atas dinormalisasi terhadap total seluruh faktor, "
+                                "supaya jumlahnya 100% — ini mempermudah melihat parameter mana yang "
+                                "PALING DOMINAN relatif terhadap parameter lain di titik ini, bukan lagi "
+                                "penilaian tiap faktor secara terpisah. Tetap estimasi heuristik, bukan "
+                                "pembuktian kausal — gunakan sebagai arahan prioritas investigasi lapangan."
+                            )
+                            _total_score_ba = sum(f[3] for f in _factors_sorted)
+                            if _total_score_ba <= 0:
+                                _ui_info(
+                                    "Semua faktor bernilai nol/tidak menyimpang — tidak ada parameter "
+                                    "yang menonjol untuk dinormalisasi."
+                                )
+                            else:
+                                for _name, _val, _unit, _score in _factors_sorted:
+                                    _pct_ba = _score / _total_score_ba * 100.0
+                                    st.progress(
+                                        min(1.0, _pct_ba / 100.0),
+                                        text=f"{_name} — {_pct_ba:.1f}%",
+                                    )
+
+        # =================================================
+        # MODE B — BACK-CALCULATION PARAMETER
+        # =================================================
+        else:
+
+            st.markdown("#### " + _t("Mode B — Back-Calculation Parameter", "Mode B — Back-Calculation Parameter"))
+            st.caption(
+                "Masukkan angka keparahan hasil ukur lapangan (kedalaman scour atau volume "
+                "sedimentasi), app menghitung mundur parameter efektif (τ efektif) yang DIPERLUKAN "
+                "untuk menghasilkan kerusakan sebesar itu, lalu dibandingkan ke asumsi desain awal."
+            )
+
+            _M_design = _ba_res.get("erodibility_M")
+            _tau_c_design = _ba_res.get("tau_critical")
+            _grain_b = _ba_res.get("grain_size_mm")
+
+            st.markdown("**" + _t("Asumsi desain awal (dari hasil RUN ANALYSIS segmen ini):", "Initial design assumptions (from this segment's RUN ANALYSIS results):") + "**")
+            _c1, _c2, _c3 = st.columns(3)
+            _c1.metric("Erodibility M (desain)", f"{_M_design:.5f}" if _M_design else "N/A")
+            _c2.metric("τ critical (desain)", f"{_tau_c_design:.2f} Pa" if _tau_c_design else "N/A")
+            _c3.metric("Grain size (sampling)", f"{_grain_b:.3f} mm" if _grain_b else "N/A")
+
+            st.markdown("---")
+
+            _jenis_b = st.radio(
+                "Jenis kerusakan yang diukur di lapangan",
+                ["Erosi (kedalaman scour)", "Sedimentasi (volume/tebal endapan)"],
+                key=f"ba_jenis_b_{_ba_sid}",
+                horizontal=True,
+            )
+
+            if _jenis_b.startswith("Erosi"):
+
+                _cba1, _cba2 = st.columns(2)
+                with _cba1:
+                    _scour_depth = st.number_input(
+                        "Kedalaman scour terukur di lapangan (m)",
+                        min_value=0.0, value=0.0, step=0.01,
+                        key=f"ba_scour_depth_{_ba_sid}",
+                    )
+                with _cba2:
+                    _durasi_jam = st.number_input(
+                        "Perkiraan durasi kejadian (jam) — mis. lama hujan deras berlangsung",
+                        min_value=0.1, value=3.0, step=0.5,
+                        key=f"ba_durasi_erosi_{_ba_sid}",
+                    )
+
+                if _scour_depth <= 0:
+                    _ui_info(
+                        "Isi kedalaman scour terukur (>0) untuk menjalankan back-calculation."
+                    )
+                elif _M_design is None or _tau_c_design is None:
+                    st.error(
+                        "Data Erodibility M dan/atau τ critical desain untuk segmen ini belum "
+                        "tersimpan (kosong/N/A pada kartu di atas) — jalankan ulang RUN ANALYSIS "
+                        "di tab 'Erosion Mapping' untuk segmen ini terlebih dahulu, baru kembali "
+                        "ke Mode B."
+                    )
+                elif _M_design <= 0:
+                    st.error(
+                        f"Nilai Erodibility M desain untuk segmen ini adalah {_M_design:.5f} "
+                        "(≤ 0), sehingga back-calculation tidak bisa dibagi dengan angka ini. "
+                        "Cek kembali input Erodibility M pada segmen ini di tab 'Erosion Mapping'."
+                    )
+                else:
+                    _obs_rate_ms = _scour_depth / (_durasi_jam * 3600.0)  # m/s
+
+                    _sub_header(_t("Hasil Back-Calculation", "Back-Calculation Results"))
+                    st.write(
+                        f"Erosion rate teramati: **{_obs_rate_ms*1000*3600:.3f} mm/jam** "
+                        f"(dari {_scour_depth:.3f} m dalam {_durasi_jam:.1f} jam)."
+                    )
+
+                    # Formula erosi excess shear-stress: E = M x (tau - tau_c)
+                    # -> tau_eff_diperlukan = (E / M) + tau_c
+                    _tau_eff_needed = (_obs_rate_ms / _M_design) + _tau_c_design
+                    _ratio_tau = _tau_eff_needed / _tau_c_design if _tau_c_design > 0 else None
+
+                    st.markdown(
+                        f"Berdasarkan formula erosi *excess shear-stress* `E = M × (τ - τc)` dan "
+                        f"asumsi M desain (**{_M_design:.5f}**), τ efektif yang **DIPERLUKAN** di "
+                        f"lapangan untuk menghasilkan erosi sedalam ini adalah sekitar "
+                        f"**{_tau_eff_needed:.2f} Pa**"
+                        + (
+                            f" — sekitar **{_ratio_tau:.1f}x** lebih besar dari τ critical desain "
+                            f"({_tau_c_design:.2f} Pa)."
+                            if _ratio_tau else "."
+                        )
+                    )
+
+                    if _ratio_tau and _ratio_tau > 1.5:
+                        _ui_warning(
+                            "τ efektif lapangan jauh melebihi asumsi desain — indikasi kuat kondisi "
+                            "hidraulik aktual (curah hujan/debit aktual) melampaui asumsi desain, "
+                            "bukan semata kesalahan desain awal. Cek juga curah hujan aktual pada "
+                            "tanggal kejadian di Mode A untuk konfirmasi silang."
+                        )
+                    elif _ratio_tau:
+                        _ui_info(
+                            "τ efektif lapangan relatif dekat dengan asumsi desain — kerusakan yang "
+                            "terjadi masih dalam rentang wajar dari perhitungan awal."
+                        )
+
+                    # ---- Persentase parameter yang potensial jadi penyebab ----
+                    st.markdown("---")
+                    _sub_header(_t("Persentase Parameter Potensi Penyebab", "Potential Cause Parameter Percentage"))
+                    _ui_caption(
+                        "Kontribusi tiap parameter dihitung dari seberapa jauh nilai aktual/lapangan "
+                        "menyimpang dari asumsi desain, lalu dinormalisasi jadi 100% -- ini estimasi "
+                        "heuristik untuk mengarahkan investigasi lapangan, bukan pembuktian sebab-akibat."
+                    )
+
+                    _bcontrib = []
+                    _bcontrib.append((
+                        "Gap tegangan geser (kondisi hidraulik lapangan vs desain)",
+                        abs((_ratio_tau or 1.0) - 1.0),
+                    ))
+
+                    _rain_design_b = _ba_res.get("r24_mm_extreme") or _ba_res.get("r24_mm")
+                    _rain_actual_b = _ba_res.get("online_rainfall")
+                    if _rain_design_b and _rain_actual_b and _rain_design_b > 0:
+                        _bcontrib.append((
+                            f"Curah hujan (aktual {_rain_actual_b:.1f}mm vs desain {_rain_design_b:.1f}mm)",
+                            abs((_rain_actual_b / _rain_design_b) - 1.0),
+                        ))
+
+                    _grain_actual_b = _ba_res.get("grain_size_mm")
+                    if _grain_actual_b and _grain_actual_b > 0:
+                        _grain_design_b = st.number_input(
+                            "Asumsi grain size desain awal (mm) — untuk hitung kontribusi",
+                            min_value=0.001,
+                            value=float(_grain_actual_b),
+                            step=0.1, key=f"ba_grain_design_b_{_ba_sid}",
+                        )
+                        _bcontrib.append((
+                            f"Grain size (sampling {_grain_actual_b:.3f}mm vs asumsi desain {_grain_design_b:.3f}mm)",
+                            abs((_grain_design_b / _grain_actual_b) - 1.0),
+                        ))
+
+                    _total_dev = sum(d for _, d in _bcontrib)
+                    if _total_dev <= 0:
+                        _ui_info(
+                            "Semua parameter yang tersedia berada sangat dekat dengan asumsi desain "
+                            "— belum ada indikasi parameter tunggal yang menonjol sebagai penyebab."
+                        )
+                    else:
+                        for _name, _dev in sorted(_bcontrib, key=lambda x: x[1], reverse=True):
+                            _pct_b = _dev / _total_dev * 100.0
+                            st.progress(
+                                min(1.0, _pct_b / 100.0),
+                                text=f"{_name} — {_pct_b:.1f}%",
+                            )
+
+            else:  # Sedimentasi
+
+                _cbs1, _cbs2 = st.columns(2)
+                with _cbs1:
+                    _vol_sedimen = st.number_input(
+                        "Volume sedimentasi terukur (m³)",
+                        min_value=0.0, value=0.0, step=0.1,
+                        key=f"ba_vol_sedimen_{_ba_sid}",
+                        help="Bisa dihitung dari tebal endapan rata-rata × luas area yang tertutup sedimen.",
+                    )
+                with _cbs2:
+                    _durasi_sed = st.number_input(
+                        "Perkiraan durasi pengendapan (jam)",
+                        min_value=0.1, value=3.0, step=0.5,
+                        key=f"ba_durasi_sed_{_ba_sid}",
+                    )
+
+                if _vol_sedimen > 0:
+                    _sub_header(_t("Hasil Back-Calculation (Sedimentasi)", "Back-Calculation Results (Sedimentation)"))
+
+                    _seg_area_b = _ba_res.get("boundary_area_ha", 0) * 10000.0
+                    _area_override_b = st.number_input(
+                        "Luas area yang benar-benar tertutup sedimen (m²) — opsional, isi kalau tahu "
+                        "supaya tebal rata-rata lebih akurat (default: luas seluruh segmen)",
+                        min_value=0.0, value=0.0, step=10.0,
+                        key=f"ba_area_sedimen_{_ba_sid}",
+                    )
+                    _boundary_area_b = _area_override_b if _area_override_b > 0 else _seg_area_b
+                    _tebal_rata = (_vol_sedimen / _boundary_area_b) if _boundary_area_b else None
+
+                    st.write(
+                        f"Volume sedimentasi teramati: **{_vol_sedimen:.2f} m³** dalam "
+                        f"{_durasi_sed:.1f} jam, di area seluas **{_boundary_area_b:,.0f} m²**"
+                        + (
+                            f" — setara tebal rata-rata ≈**{_tebal_rata*100:.4f} cm** "
+                            f"(≈{_tebal_rata*1000:.2f} mm)."
+                            if _tebal_rata else "."
+                        )
+                    )
+                    if _area_override_b <= 0 and _seg_area_b:
+                        _ui_caption(
+                            "Nilai di atas dihitung terhadap luas SELURUH segmen (belum tentu semua "
+                            "tertutup sedimen) — makanya tebalnya bisa tampak sangat kecil. Isi kolom "
+                            "'luas area yang tertutup sedimen' di atas kalau tahu luas sebenarnya, "
+                            "untuk angka tebal yang lebih realistis."
+                        )
+
+                    _ui_info(
+                        "Back-calculation kuantitatif penuh untuk sedimentasi (menghitung mundur "
+                        "settling velocity aktual) butuh data tambahan: distribusi ukuran butir "
+                        "sedimen yang MENGENDAP (bisa beda dari grain size dasar saluran) & densitas "
+                        "sedimen terukur. Nilai di atas dipakai sebagai indikator kasar volume/tebal "
+                        "endapan relatif terhadap luas segmen."
+                    )
+
+                    # ---- Persentase parameter yang potensial jadi penyebab ----
+                    st.markdown("---")
+                    _sub_header(_t("Persentase Parameter Potensi Penyebab", "Potential Cause Parameter Percentage"))
+                    _ui_caption(
+                        "Sama seperti Mode B untuk erosi — kontribusi tiap parameter dihitung dari "
+                        "seberapa jauh nilai aktual menyimpang dari asumsi desain, dinormalisasi ke 100%."
+                    )
+                    _scontrib = []
+                    _rain_design_s = _ba_res.get("r24_mm_extreme") or _ba_res.get("r24_mm")
+                    _rain_actual_s = _ba_res.get("online_rainfall")
+                    if _rain_design_s and _rain_actual_s and _rain_design_s > 0:
+                        _scontrib.append((
+                            f"Curah hujan (aktual {_rain_actual_s:.1f}mm vs desain {_rain_design_s:.1f}mm)",
+                            abs((_rain_actual_s / _rain_design_s) - 1.0),
+                        ))
+
+                    _grain_actual_s = _ba_res.get("grain_size_mm")
+                    if _grain_actual_s and _grain_actual_s > 0:
+                        _grain_design_s = st.number_input(
+                            "Asumsi grain size desain awal (mm) — untuk hitung kontribusi",
+                            min_value=0.001,
+                            value=float(_grain_actual_s),
+                            step=0.1, key=f"ba_grain_design_s_{_ba_sid}",
+                        )
+                        _scontrib.append((
+                            f"Grain size (sampling {_grain_actual_s:.3f}mm vs asumsi desain {_grain_design_s:.3f}mm)",
+                            abs((_grain_design_s / _grain_actual_s) - 1.0),
+                        ))
+
+                    _total_dev_s = sum(d for _, d in _scontrib)
+                    if not _scontrib:
+                        _ui_warning(
+                            "Data curah hujan aktual & grain size belum tersedia untuk segmen ini — "
+                            "lengkapi dulu di tab 'Erosion Mapping' untuk bisa hitung kontribusi."
+                        )
+                    elif _total_dev_s <= 0:
+                        _ui_info(
+                            "Parameter yang tersedia berada sangat dekat dengan asumsi desain — belum "
+                            "ada indikasi parameter tunggal yang menonjol sebagai penyebab."
+                        )
+                    else:
+                        for _name, _dev in sorted(_scontrib, key=lambda x: x[1], reverse=True):
+                            _pct_s = _dev / _total_dev_s * 100.0
+                            st.progress(
+                                min(1.0, _pct_s / 100.0),
+                                text=f"{_name} — {_pct_s:.1f}%",
+                            )
+                else:
+                    _ui_info("Isi volume sedimentasi terukur (>0) untuk menjalankan estimasi.")
+
+            st.caption(
+                "Mode B baru bisa menghasilkan angka begitu ada data ukur lapangan (kedalaman scour "
+                "atau volume sedimentasi) diisi di atas — DXF boundary & grain size saja belum cukup "
+                "untuk membalik formula ini, karena keduanya asumsi desain/parameter dasar, bukan "
+                "hasil ukur kerusakan aktual."
+            )
+
+# =========================================================
+# =========== SOLVER GENANGAN BANJIR (DIFFUSIVE-WAVE) =====
+# =========================================================
+# Beda mendasar dengan simulasi debris-flow (cellular-automaton) di bawah:
+# di sini arah & besar fluks air antar sel DIHITUNG dari beda ELEVASI MUKA
+# AIR (bed + kedalaman) memakai persamaan Manning -- pendekatan "diffusive
+# wave" yang sama prinsipnya dengan LISFLOOD-FP (Bates & De Roo, 2000).
+# Karena fisikanya berbasis gradien muka air riil (bukan aturan penyebaran
+# buatan), air HANYA akan menyeberang ke sel tetangga begitu muka airnya
+# melebihi elevasi tertinggi di antara kedua sel -- ini persis definisi
+# "limpasan/overtopping" tanggul/punggungan, jadi lokasi limpasan muncul
+# otomatis dari hasil hitungan, bukan ditandai manual.
+#
+# CATATAN JUJUR: skema ini tetap SEDERHANA -- momentum/inersia diabaikan
+# (cocok utk aliran lambat yg didominasi gravitasi, spt genangan & luapan
+# dam/tanggul), BUKAN solver shallow-water 2D penuh (beda dgn ANUGA/
+# HEC-RAS 2D/FLO-2D). Untuk desain rekayasa final tetap perlu divalidasi
+# dgn software hidraulik yang tersertifikasi.
+def _simulate_flood_diffusive(grid_x, grid_y, grid_z, inside, src_xy, src_radius,
+                               src_mode, src_level, src_q, manning_n,
+                               n_frames, sec_per_frame, sub_steps=6):
+    z = np.where(np.isnan(grid_z), np.nanmin(grid_z), grid_z).astype(float)
+    dx = float(np.nanmean(np.abs(np.diff(grid_x[:, 0])))) or 1.0
+    dy = float(np.nanmean(np.abs(np.diff(grid_y[0, :])))) or 1.0
+    cell_area = dx * dy
+
+    src_mask = ((grid_x - src_xy[0]) ** 2 + (grid_y - src_xy[1]) ** 2) <= src_radius ** 2
+    src_mask = src_mask & inside
+    if not src_mask.any():
+        _ix = int(np.abs(grid_x[:, 0] - src_xy[0]).argmin())
+        _iy = int(np.abs(grid_y[0, :] - src_xy[1]).argmin())
+        src_mask = np.zeros_like(inside)
+        src_mask[_ix, _iy] = True
+
+    h = np.zeros_like(z)
+    if src_mode == "level":
+        h[src_mask] = np.clip(src_level - z[src_mask], 0, None)
+
+    dt = sec_per_frame / max(sub_steps, 1)
+    offsets = [(-1, 0, dy, dy), (1, 0, dy, dy), (0, -1, dx, dx), (0, 1, dx, dx)]
+
+    h_frames = [h.copy()]
+    overflow_track = np.zeros_like(h)  # akumulasi volume yg pernah lewat tiap sel (m3)
+
+    for _f in range(n_frames):
+        for _s in range(sub_steps):
+            if src_mode == "level":
+                # tampungan dijaga tetap terisi sampai levelnya sendiri -- mensimulasikan
+                # dam/reservoir yg terus mengisi sampai melimpas sendiri via fisikanya
+                h[src_mask] = np.maximum(h[src_mask], src_level - z[src_mask])
+            else:
+                h[src_mask] += (src_q * dt) / max(src_mask.sum() * cell_area, 1e-6)
+
+            S = z + h
+            Q_dir, total_out = [], np.zeros_like(h)
+            for (oy, ox, dist, width) in offsets:
+                S_n = np.roll(np.roll(S, oy, axis=0), ox, axis=1)
+                z_n = np.roll(np.roll(z, oy, axis=0), ox, axis=1)
+                nb_inside = np.roll(np.roll(inside, oy, axis=0), ox, axis=1)
+                dS = S - S_n
+                hflow = np.clip(np.maximum(S, S_n) - np.maximum(z, z_n), 0, None)
+                slope = np.clip(dS / dist, 1e-8, None)
+                q_unit = (1.0 / manning_n) * np.power(hflow, 5.0 / 3.0) * np.sqrt(slope)  # m2/s
+                Q = np.where((dS > 0) & inside & nb_inside, q_unit * width * dt, 0.0)      # m3
+                Q_dir.append(Q)
+                total_out += Q
+
+            avail = h * cell_area
+            scale = np.ones_like(h)
+            _over = total_out > avail
+            scale[_over] = avail[_over] / np.maximum(total_out[_over], 1e-9)
+
+            vol = h * cell_area
+            for (oy, ox, dist, width), Q in zip(offsets, Q_dir):
+                Qs = Q * scale
+                vol -= Qs
+                vol += np.roll(np.roll(Qs, oy, axis=0), ox, axis=1)
+                overflow_track += np.roll(np.roll(Qs, oy, axis=0), ox, axis=1)
+
+            vol = np.clip(vol, 0, None)
+            h = vol / cell_area
+            h[~inside] = 0.0
+
+        h_frames.append(h.copy())
+
+    # --- deteksi titik limpasan: sel yg BERBATASAN LANGSUNG dgn area sumber
+    # (dam/reservoir) & pernah menerima volume air keluar dari sumber ---
+    ring_mask = binary_dilation(src_mask, iterations=2) & (~src_mask) & inside
+    score = np.where(ring_mask, overflow_track, 0.0)
+    flat_order = np.argsort(score, axis=None)[::-1]
+    overflow_pts = []
+    for _idx in flat_order[:8]:
+        _iy, _ix = np.unravel_index(_idx, score.shape)
+        if score[_iy, _ix] <= 1e-6:
+            break
+        overflow_pts.append({
+            "X": float(grid_x[_iy, _ix]), "Y": float(grid_y[_iy, _ix]),
+            "Elevasi (m)": float(z[_iy, _ix]),
+            "Volume terlimpas (m³, kumulatif)": float(score[_iy, _ix]),
+        })
+
+    return h_frames, overflow_track, overflow_pts, z, dx, dy, cell_area
+
+
+# =========================================================
+# =========== TAB 5: SIMULASI ALIRAN 3D (DEBRIS FLOW) =====
+# =========================================================
+with tab5:
+
+    _sub_header(_t("Simulasi Aliran 3D — Debris Flow / Longsoran", "3D Flow Simulation — Debris Flow / Landslide"))
+    st.caption(
+        "Simulasi penjalaran massa (debris flow/longsoran/aliran sedimen) menuruni medan 3D dari "
+        "hasil DEM segmen yang sudah dianalisis, lengkap dengan animasi seiring waktu."
+    )
+    _ui_warning(
+        "Ini model **cellular-automaton yang disederhanakan** (penyebaran berbasis kemiringan "
+        "& sudut friksi) untuk visualisasi ilustratif/edukatif — BUKAN solver fisika penuh "
+        "(beda dengan RAMMS/FLO-2D/DAN3D/r.avaflow). Jangan dipakai sebagai satu-satunya dasar "
+        "desain mitigasi tanpa dikonfirmasi model rekayasa yang tervalidasi."
+    )
+
+    _seg_results_sim = st.session_state.get("segment_results", {})
+
+    if not _seg_results_sim:
+        _ui_info(
+            "Belum ada hasil RUN ANALYSIS tersimpan. Jalankan analisis di tab 'Erosion Mapping' "
+            "dulu untuk minimal satu segmen, baru kembali ke sini."
+        )
+    else:
+        _sim_sid = st.selectbox(
+            "Segmen (sumber DEM)",
+            list(_seg_results_sim.keys()),
+            format_func=lambda s: _seg_results_sim[s].get("label", s),
+            key="sim3d_segment_choice",
+        )
+        _sim_res = _seg_results_sim[_sim_sid]
+
+        _gx_full = _sim_res.get("grid_x")
+        _gy_full = _sim_res.get("grid_y")
+        _gz_full = _sim_res.get("grid_z")
+        _bnd_sim = _sim_res.get("boundary")
+        _inside_full = _sim_res.get("inside")
+
+        if _gx_full is None or _gz_full is None or _bnd_sim is None:
+            st.error(
+                "Hasil segmen ini tidak lengkap (grid elevasi/boundary tidak tersimpan) — jalankan "
+                "ulang RUN ANALYSIS untuk segmen ini."
+            )
+        else:
+            _sub_header(_t("1. Setup Sumber Longsoran/Debris", "1. Landslide/Debris Source Setup"))
+
+            _res_native = _gx_full.shape[0]
+            _sim_res_n = st.slider(
+                "Resolusi grid simulasi (lebih tinggi = lebih detail, lebih lambat)",
+                min_value=25, max_value=min(140, _res_native), value=min(70, _res_native),
+                step=5, key=f"sim3d_res_{_sim_sid}",
+                help="Grid DEM asli di-downsample ke resolusi ini supaya animasi 3D tetap responsif.",
+            )
+
+            _step_n = max(1, _res_native // _sim_res_n)
+            _grid_x = _gx_full[::_step_n, ::_step_n]
+            _grid_y = _gy_full[::_step_n, ::_step_n]
+            _grid_z = _gz_full[::_step_n, ::_step_n]
+            _inside_sim = (
+                _inside_full[::_step_n, ::_step_n] if _inside_full is not None
+                else np.ones_like(_grid_z, dtype=bool)
+            )
+            _inside_sim = _inside_sim & ~np.isnan(_grid_z)
+
+            _bnds_sim = _bnd_sim.bounds
+
+            # --- siapkan koordinat UTM (utk overlay citra satelit, spt tab 1) ---
+            # Sumbu lokal DXF miring ~57° thd UTM sebenarnya, jadi citra satelit (yg
+            # north-up) hanya bisa dioverlay dgn benar kalau plot-nya juga dlm UTM,
+            # bukan koordinat lokal -- makanya semua trace di bawah pakai _utm_gx/_utm_gy.
+            _utm_gx, _utm_gy = _grid_lokal_to_utm(_grid_x, _grid_y)
+            _sbx_sim, _sby_sim = _boundary_xy_flat(_bnd_sim)
+            _utm_bx_sim, _utm_by_sim = _ring_lokal_to_utm(_sbx_sim, _sby_sim)
+
+            _sat_cache_key_sim = f"sim3d_sat_{_sim_sid}"
+            _sat_sig_sim = (round(float(_bnds_sim[0]), 1), round(float(_bnds_sim[1]), 1),
+                            round(float(_bnds_sim[2]), 1), round(float(_bnds_sim[3]), 1))
+            _cached_sat_sim = st.session_state.get(_sat_cache_key_sim)
+            if _cached_sat_sim is not None and _cached_sat_sim.get("sig") == _sat_sig_sim:
+                _sat_sim = _cached_sat_sim.get("data")
+            else:
+                _utm_ext_sim = (float(np.nanmin(_utm_gx)), float(np.nanmax(_utm_gx)),
+                                 float(np.nanmin(_utm_gy)), float(np.nanmax(_utm_gy)))
+                _sat_sim = _fetch_satellite_basemap_utm(_utm_ext_sim, out_size=512, pad_frac=0.15)
+                st.session_state[_sat_cache_key_sim] = {"sig": _sat_sig_sim, "data": _sat_sim}
+
+            def _sample_rgb_grid(_sat_data, _n=70):
+                """Bangun grid UTM kasar (n x n) sekitar boundary + sample warna RGB dari
+                citra satelit di tiap titiknya -- dipakai sbg 'lantai' konteks visual di
+                luar boundary pada scene 3D (Mesh3d w/ vertexcolor)."""
+                if _sat_data is None:
+                    return None
+                _xmin, _xmax, _ymin, _ymax = _sat_data["extent"]
+                _xs = np.linspace(_xmin, _xmax, _n)
+                _ys = np.linspace(_ymin, _ymax, _n)
+                _GXu, _GYu = np.meshgrid(_xs, _ys)
+                _rgb = _sat_data["rgb"]
+                _h, _w = _rgb.shape[0], _rgb.shape[1]
+                _col = np.clip(((_GXu - _xmin) / max(_xmax - _xmin, 1e-9) * (_w - 1)).astype(int), 0, _w - 1)
+                _row = np.clip(((_ymax - _GYu) / max(_ymax - _ymin, 1e-9) * (_h - 1)).astype(int), 0, _h - 1)
+                _colors = _rgb[_row, _col]
+                return _GXu, _GYu, _colors
+
+            def _make_satellite_plane_trace(_sat_data, _z_level, _n=70):
+                _sampled = _sample_rgb_grid(_sat_data, _n)
+                if _sampled is None:
+                    return None
+                _GXu, _GYu, _colors = _sampled
+                _Xf, _Yf = _GXu.ravel(), _GYu.ravel()
+                _Zf = np.full_like(_Xf, _z_level)
+                _vcolor = [f"rgb({r},{g},{b})" for r, g, b in _colors.reshape(-1, 3)]
+                _idx = np.arange(_n * _n).reshape(_n, _n)
+                _i, _j, _k = [], [], []
+                for _r in range(_n - 1):
+                    for _c in range(_n - 1):
+                        _a, _b2, _d, _e = _idx[_r, _c], _idx[_r, _c + 1], _idx[_r + 1, _c], _idx[_r + 1, _c + 1]
+                        _i += [_a, _b2]
+                        _j += [_b2, _e]
+                        _k += [_d, _d]
+                return go.Mesh3d(
+                    x=_Xf, y=_Yf, z=_Zf, i=_i, j=_j, k=_k, vertexcolor=_vcolor,
+                    lighting=dict(ambient=1.0, diffuse=0.0, specular=0.0),
+                    flatshading=False, name="Citra satelit", showlegend=False, hoverinfo="skip",
+                )
+
+            _loc_method_sim = _ui_info(
+                "Titik sumber ditandai lewat input koordinat manual di bawah (opsi klik-di-peta "
+                "sudah dihapus karena tidak reliable di semua environment browser/Streamlit)."
+            )
+
+            _mcs1, _mcs2 = st.columns(2)
+            with _mcs1:
+                _src_x = st.number_input(
+                    "Koordinat X sumber", value=float((_bnds_sim[0] + _bnds_sim[2]) / 2),
+                    format="%.3f", key=f"sim3d_srcx_{_sim_sid}",
+                )
+            with _mcs2:
+                _src_y = st.number_input(
+                    "Koordinat Y sumber", value=float((_bnds_sim[1] + _bnds_sim[3]) / 2),
+                    format="%.3f", key=f"sim3d_srcy_{_sim_sid}",
+                )
+            st.session_state[f"sim3d_click_xy_{_sim_sid}"] = (float(_src_x), float(_src_y))
+
+            _click_sim = st.session_state.get(f"sim3d_click_xy_{_sim_sid}")
+            if _click_sim is not None:
+                st.success(_t(f"Titik sumber saat ini: X={_click_sim[0]:.2f}, Y={_click_sim[1]:.2f}", f"Current source point: X={_click_sim[0]:.2f}, Y={_click_sim[1]:.2f}"))
+            else:
+                _ui_warning("Belum ada titik sumber ditandai.")
+
+            _sub_header(_t("2. Parameter Simulasi", "2. Simulation Parameters"))
+            _pc1, _pc2, _pc3 = st.columns(3)
+            with _pc1:
+                _src_radius = st.number_input(
+                    "Radius sumber material (m)", min_value=5.0, value=30.0, step=5.0,
+                    key=f"sim3d_radius_{_sim_sid}",
+                )
+                _vol_sim = st.number_input(
+                    "Volume material awal (m³)", min_value=10.0, value=2000.0, step=100.0,
+                    key=f"sim3d_vol_{_sim_sid}",
+                )
+            with _pc2:
+                _friction_deg = st.slider(
+                    "Sudut friksi/berhenti (°) — makin kecil, makin jauh larinya", 3, 30, 12,
+                    key=f"sim3d_friction_{_sim_sid}",
+                )
+                _mobility_sim = st.slider(
+                    "Mobilitas aliran (kecepatan penyebaran)", 0.1, 1.0, 0.6, step=0.05,
+                    key=f"sim3d_mobility_{_sim_sid}",
+                )
+            with _pc3:
+                _n_frames_sim = st.slider(
+                    "Jumlah frame animasi", 10, 50, 24, key=f"sim3d_nframes_{_sim_sid}",
+                )
+                _sec_per_frame = st.number_input(
+                    "Durasi tersimulasi per frame (detik)", min_value=0.5, value=3.0, step=0.5,
+                    key=f"sim3d_secframe_{_sim_sid}",
+                )
+                _vexag = st.slider(
+                    "Eksagerasi vertikal tampilan", 1.0, 4.0, 1.8, step=0.1,
+                    key=f"sim3d_vexag_{_sim_sid}",
+                )
+
+            _run_sim = st.button(_t("Jalankan Simulasi", "Run Simulation"), key=f"sim3d_run_{_sim_sid}", type="primary")
+
+            if _click_sim is None:
+                _ui_info("Tandai dulu lokasi sumber (klik peta / input koordinat) sebelum menjalankan simulasi.")
+            elif _run_sim:
+                _scx, _scy = _click_sim
+                if not _bnd_sim.contains(Point(_scx, _scy)):
+                    st.error(_t("Titik sumber berada di luar boundary area kajian.", "The source point is outside the study area boundary."))
+                else:
+                    with st.spinner("Menjalankan simulasi penyebaran massa..."):
+                        _dx_sim = float(np.nanmean(np.abs(np.diff(_grid_x[:, 0])))) or 1.0
+                        _dy_sim = float(np.nanmean(np.abs(np.diff(_grid_y[0, :])))) or 1.0
+
+                        _src_mask_sim = (
+                            (_grid_x - _scx) ** 2 + (_grid_y - _scy) ** 2
+                        ) <= _src_radius ** 2
+                        _src_mask_sim = _src_mask_sim & _inside_sim
+                        if not _src_mask_sim.any():
+                            _iix = int(np.abs(_grid_x[:, 0] - _scx).argmin())
+                            _iiy = int(np.abs(_grid_y[0, :] - _scy).argmin())
+                            _src_mask_sim = np.zeros_like(_inside_sim)
+                            _src_mask_sim[_iix, _iiy] = True
+
+                        _z_fill = np.where(np.isnan(_grid_z), np.nanmin(_grid_z), _grid_z)
+
+                        _sub_steps_sim = 4
+                        _h = np.zeros_like(_z_fill, dtype=float)
+                        _src_area_sim = _src_mask_sim.sum() * _dx_sim * _dy_sim
+                        _h[_src_mask_sim] = _vol_sim / max(_src_area_sim, 1e-6)
+                        _h[~_inside_sim] = 0.0
+
+                        _friction_slope_sim = np.tan(np.radians(_friction_deg))
+                        _offsets_sim = [(-1, 0), (1, 0), (0, -1), (0, 1),
+                                        (-1, -1), (-1, 1), (1, -1), (1, 1)]
+
+                        _h_frames = [_h.copy()]
+                        for _f in range(_n_frames_sim):
+                            for _s in range(_sub_steps_sim):
+                                _surf = _z_fill + _h
+                                _weights = []
+                                _tot_w = np.zeros_like(_h)
+                                for (_oy, _ox) in _offsets_sim:
+                                    _nsurf = np.roll(np.roll(_surf, _oy, axis=0), _ox, axis=1)
+                                    _dist = float(np.hypot(_oy * _dy_sim, _ox * _dx_sim))
+                                    _slope_local = (_surf - _nsurf) / _dist
+                                    _w = np.clip(_slope_local, 0, None)
+                                    _w = np.where(_w > _friction_slope_sim, _w, 0.0)
+                                    _weights.append(_w)
+                                    _tot_w += _w
+                                _safe_tot = np.where(_tot_w > 0, _tot_w, 1.0)
+                                _outflow_frac = np.clip(_mobility_sim * _tot_w, 0, 0.5)
+                                _h_new = _h * (1 - _outflow_frac)
+                                for (_oy, _ox), _w in zip(_offsets_sim, _weights):
+                                    _flow = _h * _outflow_frac * (_w / _safe_tot)
+                                    _received = np.roll(np.roll(_flow, _oy, axis=0), _ox, axis=1)
+                                    _h_new = _h_new + _received
+                                _h_new[~_inside_sim] = 0.0
+                                _h = _h_new
+                            _h_frames.append(_h.copy())
+
+                        st.session_state[f"sim3d_result_{_sim_sid}"] = {
+                            "h_frames": _h_frames,
+                            "grid_x": _grid_x, "grid_y": _grid_y, "z_fill": _z_fill,
+                            "inside": _inside_sim, "sec_per_frame": _sec_per_frame,
+                            "cell_area": _dx_sim * _dy_sim,
+                            "vexag": _vexag,
+                        }
+
+            _sim_out = st.session_state.get(f"sim3d_result_{_sim_sid}")
+
+            if _sim_out is not None:
+                _sub_header(_t("3. Hasil Animasi 3D", "3. 3D Animation Results"))
+
+                _hf = _sim_out["h_frames"]
+                _gx3 = _sim_out["grid_x"]
+                _gy3 = _sim_out["grid_y"]
+                _z3 = _sim_out["z_fill"]
+                _ins3 = _sim_out["inside"]
+                _utm_gx3, _utm_gy3 = _grid_lokal_to_utm(_gx3, _gy3)
+                _spf = _sim_out["sec_per_frame"]
+                _vex = _sim_out["vexag"]
+                _cell_area_sim = _sim_out.get("cell_area", 1.0)
+
+                _zmin, _zmax = float(np.nanmin(_z3)), float(np.nanmax(_z3))
+                _zrange = max(_zmax - _zmin, 1e-6)
+                _depth_max = max(float(np.max([hf.max() for hf in _hf])), 1e-6)
+                _depth_thresh = _depth_max * 0.02
+
+                _terrain_colorscale = [
+                    [0.00, "#8b0000"], [0.15, "#c1440e"], [0.32, "#e08a2b"], [0.48, "#e8c93d"],
+                    [0.65, "#a8c93d"], [0.799, "#1b5e28"],
+                    [0.80, "#aee9ff"], [0.87, "#2f9bdb"], [0.94, "#0b4c91"], [1.00, "#021a49"],
+                ]
+
+                def _make_surfacecolor(_h_layer):
+                    _elev_norm = np.clip((_z3 - _zmin) / _zrange, 0, 1) * 0.799
+                    _flow_norm = np.clip(_h_layer / _depth_max, 0, 1)
+                    _disp = np.where(
+                        _h_layer > _depth_thresh,
+                        0.80 + _flow_norm * 0.20,
+                        _elev_norm,
+                    )
+                    _disp = np.where(_ins3, _disp, np.nan)
+                    return _disp
+
+                _z_display = _z3 * _vex
+                # Sembunyikan mesh permukaan animasi DI LUAR boundary kajian -- z diberi NaN
+                # dan connectgaps=False supaya Plotly benar-benar membuat lubang di situ
+                # (bukan sekadar mewarnainya NaN, yang sebelumnya malah tampil merah solid).
+                _z_display = np.where(_ins3, _z_display, np.nan)
+
+                _sat_z_level_debris = float(np.nanmin(_z_display)) - 0.05 * (
+                    float(np.nanmax(_z_display)) - float(np.nanmin(_z_display)) + 1e-6
+                )
+                _sat_trace_debris = _make_satellite_plane_trace(_sat_sim, _sat_z_level_debris, _n=60)
+                _debris_data = ([_sat_trace_debris] if _sat_trace_debris is not None else []) + [go.Surface(
+                    x=_utm_gx3, y=_utm_gy3, z=_z_display,
+                    surfacecolor=_make_surfacecolor(_hf[0]),
+                    colorscale=_terrain_colorscale, cmin=0, cmax=1,
+                    showscale=False, connectgaps=False,
+                    lighting=dict(ambient=0.55, diffuse=0.7, specular=0.15, roughness=0.9),
+                )]
+                _surf_idx_debris = len(_debris_data) - 1
+
+                _fig3d = go.Figure(
+                    data=_debris_data,
+                    layout=go.Layout(
+                        height=560,
+                        margin=dict(l=0, r=0, t=30, b=0),
+                        scene=dict(
+                            xaxis_title="Easting (m)", yaxis_title="Northing (m)", zaxis_title="Elevasi (m)",
+                            aspectmode="data",
+                            camera=dict(eye=dict(x=1.2, y=-1.6, z=0.9)),
+                        ),
+                        title=f"t = 0 s",
+                        updatemenus=[dict(
+                            type="buttons", showactive=False,
+                            y=1, x=0.05, xanchor="left", yanchor="top",
+                            buttons=[
+                                dict(label="▶ Play", method="animate",
+                                     args=[None, dict(frame=dict(duration=250, redraw=True),
+                                                       fromcurrent=True, transition=dict(duration=0))]),
+                                dict(label="⏸ Pause", method="animate",
+                                     args=[[None], dict(frame=dict(duration=0, redraw=False),
+                                                         mode="immediate")]),
+                            ],
+                        )],
+                        sliders=[dict(
+                            active=0, x=0.1, y=0, len=0.85,
+                            steps=[
+                                dict(label=f"{int(i * _spf)}s", method="animate",
+                                     args=[[str(i)], dict(mode="immediate",
+                                                           frame=dict(duration=0, redraw=True))])
+                                for i in range(len(_hf))
+                            ],
+                        )],
+                    ),
+                    frames=[
+                        go.Frame(
+                            data=[go.Surface(
+                                z=_z_display, surfacecolor=_make_surfacecolor(_hf[i]),
+                                colorscale=_terrain_colorscale, cmin=0, cmax=1, connectgaps=False,
+                            )],
+                            traces=[_surf_idx_debris],
+                            name=str(i),
+                            layout=go.Layout(title=f"t = {int(i * _spf)} s"),
+                        )
+                        for i in range(len(_hf))
+                    ],
+                )
+
+                st.plotly_chart(_fig3d, width="stretch")
+                st.caption(
+                    "Drag untuk rotasi, scroll untuk zoom. Tekan ▶ Play untuk animasi, atau geser "
+                    "slider di bawah plot untuk lompat ke waktu tertentu. Warna merah→kuning→hijau "
+                    "menandai elevasi medan (rendah→tinggi); biru muda→biru tua menandai keberadaan "
+                    "& ketebalan relatif material/air yang bergerak. Area di luar boundary kajian "
+                    "ditampilkan sbg citra satelit sebagai konteks lokasi."
+                )
+
+                _final_depth = _hf[-1]
+                _c_a, _c_b, _c_c = st.columns(3)
+                _c_a.metric("Kedalaman maks. tersisa", f"{_final_depth.max():.2f} m")
+                _c_b.metric("Total volume (cek konservasi)",
+                            f"{float(_final_depth[_ins3].sum() * _cell_area_sim):.0f} m³")
+                _c_c.metric("Durasi tersimulasi total", f"{int((len(_hf)-1) * _spf)} s")
+
+            # =================================================================
+            # MODE BARU: SIMULASI GENANGAN BANJIR (diffusive-wave, bukan CA)
+            # =================================================================
+            st.markdown("---")
+            _sub_header(_t("Simulasi Genangan Banjir (Shallow-Water — mengikuti kontur)", "Flood Inundation Simulation (Shallow-Water — contour-following)"))
+            _ui_info(
+                "Mode terpisah dari simulasi debris-flow di atas. Di sini arah & besar aliran "
+                "dihitung dari **beda elevasi muka air** (bed + kedalaman) memakai persamaan "
+                "Manning — bukan aturan penyebaran sederhana. Air baru menyeberang ke sel "
+                "tetangga begitu muka airnya melebihi titik tertinggi di antara keduanya, "
+                "sehingga **lokasi limpasan/overtopping tanggul atau punggungan muncul otomatis** "
+                "dari hasil hitungan, dan batas genangan mengikuti kontur medan secara halus."
+            )
+
+            _fc1, _fc2, _fc3 = st.columns(3)
+            with _fc1:
+                _flood_src_mode = st.radio(
+                    "Sumber air",
+                    ["Muka air awal (reservoir / dam-break)", "Debit masuk kontinu (inflow sungai)"],
+                    key=f"flood_srcmode_{_sim_sid}",
+                )
+                _flood_radius = st.number_input(
+                    "Radius area sumber (m)", min_value=5.0, value=30.0, step=5.0,
+                    key=f"flood_radius_{_sim_sid}",
+                    help="Pakai titik sumber yang sama dengan yang ditandai di bagian '1. Setup' di atas.",
+                )
+            with _fc2:
+                if _flood_src_mode.startswith("Muka air"):
+                    _flood_level = st.number_input(
+                        "Elevasi muka air awal di sumber (m)",
+                        value=float(np.nanmax(_grid_z[_inside_sim])) if _inside_sim.any() else float(np.nanmax(_grid_z)),
+                        format="%.2f", key=f"flood_level_{_sim_sid}",
+                        help="Mis. elevasi puncak tampungan/dam sebelum meluap atau jebol.",
+                    )
+                    _flood_q = None
+                else:
+                    _flood_level = None
+                    _flood_q = st.number_input(
+                        "Debit masuk (m³/detik)", min_value=0.1, value=20.0, step=1.0,
+                        key=f"flood_q_{_sim_sid}",
+                    )
+                _manning_n = st.number_input(
+                    "Koefisien kekasaran Manning (n)", min_value=0.010, max_value=0.200,
+                    value=0.035, step=0.005, format="%.3f", key=f"flood_manning_{_sim_sid}",
+                    help="≈0.030–0.040 sungai alami/tanah, ≈0.020–0.025 saluran beton, "
+                         "≈0.050–0.080 semak/vegetasi lebat.",
+                )
+            with _fc3:
+                _flood_nframes = st.slider(
+                    "Jumlah frame animasi", 10, 60, 30, key=f"flood_nframes_{_sim_sid}",
+                )
+                _flood_secpf = st.number_input(
+                    "Durasi tersimulasi per frame (detik)", min_value=1.0, value=10.0, step=1.0,
+                    key=f"flood_secpf_{_sim_sid}",
+                )
+                _flood_vexag = st.slider(
+                    "Eksagerasi vertikal tampilan", 1.0, 4.0, 1.8, step=0.1,
+                    key=f"flood_vexag_{_sim_sid}",
+                )
+
+            _flood_run = st.button(
+                "Jalankan Simulasi Genangan", key=f"flood_run_{_sim_sid}", type="primary",
+            )
+
+            if _click_sim is None:
+                st.caption(
+                    "Tandai dulu titik sumber (klik peta / input koordinat) di bagian "
+                    "'1. Setup Sumber Longsoran/Debris' di atas — titik yang sama dipakai "
+                    "sebagai lokasi sumber air di sini."
+                )
+            elif _flood_run:
+                _fcx, _fcy = _click_sim
+                if not _bnd_sim.contains(Point(_fcx, _fcy)):
+                    st.error(_t("Titik sumber berada di luar boundary area kajian.", "The source point is outside the study area boundary."))
+                else:
+                    with st.spinner("Menjalankan simulasi shallow-water (diffusive-wave)..."):
+                        (_fh_frames, _flood_overflow_track, _flood_overflow_pts,
+                         _z_flood, _dx_flood, _dy_flood, _cell_area_flood) = _simulate_flood_diffusive(
+                            grid_x=_grid_x, grid_y=_grid_y, grid_z=_grid_z, inside=_inside_sim,
+                            src_xy=(_fcx, _fcy), src_radius=_flood_radius,
+                            src_mode=("level" if _flood_src_mode.startswith("Muka air") else "inflow"),
+                            src_level=_flood_level, src_q=_flood_q, manning_n=_manning_n,
+                            n_frames=_flood_nframes, sec_per_frame=_flood_secpf,
+                        )
+                        st.session_state[f"flood_result_{_sim_sid}"] = {
+                            "h_frames": _fh_frames, "grid_x": _grid_x, "grid_y": _grid_y,
+                            "z_fill": _z_flood, "inside": _inside_sim,
+                            "sec_per_frame": _flood_secpf, "vexag": _flood_vexag,
+                            "cell_area": _cell_area_flood, "overflow_pts": _flood_overflow_pts,
+                            "boundary": _bnd_sim,
+                        }
+
+            _flood_out = st.session_state.get(f"flood_result_{_sim_sid}")
+
+            if _flood_out is not None:
+                st.markdown("###### " + _t("Hasil Animasi 3D — Genangan", "3D Animation Results — Inundation"))
+
+                _ffh = _flood_out["h_frames"]
+                _fgx = _flood_out["grid_x"]
+                _fgy = _flood_out["grid_y"]
+                _fz = _flood_out["z_fill"]
+                _fins = _flood_out["inside"]
+                _fspf = _flood_out["sec_per_frame"]
+                _fvex = _flood_out["vexag"]
+                _f_cell_area = _flood_out.get("cell_area", 1.0)
+                _utm_fgx, _utm_fgy = _grid_lokal_to_utm(_fgx, _fgy)
+
+                _fzmin, _fzmax = float(np.nanmin(_fz)), float(np.nanmax(_fz))
+                _fzrange = max(_fzmax - _fzmin, 1e-6)
+                _fdepth_max = max(float(np.max([hf.max() for hf in _ffh])), 1e-6)
+                _fdepth_thresh = _fdepth_max * 0.02
+
+                _water_colorscale = [
+                    [0.00, "#8b0000"], [0.15, "#c1440e"], [0.32, "#e08a2b"], [0.48, "#e8c93d"],
+                    [0.65, "#a8c93d"], [0.799, "#1b5e28"],
+                    [0.80, "#aee9ff"], [0.87, "#2f9bdb"], [0.94, "#0b4c91"], [1.00, "#021a49"],
+                ]
+
+                def _make_flood_surfacecolor(_h_layer):
+                    _elev_norm = np.clip((_fz - _fzmin) / _fzrange, 0, 1) * 0.799
+                    _flow_norm = np.clip(_h_layer / _fdepth_max, 0, 1)
+                    _disp = np.where(
+                        _h_layer > _fdepth_thresh, 0.80 + _flow_norm * 0.20, _elev_norm,
+                    )
+                    return np.where(_fins, _disp, np.nan)
+
+                _fz_display = _fz * _fvex
+                _fz_display = np.where(_fins, _fz_display, np.nan)
+
+                _sat_z_level_flood = float(np.nanmin(_fz_display)) - 0.05 * (
+                    float(np.nanmax(_fz_display)) - float(np.nanmin(_fz_display)) + 1e-6
+                )
+                _sat_trace_flood = _make_satellite_plane_trace(_sat_sim, _sat_z_level_flood, _n=60)
+                _flood_data = ([_sat_trace_flood] if _sat_trace_flood is not None else []) + [go.Surface(
+                    x=_utm_fgx, y=_utm_fgy, z=_fz_display,
+                    surfacecolor=_make_flood_surfacecolor(_ffh[0]),
+                    colorscale=_water_colorscale, cmin=0, cmax=1, showscale=False, connectgaps=False,
+                    lighting=dict(ambient=0.55, diffuse=0.7, specular=0.15, roughness=0.9),
+                )]
+                _surf_idx_flood = len(_flood_data) - 1
+
+                _fig_flood = go.Figure(
+                    data=_flood_data,
+                    layout=go.Layout(
+                        height=560, margin=dict(l=0, r=0, t=30, b=0),
+                        scene=dict(
+                            xaxis_title="Easting (m)", yaxis_title="Northing (m)", zaxis_title="Elevasi (m)",
+                            aspectmode="data", camera=dict(eye=dict(x=1.2, y=-1.6, z=0.9)),
+                        ),
+                        title="t = 0 s",
+                        updatemenus=[dict(
+                            type="buttons", showactive=False, y=1, x=0.05, xanchor="left", yanchor="top",
+                            buttons=[
+                                dict(label="▶ Play", method="animate",
+                                     args=[None, dict(frame=dict(duration=250, redraw=True),
+                                                       fromcurrent=True, transition=dict(duration=0))]),
+                                dict(label="⏸ Pause", method="animate",
+                                     args=[[None], dict(frame=dict(duration=0, redraw=False), mode="immediate")]),
+                            ],
+                        )],
+                        sliders=[dict(
+                            active=0, x=0.1, y=0, len=0.85,
+                            steps=[
+                                dict(label=f"{int(i * _fspf)}s", method="animate",
+                                     args=[[str(i)], dict(mode="immediate", frame=dict(duration=0, redraw=True))])
+                                for i in range(len(_ffh))
+                            ],
+                        )],
+                    ),
+                    frames=[
+                        go.Frame(
+                            data=[go.Surface(
+                                z=_fz_display, surfacecolor=_make_flood_surfacecolor(_ffh[i]),
+                                colorscale=_water_colorscale, cmin=0, cmax=1, connectgaps=False,
+                            )],
+                            traces=[_surf_idx_flood],
+                            name=str(i), layout=go.Layout(title=f"t = {int(i * _fspf)} s"),
+                        )
+                        for i in range(len(_ffh))
+                    ],
+                )
+                st.plotly_chart(_fig_flood, width="stretch")
+                st.caption(
+                    "Biru muda→biru tua = kedalaman genangan relatif; warna dasar merah→kuning→hijau "
+                    "= elevasi medan asli (rendah→tinggi). Karena fluks dihitung dari gradien muka air "
+                    "(bukan CA), genangan menjalar mengikuti kontur secara halus. Area di luar boundary "
+                    "kajian ditampilkan sbg citra satelit sebagai konteks lokasi."
+                )
+
+                st.markdown("###### " + _t("Peta Genangan Halus (mengikuti kontur) & Titik Limpasan", "Smooth Inundation Map (contour-following) & Overflow Points"))
+                _final_h_flood = _ffh[-1]
+                _fig_contour = go.Figure()
+
+                # Latar citra satelit (koordinat LOKAL) -- dibuat sbg layer Scattergl padat
+                # berwarna hasil sampling piksel citra satelit (via transform lokal->UTM per
+                # titik), supaya area DI LUAR boundary/genangan tetap menampilkan citra asli
+                # sbg konteks, bukan kosong putih. go.Contour butuh grid axis-aligned jadi
+                # tidak bisa langsung dipindah ke sumbu UTM (sumbu lokal miring ~57° thd UTM).
+                if _sat_sim is not None:
+                    _padx = (_fgx.max() - _fgx.min()) * 0.15
+                    _pady = (_fgy.max() - _fgy.min()) * 0.15
+                    _sxl = np.linspace(_fgx.min() - _padx, _fgx.max() + _padx, 110)
+                    _syl = np.linspace(_fgy.min() - _pady, _fgy.max() + _pady, 110)
+                    _SXl, _SYl = np.meshgrid(_sxl, _syl)
+                    _SXu, _SYu = _grid_lokal_to_utm(_SXl, _SYl)
+                    _sat_xmin, _sat_xmax, _sat_ymin, _sat_ymax = _sat_sim["extent"]
+                    _sat_rgb = _sat_sim["rgb"]
+                    _sat_h, _sat_w = _sat_rgb.shape[0], _sat_rgb.shape[1]
+                    _col_i = np.clip(((_SXu - _sat_xmin) / max(_sat_xmax - _sat_xmin, 1e-9) * (_sat_w - 1)).astype(int), 0, _sat_w - 1)
+                    _row_i = np.clip(((_sat_ymax - _SYu) / max(_sat_ymax - _sat_ymin, 1e-9) * (_sat_h - 1)).astype(int), 0, _sat_h - 1)
+                    _sat_colors_2d = _sat_rgb[_row_i, _col_i]
+                    _fig_contour.add_trace(go.Scattergl(
+                        x=_SXl.ravel(), y=_SYl.ravel(), mode="markers",
+                        marker=dict(
+                            size=9, opacity=1.0,
+                            color=[f"rgb({r},{g},{b})" for r, g, b in _sat_colors_2d.reshape(-1, 3)],
+                        ),
+                        name="Citra satelit", showlegend=False, hoverinfo="skip",
+                    ))
+
+                _fig_contour.add_trace(go.Contour(
+                    x=_fgx[:, 0], y=_fgy[0, :], z=np.where(_fins, _final_h_flood, np.nan).T,
+                    colorscale="Blues", showscale=True, colorbar=dict(title="Kedalaman (m)"),
+                    line_smoothing=1.3, contours=dict(coloring="heatmap"),
+                    opacity=0.85, connectgaps=False,
+                    hovertemplate="X=%{x:.2f}, Y=%{y:.2f}<br>Kedalaman=%{z:.2f}m<extra></extra>",
+                ))
+                _fbx, _fby = _boundary_xy_flat(_bnd_sim)
+                _fig_contour.add_trace(go.Scatter(
+                    x=_fbx, y=_fby, mode="lines", line=dict(color="magenta", width=2),
+                    name="Boundary", hoverinfo="skip",
+                ))
+                _flood_pts_list = _flood_out.get("overflow_pts", [])
+                if _flood_pts_list:
+                    _fig_contour.add_trace(go.Scatter(
+                        x=[p["X"] for p in _flood_pts_list], y=[p["Y"] for p in _flood_pts_list],
+                        mode="markers+text",
+                        marker=dict(size=14, color="red", symbol="star",
+                                    line=dict(color="black", width=1)),
+                        text=[str(i + 1) for i in range(len(_flood_pts_list))],
+                        textposition="top center", name="Titik limpasan",
+                        hovertemplate="Titik limpasan #%{text}<br>X=%{x:.2f}, Y=%{y:.2f}<extra></extra>",
+                    ))
+                _fig_contour.update_layout(
+                    height=480, xaxis_title="Easting (m)", yaxis_title="Northing (m)",
+                    yaxis=dict(scaleanchor="x", scaleratio=1),
+                    margin=dict(l=10, r=10, t=10, b=10),
+                )
+                st.plotly_chart(_fig_contour, width="stretch")
+
+                if _flood_pts_list:
+                    st.markdown("**" + _t("Titik-titik limpasan terdeteksi", "Detected overflow points") + "** (" + _t("diurutkan dari volume terlimpas terbesar", "sorted by largest overflow volume") + "):")
+                    st.dataframe(pd.DataFrame(_flood_pts_list), width="stretch", hide_index=True)
+                    st.caption(
+                        "Titik-titik ini adalah sel yang berbatasan langsung dengan area sumber (dam/"
+                        "reservoir) dan tercatat menerima aliran keluar terbesar selama simulasi — "
+                        "kandidat lokasi limpasan/overtopping paling mungkin secara fisik."
+                    )
+                else:
+                    st.caption(
+                        "Belum terdeteksi limpasan keluar dari area sumber pada durasi & parameter "
+                        "simulasi ini — coba naikkan elevasi muka air awal / debit masuk, atau "
+                        "perpanjang durasi simulasi."
+                    )
+
+                _final_depth_flood = _ffh[-1]
+                _fca, _fcb, _fcc = st.columns(3)
+                _fca.metric("Kedalaman maks. genangan", f"{_final_depth_flood.max():.2f} m")
+                _fcb.metric("Total volume genangan",
+                            f"{float(_final_depth_flood[_fins].sum() * _f_cell_area):.0f} m³")
+                _fcc.metric("Durasi tersimulasi total", f"{int((len(_ffh) - 1) * _fspf)} s")
+
 import os
 import pandas as pd
 import streamlit as st
@@ -8300,26 +11688,82 @@ Status: {status}
     except:
         return "Error baca FS_PRED"
 
+# ================= GEMINI (chat bebas -- bukan JSON terstruktur) =================
+# Beda dgn _call_gemini di bagian Erosion Mapping (yg maksa responseMimeType
+# "application/json" utk format {"narrative":..,"recommendations":..}), chat
+# di sini butuh jawaban teks bebas biasa, jadi pakai panggilan Gemini
+# terpisah tanpa constraint JSON tsb. _get_gemini_api_key() dipakai bareng
+# (fungsi yg sama, didefinisikan di bagian Erosion Mapping/tab1).
+def _call_gemini_chat(prompt, api_key):
+    _models_to_try = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash"]
+    _last_err = None
+    for _model in _models_to_try:
+        try:
+            resp = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{_model}:generateContent",
+                headers={"content-type": "application/json"},
+                params={"key": api_key},
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {
+                        "maxOutputTokens": 1024,
+                        "thinkingConfig": {"thinkingBudget": 0},
+                    },
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data["candidates"][0]["content"]["parts"][0]["text"]
+        except Exception as e:
+            _last_err = e
+            continue
+    raise _last_err
+
 # ================= AI RESPONSE =================
+# Alur baru: FAISS tetap dipakai (semantic search ke dokumen lokal di folder
+# docs/) untuk mengambil konteks paling relevan, TAPI kalau Gemini API key
+# tersedia (st.secrets["gemini_api_key"], sama seperti dipakai fitur
+# rekomendasi AI di Erosion Mapping), konteks itu dikirim ke Gemini supaya
+# dijawab dgn kalimat natural -- bukan cuma dump potongan teks mentah spt
+# sebelumnya. Kalau Gemini tidak tersedia/gagal (key belum diisi, limit,
+# koneksi, dsb), otomatis fallback ke jawaban rule-based/FAISS-mentah lama
+# supaya chat tidak pernah error/blank ke user.
 def geo_ai_response(prompt, knowledge, df_pred):
-
-    prompt = str(prompt).lower()
     ml_info = interpretasi_ml(df_pred)
+    results = semantic_search(prompt, doc_chunks, faiss_index)
+    context = "\n\n---\n\n".join(results)
 
-    if "fs" in prompt:
+    _gemini_key = _get_gemini_api_key() if "_get_gemini_api_key" in globals() else None
+    if _gemini_key:
+        try:
+            _gemini_prompt = f"""Anda adalah asisten AI geoteknik untuk platform analisis risiko erosi, back analysis, machine learning, dan simulasi aliran tambang.
+Jawab PERTANYAAN PENGGUNA di bawah secara singkat, jelas, dan praktis dalam Bahasa Indonesia (kecuali pengguna jelas bertanya dlm bahasa lain).
+Gunakan KONTEKS DOKUMEN LOKAL & DATA ML SESI INI di bawah sebagai acuan utama kalau relevan dengan pertanyaan. Kalau konteksnya tidak relevan/tidak cukup menjawab, jawab memakai pengetahuan umum geoteknik Anda, dan sebutkan singkat bahwa itu bukan dari dokumen lokal.
+
+=== KONTEKS DOKUMEN LOKAL (hasil pencarian FAISS, top-3 potongan paling relevan) ===
+{context}
+
+=== DATA MACHINE LEARNING SESI INI (kalau ada analisis yg sudah dijalankan) ===
+{ml_info}
+
+=== PERTANYAAN PENGGUNA ===
+{prompt}
+"""
+            return _call_gemini_chat(_gemini_prompt, _gemini_key)
+        except Exception:
+            pass  # diam-diam fallback ke rule-based di bawah kalau Gemini gagal
+
+    # ---- fallback rule-based/FAISS-mentah (dipakai kalau Gemini API key belum
+    # diisi di st.secrets, atau panggilan Gemini gagal krn sebab apa pun) ----
+    _p = str(prompt).lower()
+    if "fs" in _p:
         return f"ANALISA FS:\n{ml_info}"
-
-    elif "piping" in prompt:
+    elif "piping" in _p:
         return "Piping → kontrol hydraulic gradient & drainase"
-
-    elif "erosi" in prompt:
+    elif "erosi" in _p:
         return "Erosi → riprap & vegetasi"
-
     else:
-        results = semantic_search(prompt, doc_chunks, faiss_index)
-
-        context = "\n\n---\n\n".join(results)
-
         return f"""
 HASIL PALING RELEVAN:
 
@@ -8329,13 +11773,13 @@ ML:
 {ml_info}
 """
 
-# ================= CHAT (tombol emoji melayang + bubble popup) =================
+# ================= CHAT (tombol melayang + bubble popup) =================
 # PERBAIKAN: dulu section ini (riwayat chat + input) dirender polos & selalu
 # tampil di bawah semua tab (di luar with tab1/tab2/tab3), jadi kelihatan
 # 'muncul terus' apa pun tab yang lagi aktif. Sekarang disembunyikan jadi
-# tombol emoji di pojok kanan-bawah -- diklik sekali untuk buka panel chat
-# (bubble popup), diklik lagi (ikon jadi "✖") untuk menutup & balik jadi
-# emoji. Logika AI/FAISS di atas (load_documents, build_faiss_index,
+# tombol di pojok kanan-bawah -- diklik sekali untuk buka panel chat
+# (bubble popup), diklik lagi (label jadi "Tutup") untuk menutup & balik
+# jadi "Chat". Logika AI/FAISS di atas (load_documents, build_faiss_index,
 # geo_ai_response, dst) TIDAK berubah sama sekali, cuma bagian tampilannya.
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -8344,7 +11788,7 @@ if "mqg_chat_open" not in st.session_state:
     st.session_state["mqg_chat_open"] = False
 
 with st.container(key="mqg_chat_fab"):
-    _fab_icon = "✖" if st.session_state["mqg_chat_open"] else "🤖"
+    _fab_icon = "Tutup" if st.session_state["mqg_chat_open"] else "Chat"
     if st.button(_fab_icon, key="mqg_chat_fab_btn", help="Tanya AI Geoteknik"):
         st.session_state["mqg_chat_open"] = not st.session_state["mqg_chat_open"]
         # PERBAIKAN PERFORMA: st.rerun() manual dihapus -- st.button yang
@@ -8354,7 +11798,7 @@ with st.container(key="mqg_chat_fab"):
 
 if st.session_state["mqg_chat_open"]:
     with st.container(key="mqg_chat_panel"):
-        st.markdown("**MQG AI Assistant (FAISS Mode)**")
+        st.markdown("**MQG AI Assistant**")
 
         for msg in st.session_state.messages:
             avatar = "audience.png" if msg["role"] == "user" else "ai_bot.png"
