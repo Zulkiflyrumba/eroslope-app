@@ -280,6 +280,15 @@ if not st.session_state["authenticated"]:
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@600;700&family=Inter:wght@400;500;600&display=swap');
 
+        /* Paksa background dasar tetap gelap apa pun tema browser/OS (light/dark/auto) --
+           tanpa ini, kalau Chrome/OS memakai tema terang, Streamlit bisa merender
+           html/body dengan latar putih, dan karena .stApp di sini transparan (supaya
+           video kelihatan), teks putih di atasnya jadi tidak kelihatan (putih di atas putih). */
+        html, body, [data-testid="stAppViewContainer"] > .main {
+            background-color: #04100f !important;
+            color-scheme: dark !important;
+        }
+
         /* PENTING: .stApp / stAppViewContainer / stHeader HARUS transparan.
            Kalau elemen-elemen ini diberi background sendiri, background itu akan
            menutupi video (video ada di belakangnya secara stacking-order), sehingga
@@ -850,6 +859,12 @@ if st.session_state.home_page:
     st.markdown("""
     <style>
 
+    /* Paksa background dasar tetap gelap apa pun tema browser/OS (light/dark/auto). */
+    html, body, [data-testid="stAppViewContainer"] > .main {
+        background-color: #00151a !important;
+        color-scheme: dark !important;
+    }
+
     .stApp{
         background: linear-gradient(135deg, #00151a 0%, #02111d 100%);
     }
@@ -1335,6 +1350,14 @@ if "max_zone" not in st.session_state:
 def load_css():
     st.markdown("""
     <style>
+
+    /* Paksa background dasar tetap gelap apa pun tema browser/OS (light/dark/auto) --
+       tanpa ini, di Chrome/OS bertema terang, Streamlit bisa merender html/body dengan
+       latar putih di balik .stApp, membuat teks putih di app ini jadi tidak kelihatan. */
+    html, body, [data-testid="stAppViewContainer"] > .main {
+        background-color: #001515 !important;
+        color-scheme: dark !important;
+    }
 
     /* ===== BASE ===== */
     .stApp {
