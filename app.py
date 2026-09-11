@@ -10,7 +10,6 @@ from shapely.validation import make_valid
 from shapely import vectorized
 from shapely.ops import linemerge, polygonize, unary_union
 import os
-
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 import plotly.graph_objects as go
