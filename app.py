@@ -10,6 +10,7 @@ from shapely.validation import make_valid
 from shapely import vectorized
 from shapely.ops import linemerge, polygonize, unary_union
 import os
+
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 import plotly.graph_objects as go
@@ -3522,7 +3523,17 @@ with tab1:
         max_zone,
         overflow_count,
         convergence_count,
-        boundary_area_ha
+        boundary_area_ha,
+        hydraulics_result=None,
+        representative_slope=None,
+        manning_n=None,
+        channel_b=None,
+        channel_z=None,
+        channel_h_total=None,
+        r24_mm_extreme=None,
+        runoff_c=None,
+        tc_hours=None,
+        boundary_area_ha_for_hydro=None,
     ):
 
         notes = []
@@ -3656,12 +3667,183 @@ with tab1:
                     "Tidak diperlukan tindakan perbaikan mendesak saat ini."
                 ]
 
+        # ================= ROOT CAUSE BREAKDOWN (deterministik, selalu jalan) =================
+        # Estimasi kontribusi relatif tiap faktor thd skor risiko keseluruhan -- BUKAN dari
+        # model kalibrasi, murni normalisasi sinyal yg sudah dihitung di atas, supaya
+        # rekomendasi menunjuk MEKANISME dominan (spt "excessive slope 42%"), bukan cuma
+        # status tunggal. Dipakai jg sbg dasar milih tier rekomendasi mana yg relevan.
+        _factor_signals = {
+            "Luas area berpotensi erosi": min(erosion_ratio / 0.35, 1.5),
+            "Indeks risiko maksimum (kecepatan/tegangan geser)": min(max_zone / 1.8, 1.5),
+            "Titik overflow (kapasitas penampang terlampaui)": min(overflow_count / 15.0, 1.5),
+            "Konvergensi aliran (scouring lokal)": min(convergence_count / 15.0, 1.5),
+            "Luas area berpotensi sedimentasi": (
+                min((sedimentation_area / boundary_area_ha) / 0.25, 1.5) if boundary_area_ha > 0 else 0.0
+            ),
+        }
+        if hydraulics_result and not hydraulics_result.get("freeboard_ok", True):
+            _factor_signals["Kapasitas freeboard saluran tidak cukup"] = 1.2
+
+        _total_signal = sum(_factor_signals.values())
+        root_cause = []
+        if _total_signal > 0:
+            for _name, _val in sorted(_factor_signals.items(), key=lambda x: -x[1]):
+                if _val <= 0:
+                    continue
+                root_cause.append({"factor": _name, "contribution_pct": round(_val / _total_signal * 100, 1)})
+
+        # ================= REKOMENDASI BERTINGKAT (Geometry -> Hydraulic -> Surface -> Sediment -> Monitoring) =================
+        # Urutan level intervensi ini sengaja mengikuti prinsip HEC-15 (hitung demand
+        # hidraulik dulu, baru pilih material/lining -- bukan langsung "erosi -> riprap"):
+        # 1) Geometry Control (ubah bentuk terrain spy energi aliran turun) dicoba duluan,
+        # 2) Hydraulic Control (kendalikan aliran spt drain/check dam),
+        # 3) Surface Protection (riprap/vegetasi) HANYA kalau opsi 1-2 saja diperkirakan
+        #    tidak cukup (max_zone/erosion_ratio masih tinggi),
+        # 4) Sediment Control kalau sedimentasi signifikan,
+        # 5) Monitoring selalu ditutup di akhir sbg jaring pengaman residual risk.
+        tiered_recs = {"Geometry Control": [], "Hydraulic Control": [], "Surface Protection": [],
+                        "Sediment Control": [], "Monitoring": []}
+
+        _dominant_factors = {rc["factor"] for rc in root_cause[:2]}  # 2 penyebab teratas
+
+        _geometry_triggered = (
+            "Indeks risiko maksimum (kecepatan/tegangan geser)" in _dominant_factors
+            or (hydraulics_result and hydraulics_result.get("froude") and hydraulics_result["froude"] > 1)
+        )
+        _hydraulic_triggered = (
+            "Titik overflow (kapasitas penampang terlampaui)" in _dominant_factors
+            or (hydraulics_result and not hydraulics_result.get("freeboard_ok", True))
+        )
+        _surface_triggered = max_zone >= 1.2 or erosion_ratio > 0.15
+        _sediment_triggered = (boundary_area_ha > 0 and (sedimentation_area / boundary_area_ha) > 0.15)
+
+        # --- skenario kuantitatif multi-opsi: coba beberapa kombinasi perubahan geometri/
+        # hidraulik, hitung ulang semuanya pakai fungsi Manning's yg SAMA persis dgn angka
+        # existing (bukan angka karangan), lalu ranking berdasar mana yg paling menurunkan
+        # kecepatan & mencapai freeboard cukup -- mengikuti semangat "Option A/B/C" di
+        # dokumen acuan, disederhanakan jadi kombinasi yg realistis dihitung dari data yg
+        # sudah ada (regrading & pembesaran penampang), BUKAN full scenario optimizer. ---
+        scenario = None  # tetap disediakan utk kompatibilitas (opsi pertama yg valid)
+        scenario_options = []
+        _hydro_inputs_ok = (
+            hydraulics_result and representative_slope and manning_n
+            and channel_b is not None and channel_z is not None and channel_h_total is not None
+            and r24_mm_extreme and runoff_c and tc_hours and boundary_area_ha_for_hydro
+        )
+        if _hydro_inputs_ok and (_geometry_triggered or _hydraulic_triggered):
+            _opt_defs = [
+                ("Geometry Only", {"slope_frac": 0.70, "width_frac": 1.00}),
+                ("Hydraulic Only", {"slope_frac": 1.00, "width_frac": 1.30}),
+                ("Geometry + Hydraulic (Combined)", {"slope_frac": 0.80, "width_frac": 1.15}),
+            ]
+            for _opt_name, _opt_frac in _opt_defs:
+                _cand_slope = representative_slope * _opt_frac["slope_frac"]
+                _cand_width = channel_b * _opt_frac["width_frac"]
+                _cand_result = compute_segment_hydraulics(
+                    r24_mm=r24_mm_extreme, c_runoff=runoff_c, tc_hours=tc_hours,
+                    area_ha=boundary_area_ha_for_hydro, manning_n=manning_n,
+                    channel_b=_cand_width, channel_z=channel_z, channel_h_total=channel_h_total,
+                    representative_slope=_cand_slope,
+                )
+                if not _cand_result:
+                    continue
+                _v_reduction_pct = (
+                    (hydraulics_result["v_normal_ms"] - _cand_result["v_normal_ms"])
+                    / hydraulics_result["v_normal_ms"] * 100
+                    if hydraulics_result["v_normal_ms"] else 0.0
+                )
+                scenario_options.append({
+                    "option": _opt_name,
+                    "slope_change": _opt_frac["slope_frac"] != 1.00,
+                    "width_change": _opt_frac["width_frac"] != 1.00,
+                    "existing_slope_pct": representative_slope * 100,
+                    "candidate_slope_pct": _cand_slope * 100,
+                    "existing_width_m": channel_b,
+                    "candidate_width_m": _cand_width,
+                    "existing_velocity_ms": hydraulics_result["v_normal_ms"],
+                    "candidate_velocity_ms": _cand_result["v_normal_ms"],
+                    "velocity_reduction_pct": _v_reduction_pct,
+                    "candidate_freeboard_ok": _cand_result.get("freeboard_ok"),
+                })
+
+            if scenario_options:
+                # ranking sederhana: prioritaskan yg freeboard cukup, lalu yg penurunan
+                # kecepatannya paling besar -- BUKAN skor biaya/kompleksitas (data itu blm
+                # tersedia di app), jadi label "recommended" di sini murni dari sisi hidraulik.
+                scenario_options.sort(
+                    key=lambda o: (not o["candidate_freeboard_ok"], -o["velocity_reduction_pct"])
+                )
+                for _i, _opt in enumerate(scenario_options):
+                    _opt["rank_label"] = (
+                        "Recommended" if _i == 0 else ("Alternative" if _i == 1 else "Also considered")
+                    )
+                scenario = {
+                    "existing_slope_pct": representative_slope * 100,
+                    "candidate_slope_pct": scenario_options[0]["candidate_slope_pct"],
+                    "existing_velocity_ms": hydraulics_result["v_normal_ms"],
+                    "candidate_velocity_ms": scenario_options[0]["candidate_velocity_ms"],
+                    "existing_freeboard_ok": hydraulics_result.get("freeboard_ok"),
+                    "candidate_freeboard_ok": scenario_options[0]["candidate_freeboard_ok"],
+                }
+
+        if _geometry_triggered:
+            if scenario:
+                tiered_recs["Geometry Control"].append(
+                    f"Kandidat regrading: kemiringan longitudinal existing ~{scenario['existing_slope_pct']:.1f}% "
+                    f"-> ~{scenario['candidate_slope_pct']:.1f}% (perlu verifikasi lapangan/DED), diperkirakan "
+                    f"menurunkan kecepatan aliran dari ~{scenario['existing_velocity_ms']:.2f} m/s menjadi "
+                    f"~{scenario['candidate_velocity_ms']:.2f} m/s (dihitung ulang dgn Manning's Equation, "
+                    "geometri channel & Q rencana diasumsikan tetap)."
+                )
+            else:
+                tiered_recs["Geometry Control"].append(
+                    "Pertimbangkan pengurangan kemiringan longitudinal (regrading) atau penambahan bench/berm "
+                    "pada segmen dengan indeks risiko tertinggi untuk menurunkan energi aliran."
+                )
+            tiered_recs["Geometry Control"].append(
+                "Evaluasi opsi relokasi/realignment alur pada zona konvergensi aliran signifikan."
+            )
+        if _hydraulic_triggered:
+            _fb_line = "Kapasitas penampang saat ini terindikasi tidak cukup"
+            if hydraulics_result and hydraulics_result.get("freeboard_m") is not None:
+                _fb_line += (
+                    f" (freeboard existing ~{hydraulics_result['freeboard_m']:.2f} m, minimum disarankan "
+                    f"~{hydraulics_result.get('min_freeboard_m', 0):.2f} m)"
+                )
+            tiered_recs["Hydraulic Control"].append(
+                _fb_line + " — pertimbangkan perbesar dimensi penampang (lebar/kedalaman) atau tambah "
+                "diversion/collector drain untuk mengurangi debit yang masuk ke segmen ini."
+            )
+            tiered_recs["Hydraulic Control"].append(
+                "Tambahkan check dam / drop structure pada perubahan kemiringan tajam untuk memecah energi aliran."
+            )
+        if _surface_triggered:
+            tiered_recs["Surface Protection"].append(
+                f"Indeks risiko maksimum {max_zone:.2f} / area berpotensi erosi {erosion_ratio*100:.1f}% "
+                "mengindikasikan tegangan geser/kecepatan aliran masih berpotensi melampaui ambang material "
+                "eksisting setelah opsi geometri & hidraulik di atas — tambahkan lining (riprap/geotextile) "
+                "atau vegetasi permanen pada titik-titik indeks tertinggi (lihat tabel Top 10)."
+            )
+        if _sediment_triggered:
+            tiered_recs["Sediment Control"].append(
+                f"Area berpotensi sedimentasi {sedimentation_area:.2f} Ha — tambahkan sediment trap/pond "
+                "di hilir zona konvergensi utama sebelum outlet."
+            )
+        tiered_recs["Monitoring"].append(
+            "Jadwalkan inspeksi visual pasca-hujan ekstrem (pemicu: curah hujan > R24 desain segmen ini) "
+            "dan survei topografi berkala untuk memverifikasi asumsi di atas terhadap kondisi aktual."
+        )
+
         return {
             "status": status,
             "color": color,
             "narrative": narrative,
             "recommendations": recs,
-            "notes": notes
+            "notes": notes,
+            "root_cause": root_cause,
+            "tiered_recommendations": {k: v for k, v in tiered_recs.items() if v},
+            "scenario": scenario,
+            "scenario_options": scenario_options,
         }
 
     # ================= AI-BASED GEOTECHNICAL RECOMMENDATION =================
@@ -3840,10 +4022,26 @@ DATA HASIL RUNNING:
 - RMSE permukaan 3D vs titik DXF asli: {context.get('surface_rmse', 'N/A')}
 {context.get('hydraulics_text', '')}
 
-Tulis dalam Bahasa Indonesia, gaya laporan teknis profesional, dengan format:
-1) Satu paragraf analisis (4-6 kalimat) yang secara eksplisit MERUJUK ANGKA-ANGKA di atas (bukan pernyataan umum).
-2) Daftar 3-5 rekomendasi rekayasa konkret, masing-masing SATU KALIMAT, diurutkan dari prioritas tertinggi,
-   dan sedapat mungkin sertakan angka/dimensi indikatif (mis. ukuran riprap, jarak check dam, target kecepatan).
+Tulis dalam Bahasa Indonesia, gaya laporan teknis profesional (Engineering Recommendation Engine),
+dengan struktur berikut:
+
+1) **Diagnosis (1 paragraf, 3-5 kalimat)**: identifikasi mekanisme dominan penyebab risiko (mis. flow
+   concentration berlebih, kemiringan longitudinal tinggi, material mudah tererosi, kapasitas drainase
+   kurang, sedimentasi tinggi) — MERUJUK ANGKA-ANGKA di atas secara eksplisit, jangan pernyataan umum.
+
+2) **Rekomendasi rekayasa bertingkat**, urutkan berdasarkan prinsip: Geometry Control (regrading/
+   benching/diversi) dicoba dulu sebelum Hydraulic Control (drain/check dam/ukuran penampang), baru
+   Surface Protection (riprap/vegetasi/geotextile) kalau shear stress/velocity masih melebihi ambang
+   material setelah opsi geometri, baru Sediment Control (sediment trap) kalau sedimentasi signifikan,
+   dan selalu tutup dengan 1 rekomendasi Monitoring (trigger pemicu inspeksi, mis. curah hujan > X mm/hari
+   atau kedalaman erosi > Y mm). Beri 3-5 butir, SATU KALIMAT tiap butir, dan SEDAPAT MUNGKIN sertakan
+   angka existing -> target/kandidat (mis. "kemiringan existing ~8% -> kandidat regrading ke ~4-5%",
+   "kapasitas saluran existing X m3/s -> target >= Y m3/s"), bukan cuma nama metode generik.
+
+3) PENTING -- jangan overclaim: JANGAN menyebutkan angka persentase penurunan risiko/erosi yang pasti
+   (mis. "erosi turun 62%") kecuali itu benar-benar diturunkan dari angka pada DATA HASIL RUNNING di atas.
+   Kalau harus memberi estimasi, sebut sebagai "estimasi awal, perlu verifikasi lapangan/model lanjutan"
+   dan JANGAN klaim seolah pasti/tervalidasi.
 
 Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa teks lain):
 {{"narrative": "...", "recommendations": ["...", "...", "..."]}}
@@ -5112,6 +5310,39 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                 "Erosi Dasar": "Check dam + monitoring berkala",
             }
 
+            # ---- rekomendasi kuantitatif per titik (bukan cuma template statis per kategori) ----
+            # Utk titik dgn risiko dominan Erosi Tebing/Erosi Dasar, bandingkan kecepatan aliran
+            # AKTUAL di titik itu thd kecepatan kritis Hjulstrom utk grain_size segmen ini -- persis
+            # pendekatan "existing velocity vs Hjulstrom critical velocity" yg dipakai jg di validasi
+            # 3-metode. Titik ini SUDAH py X,Y sendiri (df_overflow), jadi rekomendasinya otomatis
+            # coordinate-based, bukan cuma level segmen.
+            def _point_recommendation(risk_type, velocity_ms, slope_val, sediment_prob, d_mm):
+                d = d_mm / 1000 + 1e-6
+                v_critical = 0.1 * (d ** -0.4)
+                if risk_type in ("Erosi Tebing", "Erosi Dasar") and velocity_ms and velocity_ms > v_critical:
+                    _pct_over = (velocity_ms - v_critical) / v_critical * 100
+                    _base = (
+                        "Perkuatan tebing (riprap/revetment)" if risk_type == "Erosi Tebing"
+                        else "Check dam + monitoring berkala"
+                    )
+                    return (
+                        f"{_base} -- kecepatan aktual {velocity_ms:.2f} m/s melebihi kecepatan kritis "
+                        f"Hjulstrom ({v_critical:.2f} m/s utk grain size {d_mm:.2f} mm) sekitar "
+                        f"{_pct_over:.0f}%; prioritaskan turunkan kecepatan (regrading/check dam) sampai "
+                        f"di bawah ~{v_critical:.2f} m/s sebelum/bersamaan dgn proteksi permukaan."
+                    )
+                if risk_type == "Sedimentasi":
+                    return (
+                        f"Sediment trap + normalisasi rutin -- probabilitas sedimentasi di titik ini "
+                        f"{sediment_prob*100:.0f}% (indikator lokal, relatif thd titik lain di segmen)."
+                    )
+                if risk_type == "Overflow":
+                    return (
+                        "Peninggian tanggul + monitoring intensif -- densitas aliran & indeks risiko di "
+                        "titik ini termasuk 20% tertinggi di segmen (lihat kolom RiskScore/FlowDensityNorm)."
+                    )
+                return _RISK_TYPE_RECOMMENDATION.get(risk_type, "Monitoring berkala")
+
             df_overflow = df_overflow.assign(
                 Slope=_slope_at_pts,
                 SedimentProb=_sediment_at_pts,
@@ -5124,7 +5355,13 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                     df_overflow["RiskScore"], df_overflow["Slope"]
                 )
             ]
-            df_overflow["Rekomendasi"] = df_overflow["JenisRisikoDominan"].map(_RISK_TYPE_RECOMMENDATION)
+            df_overflow["Rekomendasi"] = [
+                _point_recommendation(rt, vv, slv, sv, grain_size)
+                for rt, vv, slv, sv in zip(
+                    df_overflow["JenisRisikoDominan"], df_overflow["Velocity_ms"],
+                    df_overflow["Slope"], df_overflow["SedimentProb"]
+                )
+            ]
 
             top10 = df_overflow.head(10)
 
@@ -6229,7 +6466,17 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                 max_zone=float(np.nanmax(zone_map)),
                 overflow_count=overflow_count,
                 convergence_count=convergence_count,
-                boundary_area_ha=boundary_area_ha
+                boundary_area_ha=boundary_area_ha,
+                hydraulics_result=hydraulics_result,
+                representative_slope=representative_slope if hydraulics_result else None,
+                manning_n=manning_n if hydraulics_result else None,
+                channel_b=channel_b if hydraulics_result else None,
+                channel_z=channel_z if hydraulics_result else None,
+                channel_h_total=channel_h_total if hydraulics_result else None,
+                r24_mm_extreme=r24_mm_extreme if hydraulics_result else None,
+                runoff_c=runoff_c if hydraulics_result else None,
+                tc_hours=tc_hours if hydraulics_result else None,
+                boundary_area_ha_for_hydro=boundary_area_ha_for_hydro if hydraulics_result else None,
             )
 
             hydro_text_for_ai = ""
@@ -6369,6 +6616,75 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                     for n in rekomendasi["notes"]:
                         st.markdown(f"- {n}")
 
+            # ================= ROOT CAUSE & REKOMENDASI BERTINGKAT (deterministik) =================
+            # Selalu tampil apa pun sumber AI-nya (bahkan kalau AI belum di-setup) --
+            # angka & strukturnya murni dihitung dari hasil running segmen ini sendiri.
+            if rekomendasi.get("root_cause"):
+                st.markdown("**" + _t("Mekanisme Penyebab Dominan", "Dominant Cause Mechanism") + "**")
+                _rc_cols = st.columns(len(rekomendasi["root_cause"][:4]))
+                for _rc_i, _rc in enumerate(rekomendasi["root_cause"][:4]):
+                    with _rc_cols[_rc_i]:
+                        st.metric(_rc["factor"], f"{_rc['contribution_pct']:.0f}%")
+
+            if rekomendasi.get("scenario_options"):
+                st.markdown(
+                    "**" + _t("Perbandingan Opsi Skenario (kandidat, perlu verifikasi lapangan)",
+                               "Scenario Option Comparison (candidate, requires field verification)") + "**"
+                )
+                _opt_rows = []
+                for _opt in rekomendasi["scenario_options"]:
+                    _opt_rows.append({
+                        _t("Opsi", "Option"): _t(_opt["option"], _opt["option"]),
+                        _t("Status", "Status"): _t(_opt["rank_label"], _opt["rank_label"]),
+                        _t("Kemiringan", "Slope"): (
+                            f"{_opt['existing_slope_pct']:.1f}% \u2192 {_opt['candidate_slope_pct']:.1f}%"
+                            if _opt["slope_change"] else _t("tetap", "unchanged")
+                        ),
+                        _t("Lebar Saluran", "Channel Width"): (
+                            f"{_opt['existing_width_m']:.2f} \u2192 {_opt['candidate_width_m']:.2f} m"
+                            if _opt["width_change"] else _t("tetap", "unchanged")
+                        ),
+                        _t("Kecepatan", "Velocity"): f"{_opt['existing_velocity_ms']:.2f} \u2192 {_opt['candidate_velocity_ms']:.2f} m/s",
+                        _t("Penurunan Kecepatan", "Velocity Reduction"): f"{_opt['velocity_reduction_pct']:.0f}%",
+                        _t("Freeboard", "Freeboard"): _t("Cukup", "OK") if _opt["candidate_freeboard_ok"] else _t("KURANG", "INSUFFICIENT"),
+                    })
+                st.dataframe(pd.DataFrame(_opt_rows), width="stretch", hide_index=True)
+                _best_opt = rekomendasi["scenario_options"][0]
+                st.markdown(
+                    f"**{_t('Direkomendasikan', 'Recommended')}:** {_t(_best_opt['option'], _best_opt['option'])} "
+                    f"({_t('penurunan kecepatan', 'velocity reduction')} \u2248{_best_opt['velocity_reduction_pct']:.0f}%, "
+                    f"freeboard {_t('cukup', 'OK') if _best_opt['candidate_freeboard_ok'] else _t('masih kurang', 'still insufficient')})"
+                )
+                _ui_caption(
+                    _t(
+                        "Ranking murni berdasarkan hasil hitungan hidraulik (kecepatan & freeboard) pakai "
+                        "Manning's Equation yang sama dgn angka existing (geometri channel lain & debit rencana "
+                        "diasumsikan tetap) — BELUM mempertimbangkan biaya/kompleksitas konstruksi krn data itu "
+                        "belum tersedia di app. Ini titik awal kajian rekayasa lebih lanjut, BUKAN jaminan/hasil "
+                        "final, dan belum mencerminkan penurunan risiko erosi dalam persentase pasti.",
+                        "Ranking is based purely on hydraulic results (velocity & freeboard) using the same "
+                        "Manning's Equation as the existing values (other channel geometry & design discharge "
+                        "assumed unchanged) — construction cost/complexity is NOT yet considered since that data "
+                        "isn't available in the app. This is a starting point for further engineering study, NOT "
+                        "a guarantee/final result, and does not represent a definite percentage reduction in "
+                        "erosion risk."
+                    )
+                )
+
+            if rekomendasi.get("tiered_recommendations"):
+                st.markdown("**" + _t("Rekomendasi Bertingkat (Geometry \u2192 Hydraulic \u2192 Surface \u2192 Sediment \u2192 Monitoring)",
+                                       "Tiered Recommendations (Geometry \u2192 Hydraulic \u2192 Surface \u2192 Sediment \u2192 Monitoring)") + "**")
+                _tier_labels_en = {
+                    "Geometry Control": "Geometry Control", "Hydraulic Control": "Hydraulic Control",
+                    "Surface Protection": "Surface Protection", "Sediment Control": "Sediment Control",
+                    "Monitoring": "Monitoring",
+                }
+                for _tier_name, _tier_items in rekomendasi["tiered_recommendations"].items():
+                    st.markdown(f"*{_t(_tier_name, _tier_labels_en.get(_tier_name, _tier_name))}*")
+                    for _item in _tier_items:
+                        st.markdown(f"- {_item}")
+
+            st.markdown("**" + _t("Narasi & Rekomendasi Ringkas (AI/rule-based)", "Summary Narrative & Recommendations (AI/rule-based)") + "**")
             st.markdown("**" + _t("Rekomendasi rekayasa:", "Engineering recommendations:") + "**")
             for r in ai_reco["recommendations"]:
                 st.markdown(f"- {r}")
@@ -7487,133 +7803,136 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                                     "di Executive Report."
                                 )
 
-            # ================= BANDINGKAN KETIGA METODE (Hjulström vs Shields vs Partheniades) =================
-            st.markdown("---")
-            st.markdown("#### " + _t("Bandingkan Ketiga Metode Erosion Assessment", "Compare the Three Erosion Assessment Methods"))
-            _ui_caption(
-                "Menjalankan Hjulström, Shields, dan Partheniades+Flow Accumulation sekaligus pada segmen "
-                "yang sama, lalu membandingkan akurasi klasifikasi masing-masing terhadap titik sampel "
-                "lapangan yang sama — mengikuti struktur Tabel 5 & Gambar 8 pada makalah acuan. "
-                "(Fitur ini memakai tabel Titik Sampel di atas; belum mendukung boundary DXF.)"
-            )
+            # Perbandingan 3 metode (Hjulström vs Shields vs Partheniades) -- fitur
+            # validasi teknis, admin-only. Utk surveyor tampilan dibuat simpel.
+            if _is_admin:
+                # ================= BANDINGKAN KETIGA METODE (Hjulström vs Shields vs Partheniades) =================
+                st.markdown("---")
+                st.markdown("#### " + _t("Bandingkan Ketiga Metode Erosion Assessment", "Compare the Three Erosion Assessment Methods"))
+                _ui_caption(
+                    "Menjalankan Hjulström, Shields, dan Partheniades+Flow Accumulation sekaligus pada segmen "
+                    "yang sama, lalu membandingkan akurasi klasifikasi masing-masing terhadap titik sampel "
+                    "lapangan yang sama — mengikuti struktur Tabel 5 & Gambar 8 pada makalah acuan. "
+                    "(Fitur ini memakai tabel Titik Sampel di atas; belum mendukung boundary DXF.)"
+                )
 
-            if st.button(_t("Jalankan Perbandingan 3 Metode", "Run 3-Method Comparison"), key=f"run_compare3_{val_sid}"):
+                if st.button(_t("Jalankan Perbandingan 3 Metode", "Run 3-Method Comparison"), key=f"run_compare3_{val_sid}"):
 
-                gt_table_cmp = st.session_state.get(gt_key, default_gt)
-                valid_gt_rows = [
-                    r for _, r in gt_table_cmp.iterrows()
-                    if r.get("Kelas_Observasi") in RISK_CLASSES
-                ]
-
-                if len(valid_gt_rows) < 2:
-                    st.error(_t("Isi minimal 2 titik sampel lapangan (di bagian atas) sebelum membandingkan metode.", "Fill in at least 2 field sample points (above) before comparing methods."))
-                else:
-                    gx_c, gy_c = val_seg["grid_x"], val_seg["grid_y"]
-                    slope_c = val_seg["slope"]
-                    flow_density_c = val_seg["flow_density"]
-                    velocity_field_c = val_seg["velocity_field"]
-                    valid_mask_c = val_seg["valid_mask"]
-                    grain_size_c = val_seg["grain_size_mm"]
-                    rho_water_c = val_seg["rho_water"]
-                    rho_soil_c = val_seg["rho_soil"]
-                    tau_critical_c = val_seg["tau_critical"]
-                    erodibility_M_c = val_seg["erodibility_M"]
-                    flow_weight_c = val_seg["flow_weight"]
-                    flow_depth_c = val_seg["flow_depth"]
-
-                    methods_to_run = ["Hjulstrom Diagram", "Shields Diagram", "Partheniades + Flow Accumulation"]
-                    comparison_rows = []
-                    zone_maps_by_method = {}
-
-                    for method_name in methods_to_run:
-                        t0 = time.time()
-                        zmap_c = np.full(gx_c.shape, np.nan)
-
-                        if method_name == "Hjulstrom Diagram":
-                            zmap_c[valid_mask_c] = np.vectorize(hjulstrom_zone, otypes=[float])(
-                                velocity_field_c[valid_mask_c], grain_size_c
-                            )
-                        elif method_name == "Shields Diagram":
-                            zmap_c[valid_mask_c] = np.vectorize(shields_zone, otypes=[float])(
-                                velocity_field_c[valid_mask_c], slope_c[valid_mask_c],
-                                rho_water_c, rho_soil_c, grain_size_c
-                            )
-                        else:
-                            risk_map_c = partheniades_erosion(
-                                slope=slope_c, flow_density=flow_density_c, rho_water=rho_water_c,
-                                flow_depth=flow_depth_c, tau_critical=tau_critical_c,
-                                erodibility_M=erodibility_M_c, flow_weight=flow_weight_c
-                            )
-                            zmap_c = risk_map_c.copy()
-                            zmap_c = zmap_c / (np.nanpercentile(zmap_c, 99) + 1e-9)
-                            zmap_c = np.clip(zmap_c, 0, 2)
-
-                        zmap_c[~valid_mask_c] = np.nan
-                        elapsed = time.time() - t0
-                        zone_maps_by_method[method_name] = zmap_c
-
-                        # validasi metode ini terhadap titik sampel yang sama
-                        gx_flat_c = gx_c.ravel()
-                        gy_flat_c = gy_c.ravel()
-                        z_flat_c = zmap_c.ravel()
-                        yt, yp = [], []
-                        for r in valid_gt_rows:
-                            try:
-                                px, py = float(r["X"]), float(r["Y"])
-                            except (ValueError, TypeError):
-                                continue
-                            dist2 = (gx_flat_c - px) ** 2 + (gy_flat_c - py) ** 2
-                            nidx = np.nanargmin(dist2)
-                            pcls = _classify_score(z_flat_c[nidx])
-                            if pcls is None:
-                                continue
-                            yt.append(r["Kelas_Observasi"])
-                            yp.append(pcls)
-
-                        if len(yt) >= 2:
-                            acc_m = float(np.mean([a == b for a, b in zip(yt, yp)]))
-                            kappa_m = _sk_cohen_kappa(yt, yp, labels=RISK_CLASSES)
-                        else:
-                            acc_m, kappa_m = float("nan"), float("nan")
-
-                        comparison_rows.append({
-                            "Metode": method_name,
-                            "Akurasi vs Sampel Lapangan (%)": round(acc_m * 100, 1) if not np.isnan(acc_m) else "-",
-                            "Cohen's Kappa": round(kappa_m, 3) if not np.isnan(kappa_m) else "-",
-                            "Skor Risiko Maks": round(float(np.nanmax(zmap_c)), 3),
-                            "Rata-rata Skor Risiko": round(float(np.nanmean(zmap_c)), 3),
-                            "Waktu Komputasi (detik)": round(elapsed, 3),
-                        })
-
-                    comp_df = pd.DataFrame(comparison_rows)
-                    st.markdown("**" + _t("Tabel Perbandingan (Tabel 5-equivalent)", "Comparison Table (Table 5-equivalent)") + "**")
-                    st.dataframe(comp_df, width="stretch")
-
-                    fig_cmp = go.Figure()
-                    fig_cmp.add_trace(go.Bar(
-                        x=comp_df["Metode"],
-                        y=[v if isinstance(v, (int, float)) else 0 for v in comp_df["Akurasi vs Sampel Lapangan (%)"]],
-                        text=comp_df["Akurasi vs Sampel Lapangan (%)"],
-                        textposition="outside",
-                        marker_color=["#4C78A8", "#54A24B", "#E45756"],
-                    ))
-                    fig_cmp.update_layout(
-                        title="Perbandingan Akurasi Klasifikasi Risiko 3 Metode (vs sampel lapangan Anda)",
-                        yaxis_title="Akurasi (%)", yaxis_range=[0, 100], height=420
-                    )
-                    st.plotly_chart(fig_cmp, width="stretch")
-
-                    best_method = comp_df.loc[
-                        comp_df["Akurasi vs Sampel Lapangan (%)"].apply(lambda v: v if isinstance(v, (int, float)) else -1).idxmax()
+                    gt_table_cmp = st.session_state.get(gt_key, default_gt)
+                    valid_gt_rows = [
+                        r for _, r in gt_table_cmp.iterrows()
+                        if r.get("Kelas_Observasi") in RISK_CLASSES
                     ]
-                    _ui_info(
-                        f"Metode dengan akurasi tertinggi terhadap sampel lapangan Anda saat ini: "
-                        f"**{best_method['Metode']}** ({best_method['Akurasi vs Sampel Lapangan (%)']}%). "
-                        "Catatan: hasil ini bergantung penuh pada jumlah & sebaran titik sampel yang diinput — "
-                        "tambah titik sampel untuk kesimpulan yang lebih andal."
-                    )
 
-                    st.session_state["segment_results"][val_sid]["method_comparison"] = comp_df
+                    if len(valid_gt_rows) < 2:
+                        st.error(_t("Isi minimal 2 titik sampel lapangan (di bagian atas) sebelum membandingkan metode.", "Fill in at least 2 field sample points (above) before comparing methods."))
+                    else:
+                        gx_c, gy_c = val_seg["grid_x"], val_seg["grid_y"]
+                        slope_c = val_seg["slope"]
+                        flow_density_c = val_seg["flow_density"]
+                        velocity_field_c = val_seg["velocity_field"]
+                        valid_mask_c = val_seg["valid_mask"]
+                        grain_size_c = val_seg["grain_size_mm"]
+                        rho_water_c = val_seg["rho_water"]
+                        rho_soil_c = val_seg["rho_soil"]
+                        tau_critical_c = val_seg["tau_critical"]
+                        erodibility_M_c = val_seg["erodibility_M"]
+                        flow_weight_c = val_seg["flow_weight"]
+                        flow_depth_c = val_seg["flow_depth"]
+
+                        methods_to_run = ["Hjulstrom Diagram", "Shields Diagram", "Partheniades + Flow Accumulation"]
+                        comparison_rows = []
+                        zone_maps_by_method = {}
+
+                        for method_name in methods_to_run:
+                            t0 = time.time()
+                            zmap_c = np.full(gx_c.shape, np.nan)
+
+                            if method_name == "Hjulstrom Diagram":
+                                zmap_c[valid_mask_c] = np.vectorize(hjulstrom_zone, otypes=[float])(
+                                    velocity_field_c[valid_mask_c], grain_size_c
+                                )
+                            elif method_name == "Shields Diagram":
+                                zmap_c[valid_mask_c] = np.vectorize(shields_zone, otypes=[float])(
+                                    velocity_field_c[valid_mask_c], slope_c[valid_mask_c],
+                                    rho_water_c, rho_soil_c, grain_size_c
+                                )
+                            else:
+                                risk_map_c = partheniades_erosion(
+                                    slope=slope_c, flow_density=flow_density_c, rho_water=rho_water_c,
+                                    flow_depth=flow_depth_c, tau_critical=tau_critical_c,
+                                    erodibility_M=erodibility_M_c, flow_weight=flow_weight_c
+                                )
+                                zmap_c = risk_map_c.copy()
+                                zmap_c = zmap_c / (np.nanpercentile(zmap_c, 99) + 1e-9)
+                                zmap_c = np.clip(zmap_c, 0, 2)
+
+                            zmap_c[~valid_mask_c] = np.nan
+                            elapsed = time.time() - t0
+                            zone_maps_by_method[method_name] = zmap_c
+
+                            # validasi metode ini terhadap titik sampel yang sama
+                            gx_flat_c = gx_c.ravel()
+                            gy_flat_c = gy_c.ravel()
+                            z_flat_c = zmap_c.ravel()
+                            yt, yp = [], []
+                            for r in valid_gt_rows:
+                                try:
+                                    px, py = float(r["X"]), float(r["Y"])
+                                except (ValueError, TypeError):
+                                    continue
+                                dist2 = (gx_flat_c - px) ** 2 + (gy_flat_c - py) ** 2
+                                nidx = np.nanargmin(dist2)
+                                pcls = _classify_score(z_flat_c[nidx])
+                                if pcls is None:
+                                    continue
+                                yt.append(r["Kelas_Observasi"])
+                                yp.append(pcls)
+
+                            if len(yt) >= 2:
+                                acc_m = float(np.mean([a == b for a, b in zip(yt, yp)]))
+                                kappa_m = _sk_cohen_kappa(yt, yp, labels=RISK_CLASSES)
+                            else:
+                                acc_m, kappa_m = float("nan"), float("nan")
+
+                            comparison_rows.append({
+                                "Metode": method_name,
+                                "Akurasi vs Sampel Lapangan (%)": round(acc_m * 100, 1) if not np.isnan(acc_m) else "-",
+                                "Cohen's Kappa": round(kappa_m, 3) if not np.isnan(kappa_m) else "-",
+                                "Skor Risiko Maks": round(float(np.nanmax(zmap_c)), 3),
+                                "Rata-rata Skor Risiko": round(float(np.nanmean(zmap_c)), 3),
+                                "Waktu Komputasi (detik)": round(elapsed, 3),
+                            })
+
+                        comp_df = pd.DataFrame(comparison_rows)
+                        st.markdown("**" + _t("Tabel Perbandingan (Tabel 5-equivalent)", "Comparison Table (Table 5-equivalent)") + "**")
+                        st.dataframe(comp_df, width="stretch")
+
+                        fig_cmp = go.Figure()
+                        fig_cmp.add_trace(go.Bar(
+                            x=comp_df["Metode"],
+                            y=[v if isinstance(v, (int, float)) else 0 for v in comp_df["Akurasi vs Sampel Lapangan (%)"]],
+                            text=comp_df["Akurasi vs Sampel Lapangan (%)"],
+                            textposition="outside",
+                            marker_color=["#4C78A8", "#54A24B", "#E45756"],
+                        ))
+                        fig_cmp.update_layout(
+                            title="Perbandingan Akurasi Klasifikasi Risiko 3 Metode (vs sampel lapangan Anda)",
+                            yaxis_title="Akurasi (%)", yaxis_range=[0, 100], height=420
+                        )
+                        st.plotly_chart(fig_cmp, width="stretch")
+
+                        best_method = comp_df.loc[
+                            comp_df["Akurasi vs Sampel Lapangan (%)"].apply(lambda v: v if isinstance(v, (int, float)) else -1).idxmax()
+                        ]
+                        _ui_info(
+                            f"Metode dengan akurasi tertinggi terhadap sampel lapangan Anda saat ini: "
+                            f"**{best_method['Metode']}** ({best_method['Akurasi vs Sampel Lapangan (%)']}%). "
+                            "Catatan: hasil ini bergantung penuh pada jumlah & sebaran titik sampel yang diinput — "
+                            "tambah titik sampel untuk kesimpulan yang lebih andal."
+                        )
+
+                        st.session_state["segment_results"][val_sid]["method_comparison"] = comp_df
 
         # ================= HELPER: render formula sebagai gambar (mathtext) =================
         def _render_formula_png(latex_expr, out_path, fontsize=15):
@@ -7992,6 +8311,34 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
             with open(reviewer_signature_path, "wb") as _f_sig:
                 _f_sig.write(reviewer_signature_file.getbuffer())
             st.image(reviewer_signature_path, caption="Pratinjau tanda tangan", width=220)
+
+        # ================= PRE-FLIGHT: cek status overlay citra satelit per segmen =================
+        # Toggle "Citra Satelit Online" itu checkbox PER-SEGMEN -- kalau lupa dicentang
+        # di salah satu segmen, peta segmen itu di report otomatis fallback ke
+        # orthophoto/hillshade biasa (bukan bug, tapi sering tidak disadari). Tampilkan
+        # ringkasannya di sini supaya kelihatan SEBELUM generate report, bukan sesudah.
+        if st.session_state.get("analysis_done", False):
+            _seg_results_preflight = st.session_state.get("segment_results", {})
+            if _seg_results_preflight:
+                _sat_off_segs = [
+                    seg.get("label", sid) for sid, seg in _seg_results_preflight.items()
+                    if seg.get("satellite_basemap") is None
+                ]
+                if _sat_off_segs:
+                    st.warning(
+                        _t(
+                            f"Citra satelit online TIDAK aktif untuk segmen: {', '.join(_sat_off_segs)}. "
+                            "Peta segmen ini di report akan pakai orthophoto/hillshade biasa (bukan "
+                            "citra satelit). Kalau mau ikut ditampilkan dengan citra satelit, centang "
+                            "'Tampilkan peta ... Citra Satelit Online' di bagian segmen terkait di atas, "
+                            "lalu generate report lagi.",
+                            f"Online satellite imagery is NOT active for segment(s): {', '.join(_sat_off_segs)}. "
+                            "This segment's map in the report will use the regular orthophoto/hillshade "
+                            "(not satellite imagery). To include satellite imagery, check 'Show map ... "
+                            "Online Satellite Imagery' in that segment's section above, then generate the "
+                            "report again."
+                        )
+                    )
 
         if st.session_state.get("analysis_done", False) and st.button(_t("GENERATE EXECUTIVE REPORT", "GENERATE EXECUTIVE REPORT")):
 
