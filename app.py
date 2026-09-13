@@ -1940,9 +1940,9 @@ with tab1:
                     _t("Asumsi Kedalaman Aliran / Flow Depth (m)", "Assumed Flow Depth (m)"), 0.01, 10.0, 0.30,
                     key=f"flow_depth_{sid}",
                     help=(
-                        "Dipakai untuk menghitung tegangan geser dasar τ = ρw·g·h·S "
+                        "Dipakai untuk menghitung tegangan geser dasar tau = ρw·g·h·S "
                         "(depth-slope product). Sebelumnya parameter ini tidak dipakai "
-                        "pada Shields sehingga τ terhitung tanpa suku kedalaman — sudah diperbaiki."
+                        "pada Shields sehingga tau terhitung tanpa suku kedalaman — sudah diperbaiki."
                     )
                 )
 
@@ -1988,7 +1988,12 @@ with tab1:
                     "di atas, melainkan dihitung dari debit rencana hasil hujan (metode Rasional + rumus "
                     "Mononobe untuk intensitas, umum dipakai di Indonesia) dan geometri channel via "
                     "Manning's Equation. Ini menjawab kelemahan versi sebelumnya di mana kecepatan hanya "
-                    "angka asumsi manual, tidak terhubung ke data hujan maupun geometri channel aktual."
+                    "angka asumsi manual, tidak terhubung ke data hujan maupun geometri channel aktual.\n\n"
+                    "**Sumber referensi**: Metode Rasional — Kuichling (1889)/Mulvaney (1851); "
+                    "Manning's Equation — Manning (1889), lihat Chow, V.T. (1959) *Open-Channel Hydraulics*; "
+                    "rumus intensitas hujan Mononobe — dikutip dalam Suripin (2004) *Sistem Drainase "
+                    "Perkotaan yang Berkelanjutan*. Daftar lengkap ada di bagian Referensi Metodologi "
+                    "pada laporan PDF/Word."
                 )
 
                 use_hydraulics = st.checkbox(
@@ -2058,10 +2063,24 @@ with tab1:
                     )
 
                     colh6.number_input(
-                        "Kemiringan Tebing z (H:V)", 0.0, 5.0, 1.5,
-                        key=f"channel_z_{sid}",
-                        help="0 = dinding vertikal/persegi, 1.5 = umum untuk galian tanah."
+                        _t("Sudut Lereng Tebing (°)", "Bank Slope Angle (°)"),
+                        min_value=5.0, max_value=89.0, value=33.7, step=0.5,
+                        key=f"channel_slope_deg_{sid}",
+                        help=_t(
+                            "Sudut kemiringan tebing/lereng channel dari bidang horizontal, sesuai data "
+                            "lapangan (mis. hasil survei lereng aktual) — bukan lagi rasio H:V. Konversi "
+                            "ke rasio z (H:V) untuk Manning's Equation dilakukan otomatis: z = 1/tan(sudut). "
+                            "Contoh: 33,7° ≈ z=1.5 (umum untuk galian tanah), 45° = z=1 (lereng 1:1), "
+                            "89° ≈ dinding hampir vertikal (z≈0).",
+                            "Bank/side slope angle from horizontal, matching field survey data — no longer "
+                            "an H:V ratio. Automatically converted to the z (H:V) ratio for Manning's "
+                            "Equation: z = 1/tan(angle). E.g. 33.7° ≈ z=1.5 (typical earth cut), "
+                            "45° = z=1 (1:1 slope), 89° ≈ near-vertical wall (z≈0)."
+                        )
                     )
+                    st.session_state[f"channel_z_{sid}"] = 1.0 / np.tan(np.radians(
+                        st.session_state.get(f"channel_slope_deg_{sid}", 33.7)
+                    ))
 
                     st.number_input(
                         _t("Tinggi Total Channel/Tanggul (m) — untuk cek freeboard", "Total Channel/Embankment Height (m) — for freeboard check"),
@@ -3457,81 +3476,6 @@ with tab1:
         # sungguhan, trace akan berhenti di situ juga, bukan gagal di sini.
         return _search(require_inside=False)
 
-    def _build_water_ribbon_mesh(px, py, pz, pdepth, ve, width_scale=3.0, min_hw=0.4, max_hw=4.0):
-        """Bangun mesh 'pita air' (ribbon) mengikuti jalur aliran, sbg pengganti garis
-        tipis mode='lines' -- supaya visual 3D-nya terlihat seperti aliran air
-        sungai/channel beneran (permukaan dgn lebar & gradasi warna sesuai kedalaman),
-        bukan cuma benang tipis. Lebar pita tiap titik mengikuti akar kedalaman air
-        (pdepth) di titik itu (mirip lebar channel yg membesar seiring debit),
-        dibatasi min/max spy tetap wajar secara visual.
-
-        Return: (xs, ys, zs, i, j, k, intensity) siap dipakai langsung sbg argumen
-        go.Mesh3d, atau None kalau titiknya kurang dari 2 (tidak bisa dibentuk pita).
-        """
-        px = np.asarray(px, dtype=float)
-        py = np.asarray(py, dtype=float)
-        pz = np.asarray(pz, dtype=float)
-        pdepth = np.asarray(pdepth, dtype=float)
-        n = len(px)
-        if n < 2:
-            return None
-
-        tangent = np.zeros((n, 2))
-        tangent[1:-1, 0] = px[2:] - px[:-2]
-        tangent[1:-1, 1] = py[2:] - py[:-2]
-        tangent[0] = [px[1] - px[0], py[1] - py[0]]
-        tangent[-1] = [px[-1] - px[-2], py[-1] - py[-2]]
-        _tnorm = np.hypot(tangent[:, 0], tangent[:, 1])
-        _tnorm[_tnorm < 1e-9] = 1.0
-        tangent = tangent / _tnorm[:, None]
-        perp = np.stack([-tangent[:, 1], tangent[:, 0]], axis=1)
-
-        half_width = np.clip(np.sqrt(np.maximum(pdepth, 0.02)) * width_scale, min_hw, max_hw)
-        water_z = (pz + pdepth) * ve
-
-        left_x = px + perp[:, 0] * half_width
-        left_y = py + perp[:, 1] * half_width
-        right_x = px - perp[:, 0] * half_width
-        right_y = py - perp[:, 1] * half_width
-
-        xs = np.concatenate([left_x, right_x])
-        ys = np.concatenate([left_y, right_y])
-        zs = np.concatenate([water_z, water_z])
-        intensity = np.concatenate([pdepth, pdepth])
-
-        i_idx, j_idx, k_idx = [], [], []
-        for idx in range(n - 1):
-            l0, l1 = idx, idx + 1
-            r0, r1 = idx + n, idx + 1 + n
-            i_idx += [l0, l1]
-            j_idx += [l1, r1]
-            k_idx += [r0, r0]
-
-        return xs, ys, zs, i_idx, j_idx, k_idx, intensity
-
-    def _water_ribbon_trace(px, py, pz, pdepth, ve, name="Aliran Air", showlegend=False,
-                             width_scale=3.0, min_hw=0.4, max_hw=4.0):
-        """Bungkus _build_water_ribbon_mesh langsung jadi go.Mesh3d trace siap pakai
-        (warna biru muda->biru tua sesuai kedalaman, efek pencahayaan spt permukaan
-        basah/mengkilap). Return None kalau jalurnya terlalu pendek."""
-        _mesh = _build_water_ribbon_mesh(px, py, pz, pdepth, ve, width_scale, min_hw, max_hw)
-        if _mesh is None:
-            return None
-        _xs, _ys, _zs, _i, _j, _k, _intensity = _mesh
-        return go.Mesh3d(
-            x=_xs, y=_ys, z=_zs, i=_i, j=_j, k=_k,
-            intensity=_intensity,
-            colorscale=[[0, "#8FE3FF"], [0.5, "#2E9BE0"], [1, "#0A3D7A"]],
-            showscale=False,
-            opacity=0.92,
-            flatshading=False,
-            lighting=dict(ambient=0.5, diffuse=0.65, specular=0.95, roughness=0.2, fresnel=0.35),
-            lightposition=dict(x=10000, y=20000, z=30000),
-            name=name,
-            showlegend=showlegend,
-            hovertemplate="Ketebalan air \u2248 %{intensity:.2f} m<extra></extra>",
-        )
-
     def trace_multiple_flow(x0, y0, grid_x, grid_y, dz_dx, dz_dy, grid_z, boundary,
                              n_stream=20, inside=None, depth0=0.2, flow_acc=None,
                              d8_recv_r=None, d8_recv_c=None, d8_has_recv=None):
@@ -4090,13 +4034,13 @@ with tab1:
                 "control": (
                     "Opsi material cover selain vegetasi (dipilih sesuai fungsi yang dibutuhkan): "
                     "(1) Lapisan lempung/claystone dipadatkan sebagai BARRIER infiltrasi — standar umum "
-                    "k ≤ 1×10⁻⁹ m/s (setara 1×10⁻⁷ cm/s, acuan RCRA Subtitle D/C); "
-                    "(2) Geosynthetic Clay Liner (GCL) sebagai alternatif barrier — k ≈ 1×10⁻¹¹–5×10⁻¹¹ m/s, "
+                    "k ≤ 1x10^-9 m/s (setara 1x10^-7 cm/s, acuan RCRA Subtitle D/C); "
+                    "(2) Geosynthetic Clay Liner (GCL) sebagai alternatif barrier — k ~ 1x10^-11 - 5x10^-11 m/s, "
                     "lebih tipis & konsisten dibanding lempung alami; "
-                    "(3) Subsoil/growth media dipadatkan sedang — k ≈ 1×10⁻⁷–1×10⁻⁸ m/s, menahan sebagian "
+                    "(3) Subsoil/growth media dipadatkan sedang — k ~ 1x10^-7 - 1x10^-8 m/s, menahan sebagian "
                     "infiltrasi sambil tetap mendukung pertumbuhan vegetasi di atasnya; "
                     "(4) Material high-permeable (rockfill/waste rock kasar) sebagai CAPILLARY BREAK layer "
-                    "(store-and-release cover) — k > 1×10⁻⁵ m/s, dipakai justru untuk MENGALIRKAN air "
+                    "(store-and-release cover) — k > 1x10^-5 m/s, dipakai justru untuk MENGALIRKAN air "
                     "menjauh (bukan menahan), umum di cover waste rock dump/tailings daerah kering."
                 ),
                 "effect": (
@@ -5792,7 +5736,13 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                 if n_pts == 0:
                     continue
 
-                # -- downsample titik (tetap sampai titik terakhir supaya jalur
+                # permukaan air digambar SEDIKIT DI ATAS permukaan tanah, setinggi
+                # ketebalan air di titik tsb (pdepth), supaya terlihat sebagai lapisan
+                # air yang punya volume/ketebalan -- bukan cuma garis tipis menempel
+                # tanah seperti sebelumnya.
+                water_z = (pz_arr + pdepth_arr) * vertical_exaggeration
+
+                # -- downsample titik GARIS (tetap sampai titik terakhir supaya jalur
                 # nyambung utuh sampai ujung, bukan terpotong) --
                 if n_pts > _MAX_RENDER_PTS_PER_PATH:
                     _line_idx = np.unique(np.concatenate([
@@ -5802,16 +5752,53 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                 else:
                     _line_idx = np.arange(n_pts)
 
-                # Ganti garis tipis + marker bulat (kesan "benang") dgn mesh pita air
-                # yg melebar mengikuti kedalaman -- visualnya jadi mirip aliran air/
-                # channel sungai beneran, bukan sekadar garis.
-                _ribbon = _water_ribbon_trace(
-                    np.asarray(px)[_line_idx], np.asarray(py)[_line_idx],
-                    pz_arr[_line_idx], pdepth_arr[_line_idx],
-                    vertical_exaggeration,
+                fig.add_trace(
+                    go.Scatter3d(
+                        x=np.asarray(px)[_line_idx],
+                        y=np.asarray(py)[_line_idx],
+                        z=water_z[_line_idx],
+                        mode="lines",
+                        line=dict(
+                            color="#00C8FF",
+                            width=5
+                        ),
+                        customdata=pdepth_arr[_line_idx],
+                        hovertemplate="Ketebalan air ≈ %{customdata:.2f} m<extra></extra>",
+                        name="Aliran Air",
+                        showlegend=False
+                    )
                 )
-                if _ribbon is not None:
-                    fig.add_trace(_ribbon)
+
+                # -- marker ketebalan air: subset titik JAUH lebih jarang lagi
+                # (cukup utk kesan visual "makin tebal ke hilir", tidak perlu tiap
+                # titik garis) --
+                if n_pts > _MAX_MARKERS_PER_PATH:
+                    _mk_idx = np.unique(np.concatenate([
+                        np.linspace(0, n_pts - 1, _MAX_MARKERS_PER_PATH, dtype=int),
+                        [n_pts - 1],
+                    ]))
+                else:
+                    _mk_idx = np.arange(n_pts)
+
+                marker_sizes = np.clip(4 + pdepth_arr[_mk_idx] * 25, 4, 22)
+
+                fig.add_trace(
+                    go.Scatter3d(
+                        x=np.asarray(px)[_mk_idx],
+                        y=np.asarray(py)[_mk_idx],
+                        z=water_z[_mk_idx],
+                        mode="markers",
+                        marker=dict(
+                            size=marker_sizes,
+                            color="#00C8FF",
+                            opacity=0.85
+                        ),
+                        customdata=pdepth_arr[_mk_idx],
+                        hovertemplate="Ketebalan air ≈ %{customdata:.2f} m<extra></extra>",
+                        name="Aliran Air",
+                        showlegend=False
+                    )
+                )
 
             # FITUR BARU: tandai titik berhenti tiap jalur LANGSUNG di model 3D (bukan
             # cuma di teks expander) -- supaya kelihatan persis DI MANA & warna apa
@@ -7429,33 +7416,22 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                     )
                 )
 
-                # ---- PERBAIKAN ("aliran melompat lurus antar 2 boundary sub-segmen
-                # terpisah"): flow_paths milik sub-segmen HANYA potongan (crop) dari
-                # jalur Main yang kebetulan lewat boundary sub-segmen itu (lihat
-                # komentar di percabangan is_sub_segment saat trace dihitung) --
-                # kalau boundary sub-segmen tsb terdiri >1 bagian terpisah, potongan
-                # jalur yang tidak berurutan itu SEBELUMNYA digambar sbg satu garis
-                # menyambung (melompat lurus dari ujung potongan A ke awal potongan
-                # B). Sesuai keputusan: jalur aliran cukup ditampilkan SATU KALI di
-                # Scene Gabungan, mengikuti jalur ASLI Segmen 1 (Main) apa adanya
-                # (utuh, tanpa dipotong per sub-boundary), warna biru tetap -- jadi
-                # sub-segmen dilewati sama sekali di sini (boundary-nya tetap
-                # digambar spt biasa di atas, cuma alirannya yang tidak diulang).
-                if _res.get("is_sub_segment"):
-                    continue
-
                 for _pi, _fp in enumerate(_res.get("flow_paths", [])):
                     _px, _py, _pz, _pd = _fp
                     if len(_px) < 2:
                         continue
                     _pz_arr = np.array(_pz)
                     _pd_arr = np.array(_pd)
-                    _ribbon_combo = _water_ribbon_trace(
-                        _px, _py, _pz_arr, _pd_arr, _ve,
-                        name=f"Aliran Air — {_res['label']}", showlegend=(_pi == 0),
+                    _water_z = (_pz_arr + _pd_arr) * _ve
+                    fig_combo.add_trace(
+                        go.Scatter3d(
+                            x=_px, y=_py, z=_water_z,
+                            mode="lines",
+                            line=dict(color=_color, width=4),
+                            showlegend=(_pi == 0),
+                            name=f"Aliran — {_res['label']}",
+                        )
                     )
-                    if _ribbon_combo is not None:
-                        fig_combo.add_trace(_ribbon_combo)
 
             fig_combo.update_layout(
                 height=850,
@@ -9037,7 +9013,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
 
                 # --- ringkasan eksekutif naratif (abstrak) ---
                 n_seg = len(seg_results_all)
-                worst_seg = max(seg_results_all.values(), key=lambda s: s["max_zone"])
+                worst_sid, worst_seg = max(seg_results_all.items(), key=lambda kv: kv[1]["max_zone"])
                 avg_erosion_ratio = np.mean([s["erosion_ratio"] for s in seg_results_all.values()]) * 100
                 n_reject = sum(
                     1 for s in seg_results_all.values()
@@ -9083,6 +9059,25 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                             _overridden_by[_sid_a] = _sid_b
                             break
 
+                # ============================================================
+                # ===== FILTER: hanya segmen kritis/berpotensi yang detail ===
+                # ============================================================
+                # BARU: kalau segmen >= 2, laporan detail penuh cukup untuk segmen
+                # yang PALING KRITIS + segmen mana pun yang punya status KRITIS/REJECT
+                # atau area erosi/sedimentasi > 0 (potensi nyata) -- bukan otomatis
+                # semua segmen. Kalau cuma 1 segmen yang dianalisis, TETAP tampil detail
+                # penuh apa pun statusnya (tidak ada yang dibandingkan).
+                _low_priority_skip = set()
+                if n_seg >= 2:
+                    for _sid_lp, _seg_lp in seg_results_all.items():
+                        if _sid_lp == worst_sid or _sid_lp in _overridden_by:
+                            continue  # segmen paling kritis & segmen overlap sudah ada aturan sendiri
+                        _status_lp = (_seg_lp.get("recommendation") or {}).get("status", "")
+                        _is_critical_lp = "REJECT" in _status_lp or "KRITIS" in _status_lp
+                        _has_potential_lp = _seg_lp["erosion_area"] > 0 or _seg_lp["sedimentation_area"] > 0
+                        if not _is_critical_lp and not _has_potential_lp:
+                            _low_priority_skip.add(_sid_lp)
+
                 story.append(Paragraph("RINGKASAN EKSEKUTIF", styles["H1"]))
                 story.append(Paragraph(
                     f"Laporan ini merangkum hasil evaluasi geoteknik otomatis terhadap {n_seg} segmen "
@@ -9093,12 +9088,19 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                     f"<b>{worst_seg['label']}</b> (indeks {worst_seg['max_zone']:.2f} dari skala 0-2). "
                     f"Dari seluruh segmen, <b>{n_reject}</b> segmen berada pada status kritis/tidak "
                     f"direkomendasikan dan memerlukan tindak lanjut prioritas. Detail metodologi, kalkulasi "
-                    f"titik kritis, dan rekomendasi rekayasa per segmen disajikan pada bagian berikut."
+                    f"titik kritis, dan rekomendasi rekayasa disajikan secara penuh untuk segmen paling "
+                    f"kritis dan segmen yang punya potensi erosi/sedimentasi nyata pada bagian berikut."
                     + (
                         f" {len(_overridden_by)} segmen area-nya tumpang tindih dengan segmen lain yang dibuat "
                         f"belakangan sehingga hasilnya digabung (tidak ditampilkan dobel) — lihat catatan pada "
                         f"Tabel 1."
                         if _overridden_by else ""
+                    )
+                    + (
+                        f" {len(_low_priority_skip)} segmen risikonya rendah & tidak menunjukkan potensi erosi/"
+                        f"sedimentasi dibanding segmen lain, jadi ditampilkan ringkas saja (bukan detail penuh) "
+                        f"— lihat catatan pada Tabel 1."
+                        if _low_priority_skip else ""
                     ),
                     styles["Body"]
                 ))
@@ -9113,6 +9115,8 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                     _label_disp = seg["label"]
                     if sid in _overridden_by:
                         _label_disp += f" (digabung ke {seg_results_all[_overridden_by[sid]]['label']})"
+                    elif sid in _low_priority_skip:
+                        _label_disp += " (ringkas — risiko rendah, lihat catatan)"
                     summary_rows.append([
                         _label_disp, seg["analysis_method"],
                         f"{seg['erosion_area']:.2f}", f"{seg['sedimentation_area']:.2f}",
@@ -9145,10 +9149,12 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                     plt.savefig("CrossSection.png", dpi=220)
                     plt.close(fig_sec)
 
-                    story.append(Paragraph("PENAMPANG MELINTANG (CROSS SECTION A-A')", styles["H1"]))
-                    story.append(_divider())
-                    story.append(_fit_image("CrossSection.png", max_width=CONTENT_W))
-                    story.append(Paragraph("Gambar 1. Profil elevasi sepanjang garis penampang A-A' yang dipilih pada alat Cross Section.", styles["Caption"]))
+                    story.append(_img_block(
+                        "CrossSection.png",
+                        "Gambar 1. Profil elevasi sepanjang garis penampang A-A' yang dipilih pada alat Cross Section.",
+                        max_width=CONTENT_W,
+                        heading="PENAMPANG MELINTANG (CROSS SECTION A-A')",
+                    ))
                     story.append(PageBreak())
 
                 # ============================================================
@@ -9222,6 +9228,25 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                             f"merepresentasikan kondisi/desain terbaru untuk area yang sama, hasil analisis detail "
                             f"untuk area tumpang-tindih ini DIGABUNG ke bagian <b>{_override_target['label']}</b> "
                             f"(lihat bagian tersebut) — tidak ditampilkan dobel di sini.",
+                            styles["Body"]
+                        ))
+                        story.append(Spacer(1, 10))
+                        continue
+
+                    if sid in _low_priority_skip:
+                        # BARU: segmen ini risikonya rendah & tidak menunjukkan potensi
+                        # erosi/sedimentasi nyata dibanding segmen lain -- cukup ringkasan
+                        # singkat (angka sudah ada di Tabel 1), tidak perlu detail penuh
+                        # berhalaman-halaman untuk segmen yang bukan prioritas.
+                        story.append(Paragraph(f"{seg_i + 1}. SEGMEN: {seg['label'].upper()}", styles["H1"]))
+                        story.append(_divider())
+                        story.append(Paragraph(
+                            f"Indeks risiko maksimum segmen ini ({seg['max_zone']:.2f}) relatif rendah "
+                            f"dibanding segmen lain, dan tidak menunjukkan area berpotensi erosi/sedimentasi "
+                            f"nyata (lihat Tabel 1 pada Ringkasan Eksekutif). Detail analisis penuh "
+                            f"(metodologi, titik kritis, rekomendasi) tidak ditampilkan di sini untuk menjaga "
+                            f"laporan tetap fokus pada segmen prioritas — tersedia kembali lewat aplikasi "
+                            f"kalau sewaktu-waktu diperlukan.",
                             styles["Body"]
                         ))
                         story.append(Spacer(1, 10))
@@ -9301,14 +9326,38 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                         ))
                         story.append(Spacer(1, 8))
 
-                    # --- Numerical Modelling (3D) DIPINDAH ke luar loop per-segmen ---
-                    # PERBAIKAN: sebelumnya tiap segmen (Main + tiap sub-boundary) dapat
-                    # bagian "Numerical Modelling (3D)" sendiri-sendiri (3 sudut pandang x
-                    # N segmen = laporan jadi sangat panjang & terpisah-pisah), padahal untuk
-                    # proyek multi-segmen yang lebih relevan justru Scene 3D GABUNGAN (semua
-                    # segmen sudah menyatu dalam satu model). Sekarang HANYA satu bagian
-                    # Numerical Modelling untuk keseluruhan laporan (dirender sebelum bagian
-                    # per-segmen ini, lihat "NUMERICAL MODELLING (3D) — HASIL GABUNGAN" di atas).
+                    # --- Numerical Modelling (3D) per-segmen ---
+                    # DIKEMBALIKAN atas permintaan: selain Scene 3D Gabungan (satu kali, di
+                    # awal laporan), tiap segmen yang tampil detail penuh di sini JUGA dapat
+                    # 3 sudut pandang modelnya sendiri -- supaya bentuk 3D spesifik segmen ini
+                    # (sebelum ditimpa/digabung ke scene gabungan) tetap bisa dilihat terpisah.
+                    _num_views_seg = seg.get("numerical_modelling_views") or {}
+                    if any(_num_views_seg.get(k) for k in ("overall", "critical_point", "alternate")):
+                        story.append(NextPageTemplate("Landscape"))
+                        story.append(PageBreak())
+                        story.append(Paragraph(f"NUMERICAL MODELLING (3D) — {seg['label'].upper()}", styles["H1"]))
+                        story.append(_divider())
+                        _view_labels_seg = {
+                            "overall": "(a) Tampilan Keseluruhan (Overall)",
+                            "critical_point": "(b) Tampilan Mengarah ke Titik Paling Kritis",
+                            "alternate": "(c) Tampilan Sudut Lain",
+                        }
+                        for _vk in ("overall", "critical_point", "alternate"):
+                            _vp = _num_views_seg.get(_vk)
+                            if _vp:
+                                story.append(_img_block(
+                                    _vp, None, max_width=LAND_CONTENT_W, max_height=LAND_H - 8.5 * cm,
+                                    heading=_view_labels_seg[_vk],
+                                ))
+                                story.append(Spacer(1, 6))
+                        story.append(Paragraph(
+                            f"Gambar {seg_i + 2}c. Hasil Numerical Modelling 3D {seg['label']} dari tiga sudut "
+                            "pandang: keseluruhan model, terarah ke titik prioritas mitigasi paling kritis "
+                            "(FlowDensity tertinggi), dan sudut pandang lain sebagai pembanding bentuk model.",
+                            styles["Caption"]
+                        ))
+                        story.append(NextPageTemplate("Portrait"))
+                        story.append(PageBreak())
 
                     # --- 2D Risk Map ---
                     if seg.get("risk_map_2d_path"):
@@ -9339,17 +9388,13 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
 
                     story.append(NextPageTemplate("Landscape"))
                     story.append(PageBreak())
-                    story.append(Paragraph(
-                        f"LEMBAR PETA — SEBARAN POTENSI EROSI & SEDIMENTASI: {seg['label'].upper()}",
-                        styles["H1"]
-                    ))
-                    story.append(_divider())
-                    story.append(_fit_image(composite_path, max_width=LAND_CONTENT_W, max_height=LAND_H - 5.5 * cm))
-                    story.append(Paragraph(
+                    story.append(_img_block(
+                        composite_path,
                         f"Gambar {seg_i + 2}a. Peta komposit {seg['label']}: klasifikasi risiko erosi/sedimentasi "
                         "4 kelas (kiri), grafik luas per kategori (kanan atas), topografi hillshade & zoom titik "
                         "kritis (kanan tengah), dan model permukaan 3D berwarna indeks risiko (kanan bawah).",
-                        styles["Caption"]
+                        max_width=LAND_CONTENT_W, max_height=LAND_H - 5.5 * cm,
+                        heading=f"LEMBAR PETA — SEBARAN POTENSI EROSI & SEDIMENTASI: {seg['label'].upper()}",
                     ))
                     story.append(NextPageTemplate("Portrait"))
                     story.append(PageBreak())
@@ -9389,7 +9434,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                             "membandingkan gaya penggerak aliran terhadap gaya penahan berat butiran terendam "
                             "(Shields, 1936). Tegangan geser dasar dihitung memakai depth-slope product (dengan "
                             "kedalaman aliran h), bukan hanya kemiringan S — koreksi ini penting karena tanpa "
-                            "suku h, τ₀ tidak bersatuan Pascal yang valid secara dimensional.",
+                            "suku h, tau0 tidak bersatuan Pascal yang valid secara dimensional.",
                             styles["Body"]
                         ))
                         fs1_path = f"formula_tau0_shields_{sid}.png"
@@ -9402,7 +9447,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                         story.append(_fit_image(fs1_path, max_width=CONTENT_W*0.55))
                         story.append(_fit_image(fs2_path, max_width=CONTENT_W*0.65))
                         story.append(Paragraph(
-                            f"dengan τ₀ tegangan geser dasar aktual (N/m²), h = kedalaman aliran = "
+                            f"dengan tau0 tegangan geser dasar aktual (N/m²), h = kedalaman aliran = "
                             f"{seg['flow_depth']:.2f} m, ρw dan ρs densitas air dan sedimen (kg/m³), g = 9,81 m/s², "
                             f"dan D50 diameter butiran median (mm). Klasifikasi: θ &lt; 0,03 → stabil/deposisi "
                             "(skor 0); 0,03 ≤ θ &lt; 0,06 → transisi (skor 1); θ ≥ 0,06 → erosi aktif (skor 2).",
@@ -9432,8 +9477,8 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                         story.append(_fit_image(fp3_path, max_width=CONTENT_W*0.9))
                         story.append(Paragraph(
                             f"dengan h = kedalaman aliran = {seg['flow_depth']:.2f} m, M = koefisien erodibilitas "
-                            f"= {seg['erodibility_M']:.4f} kg/m²·s, τc = tegangan geser kritis = "
-                            f"{seg['tau_critical']:.3f} N/m². Apabila τ₀ ≤ τc, laju erosi E diasumsikan nol (zona "
+                            f"= {seg['erodibility_M']:.4f} kg/m²·s, tauC = tegangan geser kritis = "
+                            f"{seg['tau_critical']:.3f} N/m². Apabila tau0 ≤ tauC, laju erosi E diasumsikan nol (zona "
                             "stabil/deposisi). RiskIndex dinormalisasi terhadap persentil ke-99 hasil kali laju "
                             "erosi dengan flow accumulation ternormalisasi, lalu di-clip ke rentang [0,2].",
                             styles["Body"]
@@ -9489,7 +9534,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                                 f"Titik kritis pada koordinat X={crit['X']:.2f}, Y={crit['Y']:.2f}, "
                                 f"RL={crit['RL']:.2f} m, kemiringan lokal S={slope_at_crit:.4f} m/m, "
                                 f"kedalaman aliran h={h_for_crit:.2f} m. "
-                                f"τ₀ = {seg['rho_water']:.0f} × 9,81 × {h_for_crit:.2f} × {slope_at_crit:.4f} = "
+                                f"tau0 = {seg['rho_water']:.0f} × 9,81 × {h_for_crit:.2f} × {slope_at_crit:.4f} = "
                                 f"<b>{tau0_crit:.4f} N/m²</b>. "
                                 f"θ = {tau0_crit:.4f} / [({seg['rho_soil']:.0f} − {seg['rho_water']:.0f}) × 9,81 × "
                                 f"{d_m:.6f}] = <b>{theta_crit:.4f}</b>. "
@@ -9503,15 +9548,15 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                             tau_c = seg["tau_critical"]
                             if tau0_crit > tau_c:
                                 e_rate = seg["erodibility_M"] * (tau0_crit / tau_c - 1.0)
-                                e_text = f"<b>{e_rate:.5f} kg/m²·s</b> (aktif tererosi, τ₀ &gt; τc)"
+                                e_text = f"<b>{e_rate:.5f} kg/m²·s</b> (aktif tererosi, tau0 &gt; tauC)"
                             else:
-                                e_text = "0 kg/m²·s (τ₀ ≤ τc → zona stabil/deposisi)"
+                                e_text = "0 kg/m²·s (tau0 ≤ tauC → zona stabil/deposisi)"
                             story.append(Paragraph(
                                 f"Titik kritis pada koordinat X={crit['X']:.2f}, Y={crit['Y']:.2f}, "
                                 f"RL={crit['RL']:.2f} m, kemiringan lokal S={slope_at_crit:.4f} m/m, "
                                 f"kepadatan aliran={crit.get('FlowDensity', float('nan')):.3f}. "
-                                f"τ₀ = {seg['rho_water']:.0f} × 9,81 × {seg['flow_depth']:.2f} × "
-                                f"{slope_at_crit:.4f} = <b>{tau0_crit:.4f} N/m²</b> (τc = {tau_c:.3f} N/m²). "
+                                f"tau0 = {seg['rho_water']:.0f} × 9,81 × {seg['flow_depth']:.2f} × "
+                                f"{slope_at_crit:.4f} = <b>{tau0_crit:.4f} N/m²</b> (tauC = {tau_c:.3f} N/m²). "
                                 f"Laju erosi E = {e_text}. "
                                 f"Skor risiko akhir (setelah bobot flow accumulation & normalisasi) = "
                                 f"<b>{crit.get('RiskScore', float('nan')):.2f}</b>.",
@@ -9997,6 +10042,16 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                         )
                         continue
 
+                    if sid in _low_priority_skip:
+                        _docx_heading(docx_doc, f"{seg_i + 1}. SEGMEN: {seg['label'].upper()}", level=1)
+                        docx_doc.add_paragraph(
+                            f"Indeks risiko maksimum segmen ini ({seg['max_zone']:.2f}) relatif rendah "
+                            f"dibanding segmen lain, dan tidak menunjukkan area berpotensi erosi/sedimentasi "
+                            f"nyata (lihat Tabel 1 pada Ringkasan Eksekutif). Detail analisis penuh tidak "
+                            f"ditampilkan di sini untuk menjaga laporan tetap fokus pada segmen prioritas."
+                        )
+                        continue
+
                     _docx_heading(docx_doc, f"{seg_i + 1}. SEGMEN: {seg['label'].upper()}", level=1)
 
                     _docx_heading(docx_doc, "Data & Parameter Input", level=2)
@@ -10048,7 +10103,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                             if os.path.exists(_fpath):
                                 docx_doc.add_picture(_fpath, width=DocxCm(9))
                         docx_doc.add_paragraph(
-                            f"dengan τ₀ tegangan geser dasar aktual (N/m²), h = kedalaman aliran = "
+                            f"dengan tau0 tegangan geser dasar aktual (N/m²), h = kedalaman aliran = "
                             f"{seg['flow_depth']:.2f} m. Klasifikasi: θ < 0,03 → stabil/deposisi (skor 0); "
                             "0,03 ≤ θ < 0,06 → transisi (skor 1); θ ≥ 0,06 → erosi aktif (skor 2)."
                         )
@@ -10063,7 +10118,7 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                                 docx_doc.add_picture(_fpath, width=DocxCm(9))
                         docx_doc.add_paragraph(
                             f"dengan h = kedalaman aliran = {seg['flow_depth']:.2f} m, M = koefisien erodibilitas "
-                            f"= {seg['erodibility_M']:.4f} kg/m²·s, τc = tegangan geser kritis = "
+                            f"= {seg['erodibility_M']:.4f} kg/m²·s, tauC = tegangan geser kritis = "
                             f"{seg['tau_critical']:.3f} N/m²."
                         )
                     else:
@@ -10230,6 +10285,22 @@ Balas HANYA dalam format JSON valid seperti ini (tanpa markdown fence, tanpa tek
                     if seg.get("risk_index_chart_path") and os.path.exists(seg["risk_index_chart_path"]):
                         _docx_heading(docx_doc, "Sebaran Risk Index — 10 Titik Prioritas Mitigasi", level=2)
                         docx_doc.add_picture(seg["risk_index_chart_path"], width=DocxCm(16))
+
+                    # --- Numerical Modelling (3D) per-segmen (sama seperti PDF) ---
+                    _num_views_seg_docx = seg.get("numerical_modelling_views") or {}
+                    _view_labels_seg_docx = {
+                        "overall": "(a) Tampilan Keseluruhan (Overall)",
+                        "critical_point": "(b) Tampilan Mengarah ke Titik Paling Kritis",
+                        "alternate": "(c) Tampilan Sudut Lain",
+                    }
+                    if any(_num_views_seg_docx.get(k) for k in _view_labels_seg_docx):
+                        _docx_heading(docx_doc, f"Numerical Modelling (3D) — {seg['label']}", level=2)
+                        for _vk_seg, _vlabel_seg in _view_labels_seg_docx.items():
+                            _vp_seg = _num_views_seg_docx.get(_vk_seg)
+                            if _vp_seg and os.path.exists(_vp_seg):
+                                _p_vh_seg = docx_doc.add_paragraph()
+                                _p_vh_seg.add_run(_vlabel_seg).bold = True
+                                docx_doc.add_picture(_vp_seg, width=DocxCm(16))
 
                     if seg.get("risk_map_2d_path") and os.path.exists(seg["risk_map_2d_path"]):
                         _docx_heading(docx_doc, "2D Risk Map", level=2)
@@ -12161,7 +12232,7 @@ with tab4:
             st.markdown("#### " + _t("Mode B — Back-Calculation Parameter", "Mode B — Back-Calculation Parameter"))
             st.caption(
                 "Masukkan angka keparahan hasil ukur lapangan (kedalaman scour atau volume "
-                "sedimentasi), app menghitung mundur parameter efektif (τ efektif) yang DIPERLUKAN "
+                "sedimentasi), app menghitung mundur parameter efektif (tau efektif) yang DIPERLUKAN "
                 "untuk menghasilkan kerusakan sebesar itu, lalu dibandingkan ke asumsi desain awal."
             )
 
@@ -12172,7 +12243,7 @@ with tab4:
             st.markdown("**" + _t("Asumsi desain awal (dari hasil RUN ANALYSIS segmen ini):", "Initial design assumptions (from this segment's RUN ANALYSIS results):") + "**")
             _c1, _c2, _c3 = st.columns(3)
             _metric_card("Erodibility M (desain)", f"{_M_design:.5f}" if _M_design else "N/A", container=_c1)
-            _metric_card("τ critical (desain)", f"{_tau_c_design:.2f} Pa" if _tau_c_design else "N/A", container=_c2)
+            _metric_card("tau critical (desain)", f"{_tau_c_design:.2f} Pa" if _tau_c_design else "N/A", container=_c2)
             _metric_card("Grain size (sampling)", f"{_grain_b:.3f} mm" if _grain_b else "N/A", container=_c3)
 
             st.markdown("---")
@@ -12206,7 +12277,7 @@ with tab4:
                     )
                 elif _M_design is None or _tau_c_design is None:
                     st.error(
-                        "Data Erodibility M dan/atau τ critical desain untuk segmen ini belum "
+                        "Data Erodibility M dan/atau tau critical desain untuk segmen ini belum "
                         "tersimpan (kosong/N/A pada kartu di atas) — jalankan ulang RUN ANALYSIS "
                         "di tab 'Erosion Mapping' untuk segmen ini terlebih dahulu, baru kembali "
                         "ke Mode B."
@@ -12232,12 +12303,12 @@ with tab4:
                     _ratio_tau = _tau_eff_needed / _tau_c_design if _tau_c_design > 0 else None
 
                     st.markdown(
-                        f"Berdasarkan formula erosi *excess shear-stress* `E = M × (τ - τc)` dan "
-                        f"asumsi M desain (**{_M_design:.5f}**), τ efektif yang **DIPERLUKAN** di "
+                        f"Berdasarkan formula erosi *excess shear-stress* `E = M × (tau - tauC)` dan "
+                        f"asumsi M desain (**{_M_design:.5f}**), tau efektif yang **DIPERLUKAN** di "
                         f"lapangan untuk menghasilkan erosi sedalam ini adalah sekitar "
                         f"**{_tau_eff_needed:.2f} Pa**"
                         + (
-                            f" — sekitar **{_ratio_tau:.1f}x** lebih besar dari τ critical desain "
+                            f" — sekitar **{_ratio_tau:.1f}x** lebih besar dari tau critical desain "
                             f"({_tau_c_design:.2f} Pa)."
                             if _ratio_tau else "."
                         )
@@ -12245,14 +12316,14 @@ with tab4:
 
                     if _ratio_tau and _ratio_tau > 1.5:
                         _ui_warning(
-                            "τ efektif lapangan jauh melebihi asumsi desain — indikasi kuat kondisi "
+                            "tau efektif lapangan jauh melebihi asumsi desain — indikasi kuat kondisi "
                             "hidraulik aktual (curah hujan/debit aktual) melampaui asumsi desain, "
                             "bukan semata kesalahan desain awal. Cek juga curah hujan aktual pada "
                             "tanggal kejadian di Mode A untuk konfirmasi silang."
                         )
                     elif _ratio_tau:
                         _ui_info(
-                            "τ efektif lapangan relatif dekat dengan asumsi desain — kerusakan yang "
+                            "tau efektif lapangan relatif dekat dengan asumsi desain — kerusakan yang "
                             "terjadi masih dalam rentang wajar dari perhitungan awal."
                         )
 
