@@ -308,7 +308,7 @@ _PROJECT_EXCLUDE_KEYS = {
     "save_project_name_input", "save_project_note_input",
     # uploader .eroproj itu sendiri & path file sementara download: BUKAN data project
     # (kalau ikut, file project lama tertanam di dalam project baru -> ukuran membengkak).
-    "upload_project_file_input", "download_project_file_path",
+    "upload_project_file_input", "download_project_file_path", "_project_open_notice",
     "download_project_file_skipped",
     # bytes file project yang sedang disiapkan utk download -- WAJIB di-exclude, kalau tidak
     # snapshot berikutnya menyimpan salinan file project sebelumnya di dalam dirinya sendiri.
@@ -561,13 +561,41 @@ _WIDGET_STATE_KEY_PREFIXES = ("xs_draw_map", "ba_click_map", "flow_click_map")
 def _is_widget_event_key(_k, _v=None):
     if _k.startswith(_WIDGET_STATE_KEY_PREFIXES) or "_click_map" in _k:
         return True
-    if type(_v).__name__ == "_PlainState" or type(_v).__module__.startswith("streamlit"):
+    # Objek internal Streamlit (mis. state seleksi chart) tidak boleh masuk project -- KECUALI file
+    # upload (UploadedFile juga bertipe streamlit.*, tapi isinya DXF/orthophoto yang HARUS disimpan).
+    if type(_v).__name__ == "_PlainState":
+        return True
+    if type(_v).__module__.startswith("streamlit") and not _is_uploaded_file_like(_v):
         return True
     # cadangan: bentuk state seleksi Plotly/dataframe ({"selection": {"points": [...], "point_indices": [...]}})
     if isinstance(_v, dict) and isinstance(_v.get("selection"), dict) and (
             "point_indices" in _v["selection"] or "points" in _v["selection"] or "rows" in _v["selection"]):
         return True
     return False
+
+
+def _set_project_open_notice(name):
+    """Simpan ringkasan 'project berhasil dibuka' utk ditampilkan SEKALI di halaman utama setelah
+    rerun (pesan st.success yang dipanggil tepat sebelum st.rerun() tidak pernah sempat terlihat)."""
+    _n_seg = len(st.session_state.get("segments", []) or [])
+    _files = []
+    for _k in st.session_state.keys():
+        if isinstance(_k, str) and _k.endswith("__injected"):
+            _inj = st.session_state.get(_k)
+            if isinstance(_inj, dict):
+                _files.append(f"{_inj.get('name', 'file')} ({len(_inj.get('data', b'')) / 1024:.0f} KB)")
+    _done = bool(st.session_state.get("analysis_done", False))
+    _msg = _t(f"✅ Project '{name}' berhasil dibuka — {_n_seg} segmen", f"✅ Project '{name}' opened — {_n_seg} segment(s)")
+    if _files:
+        _msg += _t(" · file dimuat: ", " · files loaded: ") + ", ".join(_files)
+    else:
+        _msg += _t(" · TIDAK ada file DXF/orthophoto di dalam project ini (upload ulang bila perlu)",
+                   " · NO DXF/orthophoto files inside this project (re-upload if needed)")
+    _msg += _t(" · hasil analisis ikut dipulihkan." if _done else
+               " · project berisi input saja: tekan RUN ANALYSIS untuk menghitung ulang.",
+               " · analysis results restored." if _done else
+               " · project contains inputs only: press RUN ANALYSIS to recompute.")
+    st.session_state["_project_open_notice"] = _msg
 
 
 def _restore_project_state(snapshot):
@@ -1964,8 +1992,16 @@ def _class_refs_short(keys):
     return ", ".join(REFERENCE_LIBRARY[k][1] for k in keys if k in REFERENCE_LIBRARY)
 
 
+# Keterangan "📚 Dasar klasifikasi" di bawah hasil klasifikasi DIMATIKAN (terlalu ramai di layar).
+# Isi registri tetap tersedia lewat tombol 📚 di sidebar dan tabel di laporan. Ubah ke True bila ingin
+# menampilkan keterangan inline lagi.
+SHOW_CLASSIFICATION_BASIS = False
+
+
 def _class_basis_caption(key, detail=False):
     """Satu baris 'Dasar klasifikasi' di bawah hasil klasifikasi. detail=True menambah catatan/keterbatasan."""
+    if not SHOW_CLASSIFICATION_BASIS:
+        return
     _e = CLASSIFICATION_REGISTRY.get(key)
     if not _e:
         return
@@ -2832,10 +2868,11 @@ with st.sidebar:
                     _restore_project_state(_up_payload["state"])
                     st.session_state["active_project_name"] = _up_payload.get("meta", {}).get("name", "Untitled")
                     st.session_state.pop("active_project_slug", None)
-                    st.success(_t(
-                        "Project berhasil dimuat dari file.",
-                        "Project successfully loaded from file.",
-                    ))
+                    # pindah ke halaman analisis (sebelumnya tetap di menu project sehingga
+                    # tampak "tidak terjadi apa-apa") + tampilkan ringkasan setelah rerun
+                    st.session_state["home_page"] = False
+                    st.session_state["show_project_browser"] = False
+                    _set_project_open_notice(st.session_state["active_project_name"])
                     st.rerun()
                 except Exception as _e_up_proj:
                     st.error(_t(f"Gagal memuat file project: {_e_up_proj}",
@@ -2875,9 +2912,6 @@ with st.sidebar:
     else:
         st.caption("Belum ada analisis dijalankan pada sesi ini.")
 
-    if _seg_results_side:
-        st.caption(_t("Level di atas memakai ambang internal (TARP) — bukan dari regulasi.",
-                      "The level above uses internal (TARP) thresholds — not from a regulation."))
     if st.button(_t("📚 Dasar Klasifikasi & Referensi", "📚 Classification Basis & References"),
                  key="open_class_registry_btn", width="stretch"):
         _classification_registry_dialog()
@@ -3552,6 +3586,7 @@ if st.session_state.home_page:
                                 st.session_state["active_project_slug"] = _meta_loaded["slug"]
                                 st.session_state["home_page"] = False
                                 st.session_state["show_project_browser"] = False
+                                _set_project_open_notice(_meta_loaded["name"])
                                 st.rerun()
                             except Exception as _e_load:
                                 st.error(_t(f"Gagal membuka project: {_e_load}", f"Failed to open project: {_e_load}"))
@@ -3963,6 +3998,14 @@ if not _is_admin:
         </style>""",
         unsafe_allow_html=True,
     )
+
+_po_msg = st.session_state.pop("_project_open_notice", None)
+if _po_msg:
+    st.success(_po_msg)
+    try:
+        st.toast(_po_msg[:120])
+    except Exception:
+        pass
 
 _tab_labels = [
     _t("Erosion Mapping", "Erosion Mapping"),
