@@ -353,14 +353,34 @@ def _project_dump(payload, fileobj):
         pickle.dump(payload, _gz, protocol=pickle.HIGHEST_PROTOCOL)
 
 
+class _PlainState(dict):
+    """Pengganti objek state internal Streamlit (mis. state seleksi chart klik-peta) yang READ-ONLY.
+    Project LAMA yang kadung menyimpan objek itu membuat pickle.load gagal dengan
+    "Widget state is read-only ..." karena pickle membangun ulang dict lewat __setitem__. Dengan
+    Unpickler di bawah, semua kelas dari modul streamlit.* dibaca sebagai dict biasa."""
+
+
+class _ProjectUnpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        if module.startswith("streamlit"):
+            return _PlainState
+        return super().find_class(module, name)
+
+
 def _project_load(fileobj):
-    """Baca payload project; otomatis mendeteksi gzip (baru) atau pickle polos (file lama)."""
-    _magic = fileobj.read(2)
+    """Baca payload project; otomatis mendeteksi gzip (baru) atau pickle polos (file lama).
+    Melempar ValueError berpesan jelas kalau isinya bukan file project (mis. halaman HTML hasil
+    download yang gagal)."""
+    _head = fileobj.read(64)
     fileobj.seek(0)
-    if _magic == b"\x1f\x8b":
+    if _head.lstrip()[:1] == b"<":
+        raise ValueError(
+            "Isi file adalah halaman web (HTML), bukan file project -- kemungkinan proses download tadi "
+            "gagal. Unduh ulang file project dari aplikasi (pakai tombol Download atau cara alternatif).")
+    if _head[:2] == b"\x1f\x8b":
         with gzip.GzipFile(fileobj=fileobj, mode="rb") as _gz:
-            return pickle.load(_gz)
-    return pickle.load(fileobj)
+            return _ProjectUnpickler(_gz).load()
+    return _ProjectUnpickler(fileobj).load()
 
 
 def _project_user_dir(username):
@@ -476,7 +496,7 @@ def _collect_project_state(light=False, inputs_only=False):
             continue
         if inputs_only and (_k in _PROJECT_RESULT_KEYS or _k.startswith(_PROJECT_RESULT_PREFIXES)):
             continue
-        if _k.startswith("xs_draw_map") or _k.startswith("ba_click_map") or "FormSubmitter" in _k:
+        if _is_widget_event_key(_k, _v) or "FormSubmitter" in _k:
             # key internal widget Plotly click-select / form -- isinya event,
             # bukan data project, dan seringkali tidak bisa di-pickle.
             continue
@@ -531,6 +551,25 @@ def _collect_project_state(light=False, inputs_only=False):
     return _snapshot, _skipped
 
 
+# Key widget st.plotly_chart(on_select=...) / peta klik: isinya STATE EVENT seleksi, bukan data project.
+# Streamlit MELARANG key ini di-set lewat session_state (StreamlitValueAssignmentNotAllowedError begitu
+# chart-nya dirender) -- persis error "flow_click_map_seg_1 cannot be set using st.session_state" saat
+# buka project. Karena itu TIDAK BOLEH disimpan maupun dipulihkan.
+_WIDGET_STATE_KEY_PREFIXES = ("xs_draw_map", "ba_click_map", "flow_click_map")
+
+
+def _is_widget_event_key(_k, _v=None):
+    if _k.startswith(_WIDGET_STATE_KEY_PREFIXES) or "_click_map" in _k:
+        return True
+    if type(_v).__name__ == "_PlainState" or type(_v).__module__.startswith("streamlit"):
+        return True
+    # cadangan: bentuk state seleksi Plotly/dataframe ({"selection": {"points": [...], "point_indices": [...]}})
+    if isinstance(_v, dict) and isinstance(_v.get("selection"), dict) and (
+            "point_indices" in _v["selection"] or "points" in _v["selection"] or "rows" in _v["selection"]):
+        return True
+    return False
+
+
 def _restore_project_state(snapshot):
     """Pulihkan snapshot session_state sebuah project.
 
@@ -546,6 +585,9 @@ def _restore_project_state(snapshot):
     ditolak, alih-alih membuat SELURUH project gagal dibuka gara-gara satu
     key yang tidak relevan."""
     for _k, _v in snapshot.items():
+        if _is_widget_event_key(_k, _v):
+            # project LAMA yang kadung menyimpan key state chart klik-peta: dilewati di sini
+            continue
         if _v is None:
             # PERBAIKAN BUG: project lama (disimpan sebelum perbaikan ini) bisa saja
             # masih membawa key upload opsional bernilai None (mis. orthophoto yang
@@ -1633,6 +1675,389 @@ def _cover_toggle_cb(sid):
 
 
 
+
+# =====================================================================
+# REGISTRI DASAR KLASIFIKASI & REFERENSI  (satu sumber kebenaran)
+# =====================================================================
+# Setiap klasifikasi/ambang di aplikasi dicatat di sini: aturan/ambangnya, JENIS dasarnya
+# (regulasi / literatur / campuran / internal) dan referensinya. Tujuannya jujur: ambang yang
+# TIDAK punya dasar regulasi ditandai "internal (indikatif)", bukan dipoles seolah-olah regulasi.
+# Referensi bertanda `checked=True` sudah diperiksa keberadaannya (metadata) pada 20 Sep 2026;
+# isi pasal/tabel/halaman TETAP harus dibaca dari dokumen resmi sebelum dikutip di makalah/laporan.
+
+REFERENCE_LIBRARY = {
+    "kepmen1827": ("regulasi", "Kepmen ESDM 1827 K/30/MEM/2018",
+                   "Keputusan Menteri ESDM No. 1827 K/30/MEM/2018 tentang Pedoman Pelaksanaan Kaidah Teknik "
+                   "Pertambangan yang Baik (memuat kriteria FK/PK lereng tambang; lampiran lingkungan hidup; "
+                   "lampiran reklamasi & pascatambang).", True),
+    "permenpu12": ("regulasi", "Permen PU 12/PRT/M/2014",
+                   "Peraturan Menteri Pekerjaan Umum No. 12/PRT/M/2014 tentang Penyelenggaraan Sistem Drainase "
+                   "Perkotaan (metode Rasional, rumus Mononobe, koefisien limpasan menurut tata guna lahan, kala "
+                   "ulang menurut tipologi kota & luas tangkapan).", True),
+    "sni3424": ("standar", "SNI 03-3424-1994",
+                "SNI 03-3424-1994, Tata Cara Perencanaan Drainase Permukaan Jalan. Badan Standardisasi Nasional / "
+                "Ditjen Bina Marga.", True),
+    "hec15": ("literatur", "FHWA HEC-15 (2005)",
+              "FHWA (2005). Design of Roadside Channels with Flexible Linings, Hydraulic Engineering Circular No. 15, "
+              "3rd ed., FHWA-NHI-05-114 (metode tractive force: lining memadai bila tegangan geser izin >= "
+              "tegangan geser terapan).", True),
+    "buffington1997": ("literatur", "Buffington & Montgomery (1997)",
+                       "Buffington, J.M. & Montgomery, D.R. (1997). A systematic analysis of eight decades of incipient "
+                       "motion studies, with special reference to gravel-bedded rivers. Water Resources Research, "
+                       "33(8), 1993-2029.", True),
+    "read_stacey": ("literatur", "Read & Stacey (2009)",
+                    "Read, J. & Stacey, P. (eds.) (2009). Guidelines for Open Pit Slope Design. CSIRO Publishing, "
+                    "Collingwood (konsep TARP: respons yang ditetapkan sebelumnya saat ambang terlampaui).", True),
+    "hanson_simon": ("literatur", "Hanson & Simon (2001)",
+                     "Hanson, G.J. & Simon, A. (2001). Erodibility of cohesive streambeds in the loess area of the "
+                     "midwestern USA. Hydrological Processes, 15, 23-38.", True),
+    "hjulstrom1935": ("literatur", "Hjulstrom (1935)",
+                      "Hjulstrom, F. (1935). Studies of the morphological activity of rivers as illustrated by the "
+                      "River Fyris. Bulletin of the Geological Institute of Uppsala, 25, 221-527.", False),
+    "shields1936": ("literatur", "Shields (1936)",
+                    "Shields, A. (1936). Anwendung der Aehnlichkeitsmechanik und der Turbulenzforschung auf die "
+                    "Geschiebebewegung. Mitteilungen der Preussischen Versuchsanstalt fuer Wasserbau und Schiffbau, "
+                    "Berlin.", False),
+    "partheniades1965": ("literatur", "Partheniades (1965)",
+                         "Partheniades, E. (1965). Erosion and deposition of cohesive soils. Journal of the Hydraulics "
+                         "Division, ASCE, 91(1), 105-139.", False),
+    "mpm1948": ("literatur", "Meyer-Peter & Muller (1948)",
+                "Meyer-Peter, E. & Muller, R. (1948). Formulas for bed-load transport. Proc. 2nd Meeting IAHR, "
+                "Stockholm, 39-64.", False),
+    "chow1959": ("literatur", "Chow (1959)",
+                 "Chow, V.T. (1959). Open-Channel Hydraulics. McGraw-Hill, New York.", False),
+    "suripin2004": ("literatur", "Suripin (2004)",
+                    "Suripin (2004). Sistem Drainase Perkotaan yang Berkelanjutan. Andi, Yogyakarta.", False),
+    "landis_koch1977": ("literatur", "Landis & Koch (1977)",
+                        "Landis, J.R. & Koch, G.G. (1977). The measurement of observer agreement for categorical data. "
+                        "Biometrics, 33(1), 159-174.", False),
+    "cohen1960": ("literatur", "Cohen (1960)",
+                  "Cohen, J. (1960). A coefficient of agreement for nominal scales. Educational and Psychological "
+                  "Measurement, 20(1), 37-46.", False),
+    "hazen1892": ("literatur", "Hazen (1892)",
+                  "Hazen, A. (1892). Some physical properties of sands and gravels, with special reference to their use "
+                  "in filtration. 24th Annual Report, Massachusetts State Board of Health, 539-556.", False),
+}
+
+_REF_KIND_ICON = {"regulasi": "🏛", "standar": "📐", "literatur": "📖"}
+
+_BASIS_LABEL = {
+    "regulasi": ("🏛 Regulasi", "🏛 Regulation"),
+    "literatur": ("📖 Literatur / standar teknis", "📖 Literature / technical standard"),
+    "campuran": ("📖 Literatur (bentuk) + ⚙️ ambang internal", "📖 Literature (form) + ⚙️ internal thresholds"),
+    "internal": ("⚙️ Ambang internal (indikatif) — bukan regulasi", "⚙️ Internal threshold (indicative) — not a regulation"),
+}
+
+CLASSIFICATION_REGISTRY = {
+    "risk_index_tarp": {
+        "title": ("Level risiko erosi & TARP (Hijau / Kuning / Oranye / Merah)", "Erosion risk level & TARP (Green / Yellow / Orange / Red)"),
+        "where": ("Peta risiko, Ringkasan Risiko (sidebar), tabel TARP, laporan", "Risk map, Risk Summary (sidebar), TARP table, report"),
+        "rule": "Indeks 0-2: < 0,5 Hijau (Normal); 0,5-1,0 Kuning (Waspada); 1,0-2,0 Oranye (Siaga); > 2,0 Merah (Kritis). "
+                "Area potensi erosi = luas sel berindeks > 1,0. Validasi lapangan: < 0,5 Rendah; 0,5-1,0 Sedang; >= 1,0 Tinggi/Ekstrem.",
+        "basis": "internal", "refs": ["read_stacey"],
+        "caveat": ("Kerangka TARP (respons yang ditetapkan sebelumnya saat ambang terlampaui) mengacu Read & Stacey (2009), tetapi "
+                   "angka 0,5 / 1,0 / 2,0 adalah ambang internal aplikasi. Tidak ada regulasi yang menetapkan ambang indeks erosi ini: "
+                   "Kepmen ESDM 1827 K/30/MEM/2018 memberi kriteria FK/PK untuk kestabilan lereng, bukan indeks erosi permukaan. "
+                   "Indeks tak berdimensi ini juga dihitung berbeda pada tiap metode (Hjulstrom/Shields/Partheniades), dan ambang TARP "
+                   "lazimnya ditetapkan per lokasi. Kalibrasi dengan validasi lapangan (tab Back Analysis) dan selaraskan dengan "
+                   "standar/TARP perusahaan sebelum dipakai untuk keputusan.",
+                   "The TARP framework (pre-defined responses when thresholds are exceeded) follows Read & Stacey (2009), but the 0.5 / 1.0 / 2.0 "
+                   "values are internal thresholds of this app. No regulation defines these erosion-index thresholds: Kepmen ESDM 1827 "
+                   "K/30/MEM/2018 gives FS/PoF criteria for slope stability, not a surface-erosion index. The dimensionless index is also "
+                   "computed differently by each method, and TARP thresholds are normally set per site. Calibrate with field validation "
+                   "(Back Analysis tab) and align with company standards/TARP before using it for decisions."),
+    },
+    "rule_status": {
+        "title": ("Status rekomendasi (Layak / Bersyarat / Reject; Stabil / Perbaikan Terjadwal / Kritis)", "Recommendation status (Feasible / Conditional / Reject; Stable / Scheduled repair / Critical)"),
+        "where": ("Kartu status hasil analisis, Ringkasan Eksekutif laporan", "Result status card, report executive summary"),
+        "rule": "Skor = jumlah indikator buruk: luas erosi > 35%; indeks maks >= 1,8; titik overflow > 10. Skor >= 2 → REJECT / KRITIS; "
+                "skor 1 → BERSYARAT / PERBAIKAN TERJADWAL; skor 0 → LAYAK / STABIL. Hanya catatan (bukan penentu status): luas erosi > 15%, "
+                "indeks maks >= 1,2, konvergensi > 10 titik, sedimentasi > 25% luas.",
+        "basis": "internal", "refs": [],
+        "caveat": ("Aturan pakar/heuristik aplikasi, bukan keputusan regulasi. Status ini tidak menggantikan kajian teknis, persetujuan "
+                   "KTT/PTL, atau evaluasi inspektur tambang. Ambang perlu disesuaikan dengan standar perusahaan.",
+                   "An in-app expert/heuristic rule, not a regulatory decision. The status does not replace technical studies, chief mining "
+                   "engineer approval or mine-inspector evaluation. Adjust thresholds to company standards."),
+    },
+    "hjulstrom_zone": {
+        "title": ("Klasifikasi Hjulstrom (Deposisi / Transisi / Erosi)", "Hjulstrom classification (Deposition / Transition / Erosion)"),
+        "where": ("Peta risiko metode Hjulstrom", "Risk map, Hjulstrom method"),
+        "rule": "v_erosi = 0,1·d^-0,4 dan v_deposisi = 0,01·d^-0,2 (d dalam m); skor = (v - v_dep)/(v_ero - v_dep); indeks = 2 × skor "
+                "(dibatasi 0-2): 0 Deposisi, 1 Transisi, 2 Erosi.",
+        "basis": "campuran", "refs": ["hjulstrom1935"],
+        "caveat": ("Konsep mengacu diagram Hjulstrom (1935), tetapi kedua kurva di sini adalah fungsi pangkat sederhana buatan aplikasi, "
+                   "bukan digitasi kurva asli. Pada fungsi ini kecepatan erosi TURUN saat diameter membesar, sedangkan pada kurva Hjulstrom "
+                   "asli kecepatan erosi justru naik untuk butir kasar (di atas sekitar 0,5 mm). Gunakan hanya sebagai indikator relatif "
+                   "untuk tanah halus; untuk pasir kasar/kerikil pilih metode Shields, atau ganti dengan digitasi kurva Hjulstrom.",
+                   "The concept follows the Hjulstrom (1935) diagram, but both curves here are simple power laws made for the app, not a "
+                   "digitisation of the original curves. In this function the erosion velocity DECREASES as grain diameter grows, whereas in "
+                   "the original Hjulstrom curve it increases for coarse grains (above about 0.5 mm). Use only as a relative indicator for "
+                   "fine soils; for coarse sand/gravel choose Shields, or replace with a digitised Hjulstrom curve."),
+    },
+    "shields_theta": {
+        "title": ("Klasifikasi Shields (Stabil / Awal gerak / Transport)", "Shields classification (Stable / Incipient motion / Transport)"),
+        "where": ("Peta risiko metode Shields", "Risk map, Shields method"),
+        "rule": "θ = τ0 / ((ρs − ρw)·g·D50), τ0 = ρw·g·h·S. θ < 0,03 → Stabil (0); 0,03-0,06 → Awal gerak (1); > 0,06 → Transport (2).",
+        "basis": "campuran", "refs": ["shields1936", "buffington1997", "mpm1948"],
+        "caveat": ("Parameter Shields mengacu Shields (1936). Nilai kritisnya tidak universal: Buffington & Montgomery (1997) melaporkan rentang "
+                   "0,030-0,073 (pengamatan visual) dan 0,052-0,086 (acuan laju angkut) untuk sungai berkerikil; Meyer-Peter & Muller memakai "
+                   "0,047. Batas 0,03 dan 0,06 di aplikasi adalah pilihan internal di dalam rentang tersebut. Berlaku untuk butir non-kohesif "
+                   "(pasir-kerikil), bukan tanah kohesif atau permukaan bervegetasi. Catatan: slope pada analisis dihitung per sel (m/sel, belum "
+                   "dibagi jarak sel), sehingga τ0 absolut belum dalam Pa sebenarnya.",
+                   "Shields parameter follows Shields (1936). The critical value is not universal: Buffington & Montgomery (1997) report ranges "
+                   "of 0.030-0.073 (visual observation) and 0.052-0.086 (transport-rate reference) for gravel-bed rivers; Meyer-Peter & Muller "
+                   "use 0.047. The 0.03 and 0.06 limits in the app are an internal choice within that range. Valid for non-cohesive grains "
+                   "(sand-gravel), not for cohesive soils or vegetated surfaces. Note: the analysis slope is per cell (m/cell, not divided by "
+                   "cell size), so absolute τ0 is not yet in true Pa."),
+    },
+    "partheniades_index": {
+        "title": ("Indeks erosi Partheniades + Flow Accumulation", "Partheniades + Flow Accumulation erosion index"),
+        "where": ("Peta risiko metode Partheniades", "Risk map, Partheniades method"),
+        "rule": "E = M·(τ/τc − 1) bila τ > τc, τ = ρw·g·h·S; indeks = E × faktor aliran (flow accumulation), dinormalisasi persentil-99 lalu dibatasi 0-2.",
+        "basis": "campuran", "refs": ["partheniades1965"],
+        "caveat": ("Bentuk laju erosi mengacu Partheniades (1965). Normalisasi persentil-99 dan pembobotan flow accumulation adalah rancangan "
+                   "internal, sehingga indeks bersifat RELATIF (bukan laju erosi absolut). M dan τc perlu dikalibrasi (mis. uji jet/flume). "
+                   "Slope per sel (m/sel) — lihat catatan Shields.",
+                   "The erosion-rate form follows Partheniades (1965). The 99th-percentile normalisation and flow-accumulation weighting are "
+                   "internal design choices, so the index is RELATIVE (not an absolute erosion rate). M and τc need calibration (e.g. jet/flume "
+                   "tests). Per-cell slope (m/cell) — see the Shields note."),
+    },
+    "froude": {
+        "title": ("Regime aliran (Froude)", "Flow regime (Froude)"),
+        "where": ("Hasil Rational + Manning", "Rational + Manning results"),
+        "rule": "Fr = V / √(g·D_h); Fr > 1 super-kritis; Fr < 1 sub-kritis.",
+        "basis": "literatur", "refs": ["chow1959"],
+        "caveat": ("Definisi hidrolika baku, bukan ambang regulasi.", "Standard hydraulic definition, not a regulatory threshold."),
+    },
+    "freeboard": {
+        "title": ("Kecukupan freeboard saluran (Cukup / Kurang)", "Channel freeboard adequacy (Adequate / Insufficient)"),
+        "where": ("Hasil Rational + Manning, rekomendasi, laporan", "Rational + Manning results, recommendations, report"),
+        "rule": "Freeboard minimum = maks(0,30 m ; 0,20 × h normal). Cukup bila freeboard >= minimum.",
+        "basis": "internal", "refs": [],
+        "caveat": ("Angka 0,30 m dan 0,20 × h adalah aturan praktis internal; belum dicocokkan dengan standar tertentu. Ganti dengan "
+                   "kriteria desain proyek/standar yang berlaku.",
+                   "The 0.30 m and 0.20 × h values are an internal rule of thumb, not matched to a specific standard. Replace with the "
+                   "project design criterion/applicable standard."),
+    },
+    "rational_mononobe": {
+        "title": ("Debit rencana (Rasional + Mononobe) & Manning", "Design discharge (Rational + Mononobe) & Manning"),
+        "where": ("Hidrologi & Hidrolika (opsional)", "Hydrology & Hydraulics (optional)"),
+        "rule": "Q dari metode Rasional; intensitas I dari rumus Mononobe (R24, tc); V dan h dari persamaan Manning pada penampang trapesium.",
+        "basis": "literatur", "refs": ["permenpu12", "chow1959", "suripin2004"],
+        "caveat": ("Permen PU 12/PRT/M/2014 menyebut metode Rasional, rumus Mononobe, dan koefisien limpasan menurut tata guna lahan, tetapi "
+                   "ruang lingkupnya drainase perkotaan; pemakaian pada tambang bersifat analogi praktik umum, bukan kewajiban regulasi "
+                   "pertambangan. Kala ulang hujan desain mengikuti kebijakan/desain proyek.",
+                   "Permen PU 12/PRT/M/2014 names the Rational method, the Mononobe formula and land-use-based runoff coefficients, but its scope is "
+                   "urban drainage; using it for mines is an analogy to common practice, not a mining-regulation requirement. The design "
+                   "rainfall return period follows project policy/design."),
+    },
+    "runoff_c_manning": {
+        "title": ("Pilihan koefisien limpasan C & kekasaran Manning n", "Runoff coefficient C & Manning n presets"),
+        "where": ("Input Hidrologi & Hidrolika", "Hydrology & Hydraulics inputs"),
+        "rule": "C: 0,85 / 0,70 / 0,55 / 0,35. n: 0,030 / 0,035 / 0,022 / 0,013 (pilihan preset).",
+        "basis": "internal", "refs": ["permenpu12", "sni3424", "suripin2004", "chow1959"],
+        "caveat": ("Preset adalah nilai tipikal internal, khususnya 'lahan terganggu tambang' yang tidak punya nilai baku. Untuk laporan resmi, "
+                   "tetapkan C dari tabel tata guna lahan pada acuan (Permen PU 12/2014 menyatakan C ditentukan menurut tata guna lahan; lihat juga "
+                   "SNI 03-3424-1994 dan Suripin 2004 — angka per angka belum dicocokkan) dan n dari tabel Chow (1959) atau data lapangan; gunakan "
+                   "opsi Custom dan catat sumbernya.",
+                   "Presets are internal typical values, especially 'mine-disturbed land', which has no standard value. For formal reports, set C "
+                   "from the land-use tables in the references (Permen PU 12/2014 states C is set by land use; see also SNI 03-3424-1994 and Suripin "
+                   "2004 — values not matched one by one) and n from Chow (1959) tables or field data; use Custom and record the source."),
+    },
+    "kappa": {
+        "title": ("Interpretasi Cohen's Kappa (validasi lapangan)", "Cohen's Kappa interpretation (field validation)"),
+        "where": ("Back Analysis — Validasi Lapangan", "Back Analysis — Field Validation"),
+        "rule": "κ < 0 Poor; < 0,20 Slight; < 0,40 Fair; < 0,60 Moderate; < 0,80 Substantial; >= 0,80 Almost perfect.",
+        "basis": "literatur", "refs": ["landis_koch1977", "cohen1960"],
+        "caveat": ("Pita interpretasi mengikuti Landis & Koch (1977). Batas 'kesesuaian lemah' κ < 0,60 pada catatan aplikasi adalah pilihan internal.",
+                   "The interpretation bands follow Landis & Koch (1977). The 'weak agreement' limit κ < 0.60 in the app note is an internal choice."),
+    },
+    "recommend_tiers": {
+        "title": ("Urutan tingkat rekomendasi (Geometry → Hydraulic → Surface → Sediment → Monitoring)", "Recommendation tier order (Geometry → Hydraulic → Surface → Sediment → Monitoring)"),
+        "where": ("Rekomendasi bertingkat, laporan", "Tiered recommendations, report"),
+        "rule": "Kendalikan bentuk/energi aliran dulu (Geometry, Hydraulic), lalu proteksi permukaan bila masih perlu, lalu sedimen, dan monitoring sebagai penutup.",
+        "basis": "internal", "refs": ["hec15"],
+        "caveat": ("Kerangka internal aplikasi. HEC-15 hanya menjadi acuan pemilihan lining (tegangan geser izin >= terapan) dan tidak menetapkan "
+                   "urutan lima tingkat ini.",
+                   "An internal framework of the app. HEC-15 is only a reference for lining selection (permissible >= applied shear stress) and does "
+                   "not prescribe this five-tier order."),
+    },
+    "cover_verdict": {
+        "title": ("Ketahanan erosi lapisan atas cover (Aman / Marginal / Perlu Perkuatan)", "Cover top-layer erosion resistance (Safe / Marginal / Needs reinforcement)"),
+        "where": ("Tab Surface/Cover Slope", "Surface/Cover Slope tab"),
+        "rule": "τ_perlu = 3 + 30 × tan(sudut slope) Pa. AMAN bila τc lapisan atas >= 1,3 × τ_perlu; MARGINAL bila >= τ_perlu; selain itu PERLU PERKUATAN.",
+        "basis": "internal", "refs": ["hec15"],
+        "caveat": ("Bentuk pembandingannya (tegangan geser izin >= terapan) sejalan dengan metode tractive force HEC-15, tetapi angka 3, 30, dan 1,3 "
+                   "adalah heuristik internal — bukan dari HEC-15 atau regulasi — dan τ_perlu belum dihitung dari kedalaman/debit aliran. Untuk kajian "
+                   "formal, hitung tegangan geser terapan dari hidrolika desain dan bandingkan dengan τ izin material yang terverifikasi (HEC-15 / uji "
+                   "lab) memakai faktor keamanan yang ditetapkan proyek.",
+                   "The comparison form (permissible >= applied shear) is consistent with the HEC-15 tractive-force method, but the numbers 3, 30 and "
+                   "1.3 are internal heuristics — not from HEC-15 or a regulation — and τ_required is not derived from flow depth/discharge. For a formal "
+                   "study, compute the applied shear from the design hydraulics and compare with verified permissible τ of the material (HEC-15 / lab "
+                   "tests) using the project's safety factor."),
+    },
+    "cover_presets": {
+        "title": ("Properti preset material cover (k dan τc)", "Cover material preset properties (k and τc)"),
+        "where": ("Tab Surface/Cover Slope — layer builder", "Surface/Cover Slope tab — layer builder"),
+        "rule": "τc: Vegetasi/Topsoil 25 Pa; Mulsa 15; Growth Medium 8; Clay 4; Pasir/Kerikil 3. k: 1e-11 sampai 1e-1 cm/s.",
+        "basis": "internal", "refs": ["hec15"],
+        "caveat": ("Nilai indikatif sebagai titik awal, belum bersumber dari tabel terverifikasi. Ganti dengan τ izin dari HEC-15 (vegetasi, RECP, riprap) "
+                   "atau uji laboratorium/lapangan (permeabilitas, jet test), dan catat sumbernya di 'Properti (bisa ditimpa)'.",
+                   "Indicative starting values, not sourced from a verified table. Replace with permissible τ from HEC-15 (vegetation, RECP, riprap) or "
+                   "laboratory/field tests (permeability, jet test), and record the source under 'Properties (overridable)'."),
+    },
+    "cover_perm": {
+        "title": ("Perkiraan permeabilitas tanah dari grain size", "Estimated soil permeability from grain size"),
+        "where": ("Tab Surface/Cover Slope — data dari Erosion Mapping", "Surface/Cover Slope tab — data from Erosion Mapping"),
+        "rule": "D50 <= 0,002 mm lempung 1e-7 cm/s; 0,002-0,063 mm lanau (interpolasi log 1e-7 s.d. ±1e-3); >= 0,063 mm Hazen k = (0,6 × D50)² cm/s (D50 dalam mm), maks 10 cm/s.",
+        "basis": "campuran", "refs": ["hazen1892"],
+        "caveat": ("Hazen (k = C·d10²) berlaku untuk pasir bersih (sekitar 0,1-3 mm, koefisien keseragaman rendah); d10 diasumsikan 0,6 × D50 dan rentang "
+                   "lempung/lanau adalah nilai tipikal internal. Pakai hanya sebagai perkiraan awal; ganti dengan uji permeabilitas.",
+                   "Hazen (k = C·d10²) applies to clean sands (about 0.1-3 mm, low uniformity coefficient); d10 is assumed 0.6 × D50 and the clay/silt "
+                   "ranges are internal typical values. Use only as a first estimate; replace with permeability tests."),
+    },
+    "cover_reco": {
+        "title": ("Rekomendasi susunan cover", "Cover stack recommendation"),
+        "where": ("Tab Surface/Cover Slope — 💡 Rekomendasi cover", "Surface/Cover Slope tab — 💡 Cover recommendation"),
+        "rule": "τc minimum indikatif = (3 + 30·tan slope-P95) × faktor keparahan (1,0 / 1,2 / 1,5 / 2,0 dari indeks maks) × faktor tanah (0,9-1,3 dari D50) "
+                "× faktor kecepatan (1,2 bila V > 1,5 m/s). Saran permeabilitas menurut kelas k tanah eksisting.",
+        "basis": "internal", "refs": ["hec15"],
+        "caveat": ("Aturan pakar internal untuk membandingkan alternatif desain; faktor pengali belum dikalibrasi maupun bersumber regulasi. Bukan pengganti "
+                   "kajian erosi/stabilitas formal.",
+                   "An internal expert rule for comparing design alternatives; the multipliers are neither calibrated nor sourced from a regulation. Not a "
+                   "replacement for formal erosion/stability studies."),
+    },
+    "cover_mapping": {
+        "title": ("Pemetaan cover → parameter analisis erosi", "Cover → erosion-analysis parameter mapping"),
+        "where": ("Tab Surface/Cover Slope → Erosion Mapping", "Surface/Cover Slope tab → Erosion Mapping"),
+        "rule": "Partheniades: τc := τc lapisan atas; M := M × (τc_lama/τc_baru)^0,5. Shields: D50 setara = τc / (0,047·(ρs−ρw)·g). Hjulstrom: kecepatan efektif × √(τc_dasar/τc_cover). "
+                "Runoff: C = 0,90 − 0,65 × klem((log10 k_eff + 7)/5, 0..1).",
+        "basis": "internal", "refs": ["hanson_simon", "mpm1948", "partheniades1965"],
+        "caveat": ("Pemetaan indikatif buatan aplikasi: hanya bentuk hubungan pangkat-negatif antara erodibilitas dan τc yang punya dasar literatur (Hanson & "
+                   "Simon, 2001) — eksponen 0,5 dan rumus C adalah asumsi internal, dan M di sini (kg/m²·s) berbeda satuan dengan kd pada literatur tsb. "
+                   "Angka 0,047 mengacu Meyer-Peter & Muller (1948). Kalibrasi dengan data lapangan sebelum dijadikan dasar desain.",
+                   "An indicative mapping made for the app: only the negative power-law form between erodibility and τc has literature support (Hanson & "
+                   "Simon, 2001) — the 0.5 exponent and the C formula are internal assumptions, and M here (kg/m²·s) has different units from kd in that "
+                   "paper. 0.047 follows Meyer-Peter & Muller (1948). Calibrate with field data before using as a design basis."),
+    },
+    "slope_fs": {
+        "title": ("Faktor Keamanan (FK) lereng — TIDAK dihitung di aplikasi ini", "Slope Factor of Safety (FS) — NOT computed in this app"),
+        "where": ("(informasi)", "(information)"),
+        "rule": "Kepmen ESDM 1827 K/30/MEM/2018 menetapkan kriteria penerimaan FK statis/dinamis dan Probabilitas Longsor (PK) menurut jenis lereng "
+                "(tunggal, antar-jenjang, keseluruhan) dan tingkat keparahan longsor.",
+        "basis": "regulasi", "refs": ["kepmen1827"],
+        "caveat": ("Aplikasi ini menghitung indeks erosi/hidrolika, BUKAN FK lereng, sehingga tidak ada klasifikasi 'stabil/aman' menurut FK di sini. Bila modul "
+                   "stabilitas lereng ditambahkan, gunakan tabel kriteria pada lampiran teknis Kepmen tersebut (baca nilai persisnya dari dokumen resmi; "
+                   "nomor tabel/lampiran perlu dicek).",
+                   "This app computes erosion/hydraulic indices, NOT slope FS, so there is no FS-based 'stable/safe' classification here. If a slope-stability "
+                   "module is added, use the criteria table in the technical annex of that Kepmen (read exact values from the official document; check "
+                   "table/annex numbers)."),
+    },
+}
+
+
+def _basis_label(basis):
+    return _t(*_BASIS_LABEL.get(basis, _BASIS_LABEL["internal"]))
+
+
+def _class_refs_short(keys):
+    return ", ".join(REFERENCE_LIBRARY[k][1] for k in keys if k in REFERENCE_LIBRARY)
+
+
+def _class_basis_caption(key, detail=False):
+    """Satu baris 'Dasar klasifikasi' di bawah hasil klasifikasi. detail=True menambah catatan/keterbatasan."""
+    _e = CLASSIFICATION_REGISTRY.get(key)
+    if not _e:
+        return
+    _txt = f"📚 {_t('Dasar klasifikasi', 'Classification basis')}: **{_basis_label(_e['basis'])}**"
+    if _e["refs"]:
+        _txt += f" — {_class_refs_short(_e['refs'])}"
+    _txt += _t("  ·  rincian: tombol 📚 di sidebar", "  ·  details: 📚 button in the sidebar")
+    if detail:
+        _txt += "  \n" + _t(*_e["caveat"])
+    st.caption(_txt)
+
+
+def _render_classification_registry():
+    _n = {}
+    for _e in CLASSIFICATION_REGISTRY.values():
+        _n[_e["basis"]] = _n.get(_e["basis"], 0) + 1
+    st.info(_t(
+        "Ringkas: kriteria berbasis REGULASI yang relevan (Kepmen ESDM 1827 K/30/MEM/2018) mengatur FK/PK kestabilan lereng, bukan indeks erosi "
+        "permukaan. Klasifikasi erosi di aplikasi ini bersumber dari literatur (bentuk rumus) dan ambang internal (angka batas kelas) yang "
+        "ditandai jelas sebagai INDIKATIF. Selaraskan dengan standar/TARP perusahaan dan validasi lapangan sebelum dipakai untuk keputusan.",
+        "In short: the relevant REGULATORY criteria (Kepmen ESDM 1827 K/30/MEM/2018) govern slope-stability FS/PoF, not surface-erosion indices. "
+        "Erosion classifications in this app come from literature (formula form) and internal thresholds (class limits) that are clearly marked "
+        "INDICATIVE. Align with company standards/TARP and field validation before using them for decisions."))
+    st.caption(_t(
+        f"Jumlah klasifikasi tercatat: {len(CLASSIFICATION_REGISTRY)} — regulasi {_n.get('regulasi', 0)}, literatur {_n.get('literatur', 0)}, "
+        f"campuran {_n.get('campuran', 0)}, internal {_n.get('internal', 0)}.",
+        f"Classifications recorded: {len(CLASSIFICATION_REGISTRY)} — regulation {_n.get('regulasi', 0)}, literature {_n.get('literatur', 0)}, "
+        f"mixed {_n.get('campuran', 0)}, internal {_n.get('internal', 0)}."))
+    for _k, _e in CLASSIFICATION_REGISTRY.items():
+        with st.expander(f"{_t(*_e['title'])}  —  {_basis_label(_e['basis'])}"):
+            st.markdown(f"**{_t('Dipakai di', 'Used in')}:** {_t(*_e['where'])}")
+            st.markdown(f"**{_t('Aturan / ambang', 'Rule / thresholds')}:** {_e['rule']}")
+            st.markdown(f"**{_t('Catatan & keterbatasan', 'Notes & limitations')}:** {_t(*_e['caveat'])}")
+            if _e["refs"]:
+                st.markdown(f"**{_t('Referensi', 'References')}:**")
+                for _rk in _e["refs"]:
+                    _kind, _short, _full, _chk = REFERENCE_LIBRARY[_rk]
+                    _mark = _t("✓ keberadaan diperiksa 20 Sep 2026", "✓ existence checked 20 Sep 2026") if _chk else _t("kutipan baku", "standard citation")
+                    st.markdown(f"- {_REF_KIND_ICON.get(_kind, '')} {_full} _({_mark})_")
+    st.caption(_t(
+        "Pemeriksaan hanya memastikan dokumen/publikasi tersebut ada dan relevan. Isi pasal, tabel, dan halaman tetap harus dibaca dari dokumen "
+        "resmi sebelum dikutip pada makalah atau laporan.",
+        "The check only confirms that the document/publication exists and is relevant. Clauses, tables and page numbers must still be read from "
+        "the official document before citing in a paper or report."))
+
+
+@st.dialog(_t("Dasar Klasifikasi & Referensi", "Classification Basis & References"), width="large")
+def _classification_registry_dialog():
+    _render_classification_registry()
+
+
+_PDF_GLYPH_MAP = {"τ": "tau", "θ": "theta", "ρ": "rho", "κ": "kappa", "Σ": "Sum", "≥": ">=", "≤": "<=", "≈": "~",
+                  "→": "->", "−": "-", "√": "sqrt", "·": "*", "×": "x", "²": "^2", "🏛": "", "📖": "", "⚙️": "", "📐": ""}
+
+
+def _ascii_glyphs(txt):
+    for _a, _b in _PDF_GLYPH_MAP.items():
+        txt = txt.replace(_a, _b)
+    return txt
+
+
+def _classification_report_rows(pdf_safe=False):
+    """Baris tabel 'Dasar Klasifikasi & Ambang' untuk laporan (PDF memakai Helvetica: simbol Yunani diganti ASCII)."""
+    _rows = [[_t("Klasifikasi", "Classification"), _t("Aturan / ambang", "Rule / thresholds"),
+              _t("Jenis dasar", "Basis type"), _t("Referensi & catatan", "References & notes")]]
+    _plain = {"regulasi": ("Regulasi", "Regulation"), "literatur": ("Literatur", "Literature"),
+              "campuran": ("Literatur + ambang internal", "Literature + internal thresholds"),
+              "internal": ("Internal (indikatif)", "Internal (indicative)")}
+    for _e in CLASSIFICATION_REGISTRY.values():
+        _cells = [_t(*_e["title"]), _e["rule"], _t(*_plain[_e["basis"]]),
+                  (_class_refs_short(_e["refs"]) + ". " if _e["refs"] else "") + _t(*_e["caveat"])]
+        if pdf_safe:
+            _cells = [_ascii_glyphs(c) for c in _cells]
+        _rows.append(_cells)
+    return _rows
+
+
+def _classification_report_refs(pdf_safe=False,
+                                exclude=("hjulstrom1935", "shields1936", "partheniades1965", "chow1959",
+                                         "landis_koch1977", "cohen1960", "suripin2004")):
+    """Referensi tambahan utk laporan (yang sudah ada di daftar lama dilewati supaya tidak dobel)."""
+    _seen, _out = [], []
+    for _e in CLASSIFICATION_REGISTRY.values():
+        for _rk in _e["refs"]:
+            if _rk not in _seen and _rk not in exclude:
+                _seen.append(_rk)
+                _txt = REFERENCE_LIBRARY[_rk][2]
+                _out.append(_ascii_glyphs(_txt) if pdf_safe else _txt)
+    return _out
+
+
+
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
     st.session_state["auth_username"] = None
@@ -2270,32 +2695,12 @@ with st.sidebar:
                     st.session_state["download_project_file_path"] = _dl_path
                     st.session_state["download_project_file_skipped"] = len(_dl_skipped)
 
-                    # PERBAIKAN "download project tidak jalan kayak DXF": st.download_button
-                    # (dan cara base64/JS sebelumnya) SAMA-SAMA mengirim seluruh isi file lewat
-                    # protokol internal Streamlit (WebSocket) ke browser -- ini yang berbeda dari
-                    # download file statis biasa (PDF/DXF dari website manapun), dan biasanya
-                    # itulah yang gagal untuk file berukuran besar. Di sini file disalin ke folder
-                    # "static/" di sebelah app.py -- kalau static file serving Streamlit AKTIF
-                    # (lihat catatan config di bawah), file ini punya URL HTTP LANGSUNG yang bisa
-                    # di-download persis seperti link download di browser pada umumnya, TANPA
-                    # lewat batas ukuran WebSocket sama sekali.
-                    try:
-                        _static_dir = os.path.join(_APP_DIR, "static", "project_exports")
-                        os.makedirs(_static_dir, exist_ok=True)
-                        for _old_s in os.listdir(_static_dir):  # bersihkan file statis lama (>1 hari)
-                            _osp = os.path.join(_static_dir, _old_s)
-                            try:
-                                if os.path.isfile(_osp) and time.time() - os.path.getmtime(_osp) > 86400:
-                                    os.remove(_osp)
-                            except OSError:
-                                pass
-                        _static_fname = f"{_project_slug(_active_proj_name or 'project')}_{int(time.time())}.eroproj"
-                        _static_path = os.path.join(_static_dir, _static_fname)
-                        with open(_static_path, "wb") as _f_static:
-                            _f_static.write(_dl_raw)
-                        st.session_state["project_download_static_url"] = f"app/static/project_exports/{_static_fname}"
-                    except Exception:
-                        st.session_state.pop("project_download_static_url", None)
+                    # Catatan: cara lama "link statis" (file disalin ke folder static/ + link app/static/...)
+                    # DIHAPUS. Kalau static serving Streamlit tidak aktif -- termasuk di Streamlit Cloud --
+                    # link itu menjawab dengan halaman HTML aplikasi (bukan file), dan browser menyimpannya
+                    # sebagai file ".eroproj" berisi HTML (gejala: "invalid load key, '<'" saat dibuka).
+                    # Selain itu file di static/ bisa diakses siapa pun tanpa login.
+                    st.session_state.pop("project_download_static_url", None)
 
                     _dl_mb = os.path.getsize(_dl_path) / (1024 * 1024)
                     st.success(_t(
@@ -2315,35 +2720,10 @@ with st.sidebar:
         if _dl_bytes:
             _dl_fname = st.session_state.get("project_download_name") or f"{_project_slug(_active_proj_name or 'project')}.eroproj"
 
-            # CARA UTAMA (paling andal untuk file besar): link HTTP LANGSUNG ke file statis --
-            # ini "download dari browser" dalam arti sesungguhnya, PERSIS seperti klik link
-            # download PDF/DXF di website mana pun (browser yang mengurus penyimpanan lewat
-            # dialog Save As / folder Downloads bawaan, bukan lewat Streamlit).
-            _static_url = st.session_state.get("project_download_static_url")
-            if _static_url:
-                st.markdown(
-                    f'<a href="{_static_url}" download="{_dl_fname}" target="_blank" '
-                    'style="display:block;text-align:center;padding:10px 12px;border-radius:8px;'
-                    'background:#2E5C31;color:#fff;font-weight:600;text-decoration:none;'
-                    'font-family:sans-serif;margin-bottom:6px;">'
-                    f'⬇️ Download Project (.eroproj) — {_t("cara utama", "primary")}</a>',
-                    unsafe_allow_html=True,
-                )
-                st.caption(_t(
-                    "Kalau link di atas menampilkan halaman kosong/404, static file serving "
-                    "Streamlit belum aktif -- tambahkan `enableStaticServing = true` di bagian "
-                    "[server] pada file `.streamlit/config.toml` (buat foldernya kalau belum "
-                    "ada), lalu restart app. Selama itu, pakai tombol Download biasa di bawah.",
-                    "If the link above shows a blank page/404, Streamlit's static file serving "
-                    "isn't enabled yet -- add `enableStaticServing = true` under [server] in "
-                    "`.streamlit/config.toml` (create the folder if missing), then restart the "
-                    "app. Meanwhile, use the regular Download button below.",
-                ))
-
             # Pola persis sama dgn download DXF di tab Rekonstruksi: data=bytes dari session_state,
             # tanpa key/on_click khusus.
             st.download_button(
-                _t("⬇️ Download Project (.eroproj) — cara biasa", "⬇️ Download Project (.eroproj) — regular way"),
+                _t("⬇️ Download Project (.eroproj)", "⬇️ Download Project (.eroproj)"),
                 data=_dl_bytes,
                 file_name=_dl_fname,
                 mime="application/octet-stream",
@@ -2368,11 +2748,9 @@ with st.sidebar:
             # ke komputer user sendiri -- tidak menyimpan apa pun di server.
             _dl_mb_now = len(_dl_bytes) / (1024 * 1024)
             if _dl_mb_now <= 40:
-                if st.checkbox(
-                    _t("Download di atas tidak jalan? Pakai cara alternatif",
-                       "Download above not working? Use the alternative method"),
-                    key="dl_alt_show",
-                ):
+                st.caption(_t("Kalau tombol di atas tidak mengunduh file, pakai tombol cara alternatif ini:",
+                              "If the button above does not download the file, use this alternative button:"))
+                if True:
                     import base64 as _b64_dl
                     import streamlit.components.v1 as _components_dl
                     _b64_str = _b64_dl.b64encode(_dl_bytes).decode("ascii")
@@ -2496,6 +2874,13 @@ with st.sidebar:
         )
     else:
         st.caption("Belum ada analisis dijalankan pada sesi ini.")
+
+    if _seg_results_side:
+        st.caption(_t("Level di atas memakai ambang internal (TARP) — bukan dari regulasi.",
+                      "The level above uses internal (TARP) thresholds — not from a regulation."))
+    if st.button(_t("📚 Dasar Klasifikasi & Referensi", "📚 Classification Basis & References"),
+                 key="open_class_registry_btn", width="stretch"):
+        _classification_registry_dialog()
 
     st.markdown('<hr class="mwm-side-divider"/>', unsafe_allow_html=True)
 
@@ -3567,6 +3952,18 @@ with col3:
 
 _is_admin = st.session_state.get("auth_role") == "admin"
 
+# Untuk user non-admin (surveyor) kartu merah traceback Streamlit tidak ditampilkan -- pesan
+# error bawaan Python/Streamlit tidak berguna bagi mereka dan mengganggu tampilan. Admin tetap
+# melihatnya utk debugging. (Pesan st.error/st.warning buatan app yang memang ditujukan ke user
+# tetap tampil.)
+if not _is_admin:
+    st.markdown(
+        """<style>
+        [data-testid="stException"], div[data-testid="stException"] { display: none !important; }
+        </style>""",
+        unsafe_allow_html=True,
+    )
+
 _tab_labels = [
     _t("Erosion Mapping", "Erosion Mapping"),
     _t("Back Analysis", "Back Analysis"),
@@ -4000,6 +4397,8 @@ with tab1:
                             st.session_state[f"channel_z_{sid}"] = 1.0 / np.tan(np.radians(
                                 st.session_state.get(f"channel_slope_deg_{sid}", 33.7)
                             ))
+                            _class_basis_caption("runoff_c_manning", detail=True)
+                            _class_basis_caption("rational_mononobe")
 
                             st.number_input(
                                 _t("Tinggi Total Channel/Tanggul (m) — untuk cek freeboard", "Total Channel/Embankment Height (m) — for freeboard check"),
@@ -5763,7 +6162,7 @@ with tab1:
                         root_cause.append({"factor": _name, "contribution_pct": round(_val / _total_signal * 100, 1)})
 
                 # ================= REKOMENDASI BERTINGKAT (Geometry -> Hydraulic -> Surface -> Sediment -> Monitoring) =================
-                # Urutan level intervensi ini sengaja mengikuti prinsip HEC-15 (hitung demand
+                # Urutan level intervensi ini KERANGKA INTERNAL yang selaras dgn semangat HEC-15 (hitung demand
                 # hidraulik dulu, baru pilih material/lining -- bukan langsung "erosi -> riprap"):
                 # 1) Geometry Control (ubah bentuk terrain spy energi aliran turun) dicoba duluan,
                 # 2) Hydraulic Control (kendalikan aliran spt drain/check dam),
@@ -6993,6 +7392,8 @@ with tab1:
                                     help_text=f"Minimum disarankan ≈ {hydraulics_result['min_freeboard_m']:.2f} m",
                                     container=colhy6
                                 )
+                                _class_basis_caption("freeboard")
+                                _class_basis_caption("froude")
 
                                 if not hydraulics_result["freeboard_ok"]:
                                     st.error(
@@ -9009,6 +9410,9 @@ with tab1:
                         _t("Area Potensi Erosi (%)", "Erosion Potential Area (%)"),
                         f"{erosion_ratio*100:.1f}%"
                     )
+                    _class_basis_caption({"Hjulstrom Diagram": "hjulstrom_zone",
+                                          "Shields Diagram": "shields_theta"}.get(analysis_method, "partheniades_index"))
+                    _class_basis_caption("risk_index_tarp")
             
 
                     if analysis_method == "Partheniades + Flow Accumulation":
@@ -9120,6 +9524,7 @@ with tab1:
                         """,
                         unsafe_allow_html=True
                     )
+                    _class_basis_caption("rule_status", detail=True)
 
                     # Kalau narasi di atas masih rule-based (belum AI), tampilkan langkah
                     # aktivasi secara JELAS & actionable di dalam app -- bukan cuma catatan
@@ -9850,6 +10255,7 @@ with tab1:
                     _metric_card("Overall Accuracy", f"{overall_acc*100:.1f}%", container=vcol1)
                     _metric_card("Cohen's Kappa (κ)", f"{kappa:.2f}", container=vcol2)
                     _metric_card("Interpretasi (Landis & Koch, 1977)", _kappa_interpretation(kappa), container=vcol3)
+                    _class_basis_caption("kappa")
                     if extra_metric:
                         _ui_caption(extra_metric)
 
@@ -11753,7 +12159,8 @@ with tab1:
                                     styles["H2"]
                                 ))
                                 story.append(Paragraph(
-                                    "Urutan tingkat intervensi mengikuti prinsip HEC-15: kendalikan bentuk/energi aliran "
+                                    "Urutan tingkat intervensi adalah kerangka internal aplikasi (HEC-15 hanya menjadi acuan "
+                                    "pemilihan lining: tegangan geser izin >= terapan): kendalikan bentuk/energi aliran "
                                     "dulu (Geometry, Hydraulic) sebelum melapis permukaan (Surface Protection) — bukan "
                                     "langsung \u201cerosi \u2192 riprap\u201d.",
                                     styles["BodyItalic"]
@@ -11921,8 +12328,27 @@ with tab1:
                             story.append(_build_table(sign_rows, col_widths=[CONTENT_W * 0.35, CONTENT_W * 0.65]))
                             story.append(Spacer(1, 14))
 
+                        # ---- DASAR KLASIFIKASI & AMBANG (selalu disertakan, juga pada laporan ringkas) ----
+                        story.append(Paragraph("DASAR KLASIFIKASI & AMBANG", styles["H2"]))
+                        story.append(Paragraph(
+                            "Tabel berikut menyatakan dasar tiap klasifikasi yang dipakai pada laporan ini: regulasi, "
+                            "literatur, atau ambang internal (indikatif). Kriteria regulasi yang relevan (Kepmen ESDM "
+                            "1827 K/30/MEM/2018) mengatur FK/PK kestabilan lereng, bukan indeks erosi permukaan; ambang "
+                            "indeks erosi pada laporan ini adalah ambang internal dan perlu diselaraskan dengan standar/"
+                            "TARP perusahaan serta validasi lapangan sebelum dipakai untuk keputusan.",
+                            styles["Body"]
+                        ))
+                        story.append(Spacer(1, 4))
+                        story.append(_build_table(
+                            _classification_report_rows(pdf_safe=True),
+                            col_widths=[CONTENT_W * 0.19, CONTENT_W * 0.30, CONTENT_W * 0.13, CONTENT_W * 0.38],
+                        ))
+                        story.append(Spacer(1, 12))
+
                         if not _report_concise:
                             story.append(Paragraph("REFERENSI METODOLOGI", styles["H2"]))
+                            for ref in _classification_report_refs(pdf_safe=True):
+                                story.append(Paragraph(f"• {ref}", styles["Body"]))
                             for ref in [
                                 "Hjulström, F. (1935). Studies of the morphological activity of rivers as illustrated by the "
                                 "River Fyris. Bulletin of the Geological Institute of Uppsala, 25, 221-527.",
@@ -12399,9 +12825,22 @@ with tab1:
                                 ["Tanggal Review", reviewer_date.strftime("%d %B %Y") if reviewer_date else "-"],
                             ])
 
+                        # ---- DASAR KLASIFIKASI & AMBANG (selalu disertakan, juga pada laporan ringkas) ----
+                        _docx_heading(docx_doc, "DASAR KLASIFIKASI & AMBANG", level=2)
+                        docx_doc.add_paragraph(
+                            "Tabel berikut menyatakan dasar tiap klasifikasi yang dipakai pada laporan ini: regulasi, "
+                            "literatur, atau ambang internal (indikatif). Kriteria regulasi yang relevan (Kepmen ESDM "
+                            "1827 K/30/MEM/2018) mengatur FK/PK kestabilan lereng, bukan indeks erosi permukaan; ambang "
+                            "indeks erosi pada laporan ini adalah ambang internal dan perlu diselaraskan dengan standar/"
+                            "TARP perusahaan serta validasi lapangan sebelum dipakai untuk keputusan."
+                        )
+                        _docx_table(docx_doc, _classification_report_rows(pdf_safe=False))
+
                         # Daftar referensi dilewati pada mode laporan RINGKAS (sama seperti PDF).
                         if not _report_concise:
                             _docx_heading(docx_doc, "REFERENSI METODOLOGI", level=2)
+                            for ref in _classification_report_refs(pdf_safe=False):
+                                docx_doc.add_paragraph(f"• {ref}")
                             for ref in [
                                 "Hjulström, F. (1935). Studies of the morphological activity of rivers as illustrated by the "
                                 "River Fyris. Bulletin of the Geological Institute of Uppsala, 25, 221-527.",
@@ -16576,6 +17015,9 @@ with tab7:
                 st.markdown("**" + _t("💡 Rekomendasi cover", "💡 Cover recommendation") + "**")
                 for _cb in _cov_rec["bullets"]:
                     st.markdown("- " + _cb)
+                _class_basis_caption("cover_reco", detail=True)
+                if _cov_m["k_est"] is not None:
+                    _class_basis_caption("cover_perm")
                 st.caption(_t(
                     "Susunan yang disarankan: " + " → ".join(f"{l['material']} ({l['thickness_m']:.2f} m)" for l in _cov_rec["stack"]),
                     "Suggested stack: " + " → ".join(f"{l['material']} ({l['thickness_m']:.2f} m)" for l in _cov_rec["stack"])))
@@ -16642,6 +17084,7 @@ with tab7:
             "Lapisan pertama = permukaan yang terekspos langsung ke hujan/aliran.",
             "The first layer = the surface directly exposed to rainfall/flow.",
         ))
+        _class_basis_caption("cover_presets", detail=True)
 
         if "cover_layers" not in st.session_state:
             st.session_state["cover_layers"] = [
@@ -16786,6 +17229,7 @@ with tab7:
                 _mc3.metric(_t("Ketahanan erosi (lapisan atas)", "Erosion resistance (top layer)"),
                             f"{_verdict_color.get(_verdict, '')} {_verdict}")
                 st.caption(_verdict_note)
+                _class_basis_caption("cover_verdict", detail=True)
 
                 _ui_caption(_t(
                     "Permeabilitas efektif dihitung dengan rata-rata harmonik berbobot tebal "
@@ -16854,6 +17298,7 @@ with tab7:
                     "The cover designed above is sent to the selected segments: effective erosion-analysis parameters "
                     "(τc/erodibility or critical velocity, and runoff coefficient C when hydraulics is on) follow the "
                     "cover, so the Erosion Mapping results change. The mapping is indicative -- calibrate with field data."))
+                _class_basis_caption("cover_mapping", detail=True)
                 _seg_res_all = st.session_state.get("segment_results", {}) or {}
                 if not _seg_res_all:
                     _ui_info(_t("Jalankan RUN ANALYSIS di tab Erosion Mapping dulu.",
