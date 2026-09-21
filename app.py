@@ -57,6 +57,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.units import cm
 from reportlab.lib.enums import TA_JUSTIFY, TA_CENTER, TA_LEFT
+from reportlab.pdfgen import canvas as _rl_canvas
 
 from PIL import Image as PILImage
 
@@ -4007,6 +4008,380 @@ def _render_module_workflow():
     for title, expanded, text in steps:
         with st.expander(title, expanded=expanded):
             st.markdown(text)
+
+
+# =====================================================================
+# LAPORAN (PDF & DOCX) -- fungsi bersama: fakta ringkasan, peta lokasi, kriteria, metodologi, interpretasi
+# Tata letak mengikuti laporan stabilitas lereng contoh: metadata, peta lokasi, ringkasan & kesimpulan
+# (status berwarna), kriteria acuan, metodologi, data masukan, hasil per segmen, interpretasi & rekomendasi.
+# =====================================================================
+_REP_GREEN, _REP_RED, _REP_AMBER, _REP_ACCENT = "#1B7F3B", "#C62828", "#D97A00", "#0A5C8F"
+_REP_STATUS_TXT = {"critical": ("KRITIS", _REP_RED), "warn": ("PERBAIKAN TERJADWAL", _REP_AMBER), "ok": ("STABIL", _REP_GREEN)}
+
+
+def _rep_status_class(seg):
+    rk = seg.get("recommendation") or {}
+    st_ = str(rk.get("status", ""))
+    col = rk.get("color")
+    if col == "red" or "REJECT" in st_ or "KRITIS" in st_:
+        return "critical"
+    if col == "orange" or "TERJADWAL" in st_:
+        return "warn"
+    return "ok"
+
+
+def _rep_tarp_level(score):
+    if score < 0.5:
+        return "HIJAU (Normal)", _REP_GREEN
+    if score < 1.0:
+        return "KUNING (Waspada)", "#B58900"
+    if score < 2.0:
+        return "ORANYE (Siaga)", _REP_AMBER
+    return "MERAH (Kritis)", _REP_RED
+
+
+def _rep_method_key(method):
+    m = str(method)
+    if m.startswith("Hjulstr"):
+        return "hjulstrom_zone"
+    if m.startswith("Shields"):
+        return "shields_theta"
+    return "partheniades_index"
+
+
+def _rep_facts(segs, sections=None, rain_meta=None, rain_val=None):
+    """Kumpulkan angka-angka ringkasan laporan dari hasil segmen."""
+    items = list(segs.items())
+    n = len(items)
+    total_area = float(sum(float(s.get("boundary_area_ha", 0) or 0) for _, s in items))
+    ero_ha = float(sum(float(s.get("erosion_area", 0) or 0) for _, s in items))
+    sed_ha = float(sum(float(s.get("sedimentation_area", 0) or 0) for _, s in items))
+    ov = int(sum(int(s.get("overflow_count", 0) or 0) for _, s in items))
+    pct_mean = float(np.mean([float(s.get("erosion_ratio", 0) or 0) for _, s in items]) * 100.0) if n else 0.0
+    worst_sid, worst = max(items, key=lambda kv: float(kv[1].get("max_zone", 0) or 0))
+    counts = {"critical": 0, "warn": 0, "ok": 0}
+    for _, s in items:
+        counts[_rep_status_class(s)] += 1
+    methods = []
+    for _, s in items:
+        m = str(s.get("analysis_method", ""))
+        if m and m not in methods:
+            methods.append(m)
+    quant_rows, tss_fail = [], False
+    for sid, s in items:
+        q = s.get("quant") or {}
+        if not q:
+            continue
+        r, e, p = q.get("rusle"), q.get("event"), q.get("pond")
+        row = {"label": s.get("label", sid), "mean_tha": r["mean_tha"] if r else None, "yield_t_yr": r["sed_yield_t_yr"] if r else None,
+               "y_event": e["y_ton"] if e else None, "tss": e["tss_mg_l"] if e else None, "tss_limit": e["tss_limit"] if e else None,
+               "pond": (p["length_m"], p["width_m"], p["vol_total_m3"]) if p else None}
+        row["tss_ok"] = (row["tss"] is not None and row["tss"] <= row["tss_limit"])
+        if row["tss"] is not None and not row["tss_ok"]:
+            tss_fail = True
+        quant_rows.append(row)
+    lvl, lvl_col = _rep_tarp_level(float(worst.get("max_zone", 0) or 0))
+    if counts["critical"] > 0 or tss_fail:
+        concl = ("fail", "TERDAPAT KRITERIA YANG TIDAK TERPENUHI", _REP_RED)
+    elif counts["warn"] > 0:
+        concl = ("warn", "PERLU PERBAIKAN TERJADWAL PADA SEBAGIAN SEGMEN", _REP_AMBER)
+    else:
+        concl = ("ok", "SELURUH SEGMEN DALAM BATAS KRITERIA", _REP_GREEN)
+    return {"n": n, "total_area": total_area, "ero_ha": ero_ha, "sed_ha": sed_ha, "overflow": ov, "pct_mean": pct_mean,
+            "worst_sid": worst_sid, "worst": worst, "counts": counts, "methods": methods, "quant_rows": quant_rows, "tss_fail": tss_fail,
+            "conclusion": concl, "tarp_level": lvl, "tarp_color": lvl_col,
+            "hydraulics_any": any(s.get("use_hydraulics") for _, s in items),
+            "cover_segs": [s.get("label", sid) for sid, s in items if s.get("cover_info")],
+            "rain_source": (rain_meta or {}).get("source", "tidak tersedia"), "rain_val": rain_val,
+            "n_sections": len(sections or {})}
+
+
+def _rep_summary_paragraphs(F):
+    """Paragraf ringkasan (markup <b>) -- dipakai PDF (Paragraph) dan DOCX (parser <b>)."""
+    w = F["worst"]
+    m_txt = ", ".join(F["methods"]) if F["methods"] else "-"
+    ps = [
+        f"Analisis erosi, sedimentasi, dan limpasan dilakukan pada <b>{F['n']}</b> segmen (total <b>{F['total_area']:.2f} Ha</b>) dengan metode "
+        f"<b>{m_txt}</b>, berbasis pemodelan permukaan dari DXF kontur/boundary, penelusuran aliran D8, dan (bila diaktifkan) hidrologi-hidrolika "
+        f"(Rasional + Mononobe, Manning). Area berpotensi erosi (indeks di atas 1,0) mencakup <b>{F['ero_ha']:.2f} Ha</b> "
+        f"(rata-rata <b>{F['pct_mean']:.1f}%</b> luas segmen), potensi sedimentasi <b>{F['sed_ha']:.2f} Ha</b>, dan titik limpasan (overflow) "
+        f"terdeteksi sebanyak <b>{F['overflow']}</b>.",
+        f"Indeks risiko maksimum = <b>{float(w.get('max_zone', 0)):.2f}</b> (skala 0-2) pada <b>{w.get('label', '-')}</b>, level TARP "
+        f"<b>{F['tarp_level']}</b>. Status rekomendasi: <b>{F['counts']['critical']}</b> segmen kritis, <b>{F['counts']['warn']}</b> perbaikan "
+        f"terjadwal, <b>{F['counts']['ok']}</b> stabil.",
+    ]
+    if F["quant_rows"]:
+        tss = [q["tss"] for q in F["quant_rows"] if q["tss"] is not None]
+        mean_a = [q["mean_tha"] for q in F["quant_rows"] if q["mean_tha"] is not None]
+        yrs = [q["yield_t_yr"] for q in F["quant_rows"] if q["yield_t_yr"] is not None]
+        bits = []
+        if mean_a:
+            bits.append(f"kehilangan tanah rata-rata (RUSLE) <b>{np.mean(mean_a):.1f} ton/ha/th</b>")
+        if yrs:
+            bits.append(f"sedimen ke kolam <b>{np.sum(yrs):,.0f} ton/th</b>")
+        if tss:
+            lim = F["quant_rows"][0]["tss_limit"]
+            bits.append(f"TSS event maksimum <b>{max(tss):,.0f} mg/L</b> terhadap baku mutu <b>{lim:,.0f} mg/L</b>")
+        ps.append("Estimasi kuantitatif: " + "; ".join(bits) + ". Angka ini bersifat empiris dan memerlukan kalibrasi lapangan.")
+    if F["cover_segs"]:
+        ps.append("Cover dari modul Surface/Cover diterapkan pada segmen: <b>" + ", ".join(F["cover_segs"]) + "</b>; parameter efektif analisis mengikuti cover tersebut.")
+    return ps
+
+
+def _rep_criteria_rows(F, pdf_safe=False):
+    """Baris tabel Kriteria Acuan: [Kriteria, Ambang/aturan, Dasar, Referensi]."""
+    keys = ["risk_index_tarp", "rule_status"] + [_rep_method_key(m) for m in F["methods"]]
+    if F["quant_rows"]:
+        keys += ["rusle_soil_loss", "erosion_rate_class", "musle_tss_pond"]
+    if F["hydraulics_any"]:
+        keys += ["rational_mononobe", "runoff_c_manning", "freeboard"]
+    if F["cover_segs"]:
+        keys += ["cover_mapping"]
+    seen, rows = set(), [["Kriteria / klasifikasi", "Ambang / aturan", "Dasar", "Referensi"]]
+    plain = {"regulasi": "Regulasi", "literatur": "Literatur", "campuran": "Literatur + ambang internal", "internal": "Internal (indikatif)"}
+    for k in keys:
+        if k in seen or k not in CLASSIFICATION_REGISTRY:
+            continue
+        seen.add(k)
+        e = CLASSIFICATION_REGISTRY[k]
+        cells = [_t(*e["title"]), e["rule"], plain[e["basis"]], _class_refs_short(e["refs"]) or "-"]
+        rows.append([_ascii_glyphs(c) for c in cells] if pdf_safe else cells)
+    return rows
+
+
+def _rep_method_paragraphs(F):
+    """Metodologi ringkas (judul, teks) sesuai metode yang benar-benar dipakai."""
+    P = [("Pemodelan permukaan & aliran",
+          "Kontur dan boundary DXF diinterpolasi menjadi DEM grid teratur; area di luar boundary dikeluarkan. Cekungan diisi (depression filling, priority-flood) "
+          "lalu aliran ditelusuri dengan D8 untuk memperoleh flow accumulation. Kemiringan dihitung dari gradien DEM dengan jarak sel sebenarnya (m/m).")]
+    if F["hydraulics_any"]:
+        P.append(("Hidrologi & hidrolika",
+                  "Curah hujan rencana (R24) diambil dari data hujan atau analisis frekuensi, diubah menjadi intensitas dengan rumus Mononobe; debit rencana dengan metode "
+                  "Rasional (Q = 0,278 C I A), kecepatan dan kedalaman aliran dengan persamaan Manning pada penampang trapesium; freeboard dibandingkan dengan nilai minimum."))
+    txt = {"hjulstrom_zone": "Hjulstrom: kecepatan aliran dibandingkan kecepatan erosi/deposisi butir (fungsi pangkat sederhana), diubah menjadi indeks 0-2.",
+           "shields_theta": "Shields: parameter Shields theta = tau0 / ((rho_s - rho_w) g D50) dengan tau0 = rho_w g h S; kelas: theta < 0,03 stabil, 0,03-0,06 awal gerak, > 0,06 transport.",
+           "partheniades_index": "Partheniades: laju erosi E = M (tau/tau_c - 1) untuk tau > tau_c, dibobot flow accumulation dan dinormalisasi persentil-99 menjadi indeks 0-2."}
+    for m in F["methods"]:
+        P.append((f"Klasifikasi risiko — {m}", txt[_rep_method_key(m)]))
+    P.append(("Level TARP & status",
+              "Indeks risiko dipetakan ke empat level TARP (Hijau, Kuning, Oranye, Merah) yang masing-masing memiliki aksi monitoring dan respons. Status rekomendasi "
+              "(stabil / perbaikan terjadwal / kritis) dihitung dari luas erosi, indeks maksimum, dan jumlah titik overflow."))
+    if F["quant_rows"]:
+        P.append(("Estimasi kuantitatif",
+                  "Kehilangan tanah tahunan dengan RUSLE (A = R K LS C P; LS 2-D dari flow accumulation), sedimen per kejadian hujan rencana dengan MUSLE (Williams, 1975), "
+                  "TSS = massa sedimen / volume limpasan, dan dimensi kolam pengendap minimum berdasarkan kecepatan endap Stokes (Hazen/Camp)."))
+    if F["cover_segs"]:
+        P.append(("Cover permukaan", "Parameter efektif analisis (tau_c, erodibilitas atau kecepatan kritis, koefisien limpasan) diubah mengikuti susunan cover dari modul Surface/Cover."))
+    P.append(("Batasan",
+              "Indeks bersifat RELATIF dan tidak setara laju erosi absolut; ambang klasifikasi adalah ambang internal (indikatif) kecuali disebutkan lain pada tabel kriteria. "
+              "Hasil harus diverifikasi lapangan dan ditinjau engineer geoteknik berlisensi sebelum dijadikan dasar keputusan."))
+    return P
+
+
+def _rep_input_rows(segs):
+    rows = [["Segmen", "Metode", "Luas (Ha)", "D50 (mm)", "tau_c (Pa)", "M", "C limpasan", "Faktor hujan", "Cover"]]
+    for sid, s in segs.items():
+        ci = s.get("cover_info")
+        rows.append([s.get("label", sid), str(s.get("analysis_method", "-")).replace(" Diagram", ""), f"{float(s.get('boundary_area_ha', 0) or 0):.2f}",
+                     f"{float(s.get('grain_size_mm', 0) or 0):.3f}", f"{float(s.get('tau_critical', 0) or 0):.2f}", f"{float(s.get('erodibility_M', 0) or 0):.3f}",
+                     f"{float(s.get('runoff_c_base', 0) or 0):.2f}" if s.get("runoff_c_base") else "-", f"{float(s.get('rain_factor', 1) or 1):.2f}x",
+                     (ci.get("material") if ci else "-")])
+    return rows
+
+
+def _rep_interpretation(F, segs):
+    """Isi bagian Interpretasi & Rekomendasi: ringkasan status, faktor pengendali, kesesuaian kriteria (+ apakah ada draf AI)."""
+    w, wsid = F["worst"], F["worst_sid"]
+    by = {"critical": [], "warn": [], "ok": []}
+    for sid, s in segs.items():
+        by[_rep_status_class(s)].append(s.get("label", sid))
+    parts = []
+    if by["critical"]:
+        parts.append("segmen <b>" + ", ".join(by["critical"]) + "</b> berstatus <b>kritis</b>")
+    if by["warn"]:
+        parts.append("segmen <b>" + ", ".join(by["warn"]) + "</b> memerlukan <b>perbaikan terjadwal</b>")
+    if by["ok"]:
+        parts.append("segmen <b>" + ", ".join(by["ok"]) + "</b> berada dalam kondisi <b>stabil</b>")
+    status_par = ("Secara keseluruhan: " + "; ".join(parts) + ". ") if parts else ""
+    status_par += (f"Segmen dengan risiko tertinggi adalah <b>{w.get('label', '-')}</b> (indeks {float(w.get('max_zone', 0)):.2f}, level TARP "
+                   f"<b>{F['tarp_level']}</b>).")
+    drivers = []
+    vel = w.get("velocity_hulu")
+    slp = _cover_true_slope_stats(w) if w.get("grid_x") is not None else None
+    if vel is not None:
+        drivers.append(("Kecepatan aliran", f"Kecepatan representatif {float(vel):.2f} m/s pada {w.get('label', '-')}"
+                        + (f"; kedalaman aliran asumsi {float(w['flow_depth']):.2f} m." if w.get("flow_depth") else ".")))
+    if slp:
+        drivers.append(("Kemiringan lahan", f"Kemiringan rata-rata {slp['mean_deg']:.1f} derajat dan persentil-95 {slp['p95_deg']:.1f} derajat pada {w.get('label', '-')}; "
+                        "kemiringan tinggi meningkatkan tegangan geser dan kecepatan aliran."))
+    top = w.get("top10_overflow")
+    if top is not None and len(top) > 0:
+        r0 = top.iloc[0]
+        mech = ""
+        if "JenisRisikoDominan" in top.columns:
+            vc = top["JenisRisikoDominan"].value_counts()
+            mech = f" Mekanisme dominan pada titik kritis: {', '.join(str(k) for k in vc.index[:2])}."
+        drivers.append(("Titik kritis & limpasan", f"{int(w.get('overflow_count', 0) or 0)} titik overflow pada {w.get('label', '-')}; titik terparah di X {float(r0['X']):,.0f} / Y {float(r0['Y']):,.0f}."
+                        + mech))
+    if F["quant_rows"]:
+        q = max(F["quant_rows"], key=lambda r: (r["tss"] or 0))
+        if q["tss"] is not None:
+            drivers.append(("Beban sedimen", f"TSS event tertinggi {q['tss']:,.0f} mg/L pada {q['label']}"
+                            + (f"; sedimen ke kolam {q['yield_t_yr']:,.0f} ton/th." if q["yield_t_yr"] else ".")))
+    if F["cover_segs"]:
+        drivers.append(("Cover permukaan", "Cover diterapkan pada " + ", ".join(F["cover_segs"]) + "; hasil segmen tersebut sudah memperhitungkan cover."))
+    fit = [(f"Level TARP maksimum proyek: <b>{F['tarp_level']}</b>.", "critical" if F["tarp_level"].startswith(("ORANYE", "MERAH")) else ("warn" if F["tarp_level"].startswith("KUNING") else "ok")),
+           (f"Status rekomendasi: {F['counts']['critical']} kritis, {F['counts']['warn']} perbaikan terjadwal, {F['counts']['ok']} stabil.", "critical" if F["counts"]["critical"] else ("warn" if F["counts"]["warn"] else "ok"))]
+    for q in F["quant_rows"]:
+        if q["tss"] is not None:
+            fit.append((f"{q['label']}: TSS {q['tss']:,.0f} mg/L terhadap baku mutu {q['tss_limit']:,.0f} mg/L — <b>{'MEMENUHI' if q['tss_ok'] else 'TIDAK MEMENUHI'}</b> (sebelum pengolahan kolam).",
+                        "ok" if q["tss_ok"] else "critical"))
+    for sid, s in segs.items():
+        h = s.get("hydraulics_result")
+        if s.get("use_hydraulics") and h:
+            fit.append((f"{s.get('label', sid)}: freeboard {float(h['freeboard_m']):.2f} m — <b>{'CUKUP' if h['freeboard_ok'] else 'KURANG'}</b>.", "ok" if h["freeboard_ok"] else "critical"))
+    ai_used = any(not str((s.get("ai_recommendation") or {}).get("source", "rule-based")).startswith("rule-based") for s in segs.values())
+    narr = (w.get("ai_recommendation") or {}).get("narrative") or (w.get("recommendation") or {}).get("narrative") or ""
+    recs = ((w.get("ai_recommendation") or {}).get("recommendations") or (w.get("recommendation") or {}).get("recommendations") or [])[:5]
+    return {"status_par": status_par, "drivers": drivers, "fit": fit, "ai_used": ai_used, "worst_narrative": narr, "worst_recs": [str(r) for r in recs]}
+
+
+def _rep_location_map(segs, sections, out_path, dpi=200):
+    """Peta DEM (terrain + hillshade) semua segmen + boundary + garis section + titik kritis. Return path atau None."""
+    import matplotlib.colors as _mc
+    from matplotlib.colors import LightSource
+    try:
+        zs = [np.asarray(s["grid_z"], dtype=float) for s in segs.values() if s.get("grid_z") is not None]
+        if not zs:
+            return None
+        zmin = float(np.nanmin([np.nanmin(z) for z in zs]))
+        zmax = float(np.nanmax([np.nanmax(z) for z in zs]))
+        fig, ax = plt.subplots(figsize=(7.6, 6.2))
+        cmap = plt.cm.terrain.copy()
+        cmap.set_bad(alpha=0.0)
+        xs_all, ys_all = [], []
+        pal = ["#1F77B4", "#D62728", "#9467BD", "#8C564B", "#E377C2", "#17BECF", "#BCBD22"]
+        for i, (sid, s) in enumerate(segs.items()):
+            gx, gy, gz = (np.asarray(s[k], dtype=float) for k in ("grid_x", "grid_y", "grid_z"))
+            ins = s.get("inside")
+            z = np.where(np.asarray(ins, dtype=bool), gz, np.nan) if ins is not None and np.shape(ins) == gz.shape else gz
+            dx, dy = abs(gx[1, 0] - gx[0, 0]), abs(gy[0, 1] - gy[0, 0])
+            ls = LightSource(azdeg=315, altdeg=40)
+            rgb = ls.shade(z.T, cmap=cmap, vert_exag=1.5, blend_mode="soft", dx=dx, dy=dy, vmin=zmin, vmax=zmax)
+            ext = [float(gx.min()), float(gx.max()), float(gy.min()), float(gy.max())]
+            ax.imshow(rgb, origin="lower", extent=ext, interpolation="bilinear", zorder=1 + i * 0.1)
+            xs_all += ext[:2]
+            ys_all += ext[2:]
+            b = s.get("boundary")
+            if b is not None:
+                geoms = list(b.geoms) if hasattr(b, "geoms") else [b]
+                for g in geoms:
+                    bx, by = g.exterior.xy
+                    ax.plot(bx, by, color=pal[i % len(pal)], lw=1.6, zorder=5)
+                    xs_all += [min(bx), max(bx)]
+                    ys_all += [min(by), max(by)]
+                c = b.representative_point()
+                ax.annotate(s.get("label", sid), (c.x, c.y), fontsize=8, fontweight="bold", color="white", ha="center",
+                            bbox=dict(boxstyle="round,pad=0.2", fc=pal[i % len(pal)], ec="none", alpha=0.85), zorder=8)
+            top = s.get("top10_overflow")
+            if top is not None and len(top) > 0:
+                r0 = top.iloc[0]
+                ax.plot(float(r0["X"]), float(r0["Y"]), marker="v", ms=9, mfc="#FF2D2D", mec="white", mew=1.0, ls="none", zorder=9)
+        for nm, sec in (sections or {}).items():
+            v = sec.get("vertices") or []
+            if len(v) >= 2:
+                vx, vy = [p[0] for p in v], [p[1] for p in v]
+                ax.plot(vx, vy, color="#FFB000", lw=2.0, zorder=7)
+                parts = [t.strip() for t in re.split(r"[-–—]", str(nm).replace("Section", "").strip()) if t.strip()]
+                a_lab, b_lab = (parts[0], parts[-1]) if len(parts) >= 2 else (str(nm), "")
+                ax.plot([vx[0], vx[-1]], [vy[0], vy[-1]], "o", ms=5, mfc="white", mec="#FFB000", zorder=9)
+                ax.annotate(a_lab, (vx[0], vy[0]), fontsize=7.5, fontweight="bold", color="black", xytext=(3, 3), textcoords="offset points",
+                            bbox=dict(fc="white", ec="none", alpha=0.75, pad=0.8), zorder=10)
+                if b_lab:
+                    ax.annotate(b_lab, (vx[-1], vy[-1]), fontsize=7.5, fontweight="bold", color="black", xytext=(3, 3), textcoords="offset points",
+                                bbox=dict(fc="white", ec="none", alpha=0.75, pad=0.8), zorder=10)
+        ax.set_xlim(min(xs_all), max(xs_all))
+        ax.set_ylim(min(ys_all), max(ys_all))
+        ax.set_aspect("equal")
+        ax.set_xlabel("X (m)", fontsize=8)
+        ax.set_ylabel("Y (m)", fontsize=8)
+        ax.tick_params(labelsize=7)
+        ax.ticklabel_format(useOffset=False, style="plain")
+        ax.grid(alpha=0.25, lw=0.4)
+        sm = plt.cm.ScalarMappable(cmap=plt.cm.terrain, norm=_mc.Normalize(vmin=zmin, vmax=zmax))
+        cb = fig.colorbar(sm, ax=ax, fraction=0.035, pad=0.02)
+        cb.set_label("Elevasi (m)", fontsize=8)
+        cb.ax.tick_params(labelsize=7)
+        ax.annotate("N", xy=(0.95, 0.93), xytext=(0.95, 0.80), xycoords="axes fraction", textcoords="axes fraction", ha="center", fontsize=10, fontweight="bold",
+                    arrowprops=dict(arrowstyle="-|>", color="black", lw=1.6), zorder=12)
+        ax.plot([], [], marker="v", ms=8, mfc="#FF2D2D", mec="white", ls="none", label="Titik paling kritis")
+        if sections:
+            ax.plot([], [], color="#FFB000", lw=2, label="Garis section")
+        ax.legend(loc="lower left", fontsize=7, framealpha=0.85)
+        fig.tight_layout()
+        fig.savefig(out_path, dpi=dpi)
+        plt.close(fig)
+        return out_path
+    except Exception:
+        plt.close("all")
+        return None
+
+
+def _rep_docx_add_rich(par, text, size=None):
+    """Tulis teks berformat sederhana (<b>, <i>, <font color=...>, <br/>) ke paragraf python-docx."""
+    import html as _html
+    bold = ital = False
+    color = None
+    for tok in re.split(r"(<[^>]+>)", text):
+        if not tok:
+            continue
+        low = tok.lower()
+        if low == "<b>":
+            bold = True
+        elif low == "</b>":
+            bold = False
+        elif low == "<i>":
+            ital = True
+        elif low == "</i>":
+            ital = False
+        elif low.startswith("<font"):
+            m = re.search(r'color="#?([0-9a-fA-F]{6})"', tok)
+            color = m.group(1) if m else None
+        elif low == "</font>":
+            color = None
+        elif low in ("<br/>", "<br>"):
+            par.add_run().add_break()
+        elif tok.startswith("<"):
+            continue
+        else:
+            run = par.add_run(_html.unescape(tok))
+            run.bold, run.italic = bold, ital
+            if color:
+                run.font.color.rgb = DocxRGBColor(int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16))
+            if size:
+                run.font.size = DocxPt(size)
+    return par
+
+
+class _NumberedCanvas(_rl_canvas.Canvas):
+    """Canvas dua-lintasan: menulis 'Halaman X dari Y' di setiap halaman."""
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self._saved = []
+
+    def showPage(self):
+        self._saved.append(dict(self.__dict__))
+        self._startPage()
+
+    def save(self):
+        n = len(self._saved)
+        for st_ in self._saved:
+            self.__dict__.update(st_)
+            self.setFont("Helvetica", 7.5)
+            self.setFillColor(colors.HexColor("#666666"))
+            self.drawRightString(self._pagesize[0] - 2.1 * cm, 1.15 * cm, f"Halaman {self._pageNumber} dari {n}")
+            super().showPage()
+        super().save()
 
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
@@ -8449,6 +8824,19 @@ with tab1:
             _seg_res_left = st.session_state.get("segment_results", {})
 
             if _seg_res_left:
+                st.markdown("---")
+                # ---------------- Data Laporan (metadata halaman judul) ----------------
+                _sub_header(_t("Data Laporan", "Report Details"))
+                st.caption(_t("Tampil pada halaman judul PDF/Word (opsional).", "Shown on the PDF/Word title page (optional)."))
+                _rd1, _rd2 = st.columns(2)
+                with _rd1:
+                    st.text_input(_t("Nama proyek / pekerjaan", "Project / job name"), key="rep_project",
+                                  value=st.session_state.get("active_project_name", "") or "")
+                    st.text_input(_t("Lokasi / IUP", "Location / IUP"), key="rep_location")
+                with _rd2:
+                    st.text_input(_t("Penyusun", "Prepared by"), key="rep_author")
+                    st.text_input(_t("Jenis pekerjaan", "Type of work"), key="rep_worktype",
+                                  placeholder=_t("mis. Sekat/channel drainase tambang", "e.g. Mine drainage check-dam/channel"))
                 st.markdown("---")
                 # ---------------- Lembar Pengesahan (Reviewer) ----------------
                 _sub_header(_t("Lembar Pengesahan (Reviewer)", "Approval Sheet (Reviewer)"))
@@ -12893,6 +13281,18 @@ with tab1:
                                 "TblCellBold", parent=base["Normal"], fontName="Helvetica-Bold",
                                 fontSize=7.4, leading=9.6, alignment=TA_LEFT
                             ),
+                            "StatusBox": ParagraphStyle(
+                                "StatusBox", parent=base["BodyText"], fontName="Helvetica-Bold",
+                                fontSize=11, leading=15, alignment=TA_CENTER, textColor=colors.white
+                            ),
+                            "MetaLabel": ParagraphStyle(
+                                "MetaLabel", parent=base["Normal"], fontName="Helvetica-Bold",
+                                fontSize=8.6, leading=12, textColor=colors.HexColor("#333333")
+                            ),
+                            "MetaVal": ParagraphStyle(
+                                "MetaVal", parent=base["Normal"], fontName="Helvetica",
+                                fontSize=8.6, leading=12, textColor=colors.HexColor("#111111")
+                            ),
                         }
 
                         def _p(text, style="Body"):
@@ -12938,6 +13338,15 @@ with tab1:
                             if caption_text:
                                 parts.append(Paragraph(caption_text, styles["Caption"]))
                             return KeepTogether(parts)
+
+                        def _status_box(text, color_hex):
+                            t = Table([[Paragraph(text, styles["StatusBox"])]], colWidths=[CONTENT_W])
+                            t.setStyle(TableStyle([
+                                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(color_hex)),
+                                ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                                ("LEFTPADDING", (0, 0), (-1, -1), 10), ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+                            ]))
+                            return t
 
                         def _cell_markup(cell):
                             """Siapkan teks sel tabel untuk ReportLab Paragraph.
@@ -13021,17 +13430,38 @@ with tab1:
                         rain_val_global = st.session_state.get("online_rainfall")
 
                         # ===================== COVER / RINGKASAN EKSEKUTIF =====================
-                        story.append(Paragraph("LAPORAN TEKNIS ANALISIS EROSI & SEDIMENTASI", styles["Title"]))
-                        story.append(Paragraph("Evaluasi Geoteknik Sekat/Channel Berbasis Model Numerik DXF", styles["Subtitle"]))
-                        story.append(Spacer(1, 4))
-                        story.append(Paragraph(
-                            f"Diterbitkan {pd.Timestamp.now().strftime('%d %B %Y, %H:%M')} WIB &nbsp;|&nbsp; "
-                            f"{len(seg_results_all)} segmen dianalisis &nbsp;|&nbsp; "
-                            f"Sumber hujan: {(rain_meta_global or {}).get('source', 'tidak tersedia')}",
-                            styles["Subtitle"]
-                        ))
+                        story.append(Paragraph("LAPORAN TEKNIS ANALISIS EROSI, SEDIMENTASI &amp; LIMPASAN", styles["Title"]))
+                        story.append(Paragraph("Evaluasi Geoteknik Sekat/Channel Berbasis Model Numerik DXF (DEM, D8, Hidrologi-Hidrolika)", styles["Subtitle"]))
+                        story.append(Spacer(1, 6))
+                        _rp = st.session_state.get("rep_project") or (st.session_state.get("active_project_name") or "-")
+                        _rl = st.session_state.get("rep_location") or "-"
+                        _ra = st.session_state.get("rep_author") or "-"
+                        _rw = st.session_state.get("rep_worktype") or "-"
+                        _meta_rows = [
+                            [Paragraph("Nama proyek/pekerjaan", styles["MetaLabel"]), Paragraph(f": {_rp}", styles["MetaVal"])],
+                            [Paragraph("Lokasi / IUP", styles["MetaLabel"]), Paragraph(f": {_rl}", styles["MetaVal"])],
+                            [Paragraph("Jenis pekerjaan", styles["MetaLabel"]), Paragraph(f": {_rw}", styles["MetaVal"])],
+                            [Paragraph("Penyusun", styles["MetaLabel"]), Paragraph(f": {_ra}", styles["MetaVal"])],
+                            [Paragraph("Tanggal", styles["MetaLabel"]), Paragraph(f": {pd.Timestamp.now().strftime('%d %B %Y, %H:%M')} WIB", styles["MetaVal"])],
+                            [Paragraph("Jumlah segmen dianalisis", styles["MetaLabel"]), Paragraph(f": {len(seg_results_all)}", styles["MetaVal"])],
+                            [Paragraph("Sumber hujan", styles["MetaLabel"]), Paragraph(f": {(rain_meta_global or {}).get('source', 'tidak tersedia')}", styles["MetaVal"])],
+                        ]
+                        _meta_tbl = Table(_meta_rows, colWidths=[CONTENT_W * 0.28, CONTENT_W * 0.72])
+                        _meta_tbl.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("TOPPADDING", (0, 0), (-1, -1), 1.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5)]))
+                        story.append(_meta_tbl)
                         story.append(Spacer(1, 10))
                         story.append(_divider())
+
+                        # ===================== PETA LOKASI (DEM, boundary, garis section, titik kritis) =====================
+                        _rep_map_path = os.path.join(tempfile.mkdtemp(), "peta_lokasi.png")
+                        if _rep_location_map(seg_results_all, st.session_state.get("section_results"), _rep_map_path):
+                            story.append(_img_block(
+                                _rep_map_path,
+                                "Gambar 1. Peta lokasi (DEM & hillshade) seluruh segmen yang dianalisis — garis berwarna = boundary segmen, "
+                                "garis kuning = garis Cross Section, segitiga merah = titik risiko terparah per segmen.",
+                                max_width=CONTENT_W, max_height=11 * cm, heading="PETA LOKASI &amp; SEGMEN"
+                            ))
+                            story.append(Spacer(1, 6))
 
                         # --- ringkasan eksekutif naratif (abstrak) ---
                         n_seg = len(seg_results_all)
@@ -13100,19 +13530,12 @@ with tab1:
                                 if not _is_critical_lp and not _has_potential_lp:
                                     _low_priority_skip.add(_sid_lp)
 
-                        story.append(Paragraph("RINGKASAN EKSEKUTIF", styles["H1"]))
+                        story.append(Paragraph("RINGKASAN &amp; KESIMPULAN", styles["H1"]))
+                        _F = _rep_facts(seg_results_all, st.session_state.get("section_results"), rain_meta_global, rain_val_global)
+                        for _p_txt in _rep_summary_paragraphs(_F):
+                            story.append(Paragraph(_p_txt, styles["Body"]))
                         story.append(Paragraph(
-                            f"Laporan ini merangkum hasil evaluasi geoteknik otomatis terhadap {n_seg} segmen "
-                            f"sekat/channel berdasarkan pemodelan permukaan 3D dari data DXF, dikombinasikan dengan "
-                            f"analisis hidrologi-hidrolika dan salah satu dari tiga metode erosi (Hjulström, Shields, "
-                            f"atau Partheniades). Rata-rata area berpotensi erosi di seluruh segmen adalah "
-                            f"<b>{avg_erosion_ratio:.1f}%</b>. Segmen dengan indeks risiko tertinggi adalah "
-                            f"<b>{worst_seg['label']}</b> (indeks {worst_seg['max_zone']:.2f} dari skala 0-2). "
-                            f"Dari seluruh segmen, <b>{n_reject}</b> segmen berada pada status kritis/tidak "
-                            f"direkomendasikan dan memerlukan tindak lanjut prioritas. Detail metodologi, kalkulasi "
-                            f"titik kritis, dan rekomendasi rekayasa disajikan secara penuh untuk segmen paling "
-                            f"kritis dan segmen yang punya potensi erosi/sedimentasi nyata pada bagian berikut."
-                            + (
+                            (
                                 f" {len(_overridden_by)} segmen area-nya tumpang tindih dengan segmen lain yang dibuat "
                                 f"belakangan sehingga hasilnya digabung (tidak ditampilkan dobel) — lihat catatan pada "
                                 f"Tabel 1."
@@ -13123,10 +13546,14 @@ with tab1:
                                 f"sedimentasi dibanding segmen lain, jadi ditampilkan ringkas saja (bukan detail penuh) "
                                 f"— lihat catatan pada Tabel 1."
                                 if _low_priority_skip else ""
-                            ),
+                            ) or "Detail metodologi, kalkulasi titik kritis, dan rekomendasi rekayasa disajikan penuh pada bagian berikut.",
                             styles["Body"]
-                        ))
+                        )) if (_overridden_by or _low_priority_skip) else None
                         story.append(Spacer(1, 6))
+                        _kes_key, _kes_txt, _kes_col = _F["conclusion"]
+                        story.append(Paragraph("<b>Kesimpulan:</b>", styles["Body"]))
+                        story.append(_status_box(_kes_txt, _kes_col))
+                        story.append(Spacer(1, 10))
 
                         # tabel ringkasan seluruh segmen (perbandingan)
                         summary_header = ["Segmen", "Metode", "Erosi\n(Ha)", "Sedimentasi\n(Ha)", "Indeks\nRisiko Maks", "Level TARP"]
@@ -13144,6 +13571,35 @@ with tab1:
                                 f"{seg['erosion_area']:.2f}", f"{seg['sedimentation_area']:.2f}",
                                 f"{seg['max_zone']:.2f}", level_name
                             ])
+
+                        story.append(Paragraph("KRITERIA ACUAN", styles["H1"]))
+                        story.append(Paragraph(
+                            "Setiap klasifikasi/ambang pada laporan ini dicatat dasarnya: regulasi, literatur, atau ambang internal (indikatif). "
+                            "Kriteria regulasi yang relevan pada aplikasi ini (Kepmen ESDM 1827 K/30/MEM/2018) mengatur FK/PK kestabilan lereng, "
+                            "BUKAN indeks erosi permukaan -- ambang indeks erosi di bawah ini adalah ambang internal aplikasi dan perlu diselaraskan "
+                            "dengan standar/TARP perusahaan serta validasi lapangan sebelum dipakai untuk keputusan.",
+                            styles["Body"]
+                        ))
+                        story.append(_build_table(
+                            [[Paragraph(c, styles["TblHeader"]) for c in _rep_criteria_rows(_F, pdf_safe=True)[0]]]
+                            + [[Paragraph(_ascii_glyphs(c) if isinstance(c, str) else c, styles["TblCell"]) for c in r] for r in _rep_criteria_rows(_F, pdf_safe=True)[1:]],
+                            col_widths=[CONTENT_W * 0.20, CONTENT_W * 0.32, CONTENT_W * 0.14, CONTENT_W * 0.34],
+                        ))
+                        story.append(Spacer(1, 10))
+
+                        story.append(Paragraph("METODOLOGI", styles["H1"]))
+                        for _mh, _mt in _rep_method_paragraphs(_F):
+                            story.append(Paragraph(f"<b>{_mh}.</b> {_mt}", styles["Body"]))
+                        story.append(Spacer(1, 10))
+
+                        story.append(Paragraph("DATA MASUKAN PER SEGMEN", styles["H1"]))
+                        story.append(_build_table(
+                            [[Paragraph(c, styles["TblHeader"]) for c in _rep_input_rows(seg_results_all)[0]]]
+                            + [[Paragraph(str(c), styles["TblCell"]) for c in r] for r in _rep_input_rows(seg_results_all)[1:]],
+                            col_widths=[CONTENT_W * 0.16, CONTENT_W * 0.16, CONTENT_W * 0.09, CONTENT_W * 0.10, CONTENT_W * 0.10,
+                                       CONTENT_W * 0.09, CONTENT_W * 0.10, CONTENT_W * 0.09, CONTENT_W * 0.11],
+                        ))
+                        story.append(Spacer(1, 10))
 
                         story.append(Paragraph("Tabel 1. Ringkasan Perbandingan Antar Segmen", styles["H2"]))
                         story.append(_build_table(
@@ -14055,6 +14511,36 @@ with tab1:
 
                             story.append(PageBreak())
 
+                        # ===================== INTERPRETASI & REKOMENDASI (RINGKASAN PROYEK) =====================
+                        story.append(Paragraph("INTERPRETASI &amp; REKOMENDASI", styles["H1"]))
+                        _IN = _rep_interpretation(_F, seg_results_all)
+                        if _IN["ai_used"]:
+                            story.append(_status_box(
+                                "\u26a0 Sebagian narasi di bawah dihasilkan AI dari hasil numerik seluruh segmen yang dianalisis. "
+                                "WAJIB DIPERIKSA & DITANDATANGANI ENGINEER GEOTEKNIK BERLISENSI. Nilai indeks/kuantitatif tetap dari solver aplikasi.",
+                                "#D97A00"
+                            ))
+                            story.append(Spacer(1, 8))
+                        story.append(Paragraph("Ringkasan Status", styles["H2"]))
+                        story.append(Paragraph(_IN["status_par"], styles["Body"]))
+                        if _IN["drivers"]:
+                            story.append(Paragraph("Faktor Pengendali", styles["H2"]))
+                            for _dn, _dt in _IN["drivers"]:
+                                story.append(Paragraph(f"<b>{_dn}:</b> {_dt}", styles["Bullet"]))
+                        if _IN["fit"]:
+                            story.append(Paragraph("Kesesuaian Kriteria", styles["H2"]))
+                            for _ft, _fc in _IN["fit"]:
+                                _col = {"critical": "#C62828", "warn": "#D97A00", "ok": "#1B7F3B"}[_fc]
+                                story.append(Paragraph(f'<font color="{_col}">\u25cf</font> {_ft}', styles["Bullet"]))
+                        if _IN["worst_narrative"]:
+                            story.append(Paragraph(f"Catatan tambahan — {_F['worst'].get('label', '-')}", styles["H2"]))
+                            story.append(Paragraph(_IN["worst_narrative"].replace(chr(10), "<br/>"), styles["Body"]))
+                        if _IN["worst_recs"]:
+                            story.append(Paragraph(f"Rekomendasi prioritas — {_F['worst'].get('label', '-')}", styles["H2"]))
+                            for _r in _IN["worst_recs"]:
+                                story.append(Paragraph(f"• {_r}", styles["Bullet"]))
+                        story.append(Spacer(1, 10))
+
                         # ===================== LEMBAR PENGESAHAN (REVIEWER SIGN-OFF) =====================
                         if reviewer_name or reviewer_role or reviewer_signature_path:
                             story.append(Paragraph("LEMBAR PENGESAHAN", styles["H1"]))
@@ -14174,11 +14660,82 @@ with tab1:
 
                         docx_doc = DocxDocument()
 
-                        _t_title = docx_doc.add_heading("LAPORAN TEKNIS ANALISIS EROSI & SEDIMENTASI", level=0)
+                        def _docx_status_box(doc_, text, hex_color):
+                            tb = doc_.add_table(rows=1, cols=1)
+                            c = tb.cell(0, 0)
+                            c.text = text
+                            for p_ in c.paragraphs:
+                                p_.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                for r_ in p_.runs:
+                                    r_.font.bold = True
+                                    r_.font.size = DocxPt(12)
+                                    r_.font.color.rgb = DocxRGBColor(0xFF, 0xFF, 0xFF)
+                            _docx_shade_cell(c, hex_color.lstrip("#"))
+                            return tb
+
+                        _t_title = docx_doc.add_heading("LAPORAN TEKNIS ANALISIS EROSI, SEDIMENTASI & LIMPASAN", level=0)
                         for run in _t_title.runs:
                             run.font.color.rgb = DocxRGBColor(0x0B, 0x3D, 0x2E)
-                        _sub_p = docx_doc.add_paragraph("Evaluasi Geoteknik Sekat/Channel Berbasis Model Numerik DXF")
+                        _sub_p = docx_doc.add_paragraph("Evaluasi Geoteknik Sekat/Channel Berbasis Model Numerik DXF (DEM, D8, Hidrologi-Hidrolika)")
                         _sub_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+                        _rp_d = st.session_state.get("rep_project") or (st.session_state.get("active_project_name") or "-")
+                        _rl_d = st.session_state.get("rep_location") or "-"
+                        _ra_d = st.session_state.get("rep_author") or "-"
+                        _rw_d = st.session_state.get("rep_worktype") or "-"
+                        for _lbl, _val in [("Nama proyek/pekerjaan", _rp_d), ("Lokasi / IUP", _rl_d), ("Jenis pekerjaan", _rw_d),
+                                          ("Penyusun", _ra_d), ("Tanggal", pd.Timestamp.now().strftime("%d %B %Y, %H:%M") + " WIB"),
+                                          ("Jumlah segmen dianalisis", str(n_seg)),
+                                          ("Sumber hujan", (rain_meta_global or {}).get("source", "tidak tersedia"))]:
+                            _pm = docx_doc.add_paragraph()
+                            _pm.add_run(f"{_lbl}: ").bold = True
+                            _pm.add_run(str(_val))
+
+                        _rep_map_path_docx = os.path.join(tempfile.mkdtemp(), "peta_lokasi_docx.png")
+                        if _rep_location_map(seg_results_all, st.session_state.get("section_results"), _rep_map_path_docx):
+                            _docx_heading(docx_doc, "PETA LOKASI & SEGMEN", level=1)
+                            docx_doc.add_picture(_rep_map_path_docx, width=DocxCm(16))
+                            docx_doc.add_paragraph(
+                                "Gambar 1. Peta lokasi (DEM & hillshade) seluruh segmen yang dianalisis — garis berwarna = boundary segmen, "
+                                "garis kuning = garis Cross Section, segitiga merah = titik risiko terparah per segmen."
+                            ).italic = True
+
+                        _docx_heading(docx_doc, "RINGKASAN & KESIMPULAN", level=1)
+                        _Fd = _rep_facts(seg_results_all, st.session_state.get("section_results"), rain_meta_global, rain_val_global)
+                        for _p_txt_d in _rep_summary_paragraphs(_Fd):
+                            _rep_docx_add_rich(docx_doc.add_paragraph(), _p_txt_d)
+                        if _overridden_by or _low_priority_skip:
+                            docx_doc.add_paragraph(
+                                (f" {len(_overridden_by)} segmen area-nya tumpang tindih dengan segmen lain yang dibuat "
+                                 f"belakangan sehingga hasilnya digabung (tidak ditampilkan dobel) — lihat catatan pada Tabel 1."
+                                 if _overridden_by else "")
+                                + (f" {len(_low_priority_skip)} segmen risikonya rendah & ditampilkan ringkas — lihat Tabel 1."
+                                   if _low_priority_skip else "")
+                            )
+                        _kes_key_d, _kes_txt_d, _kes_col_d = _Fd["conclusion"]
+                        _pkes = docx_doc.add_paragraph()
+                        _pkes.add_run("Kesimpulan:").bold = True
+                        _docx_status_box(docx_doc, _kes_txt_d, _kes_col_d)
+                        docx_doc.add_paragraph("")
+
+                        _docx_heading(docx_doc, "KRITERIA ACUAN", level=1)
+                        docx_doc.add_paragraph(
+                            "Setiap klasifikasi/ambang pada laporan ini dicatat dasarnya: regulasi, literatur, atau ambang internal (indikatif). "
+                            "Kriteria regulasi yang relevan pada aplikasi ini (Kepmen ESDM 1827 K/30/MEM/2018) mengatur FK/PK kestabilan lereng, "
+                            "BUKAN indeks erosi permukaan — ambang indeks erosi di bawah ini adalah ambang internal aplikasi dan perlu diselaraskan "
+                            "dengan standar/TARP perusahaan serta validasi lapangan sebelum dipakai untuk keputusan."
+                        )
+                        _docx_table(docx_doc, _rep_criteria_rows(_Fd, pdf_safe=False))
+
+                        _docx_heading(docx_doc, "METODOLOGI", level=1)
+                        for _mh_d, _mt_d in _rep_method_paragraphs(_Fd):
+                            _pmm = docx_doc.add_paragraph()
+                            _pmm.add_run(f"{_mh_d}. ").bold = True
+                            _pmm.add_run(_mt_d)
+
+                        _docx_heading(docx_doc, "DATA MASUKAN PER SEGMEN", level=1)
+                        _docx_table(docx_doc, _rep_input_rows(seg_results_all))
+                        docx_doc.add_page_break()
 
                         _docx_heading(docx_doc, "RINGKASAN EKSEKUTIF", level=1)
                         docx_doc.add_paragraph(
@@ -14571,6 +15128,35 @@ with tab1:
                                 ).italic = True
 
                             docx_doc.add_page_break()
+
+                        _docx_heading(docx_doc, "INTERPRETASI & REKOMENDASI", level=1)
+                        _INd = _rep_interpretation(_Fd, seg_results_all)
+                        if _INd["ai_used"]:
+                            _docx_status_box(docx_doc, "\u26a0 Sebagian narasi di bawah dihasilkan AI dari hasil numerik seluruh segmen. "
+                                             "WAJIB DIPERIKSA & DITANDATANGANI ENGINEER GEOTEKNIK BERLISENSI. Nilai indeks/kuantitatif tetap dari solver aplikasi.",
+                                             "#D97A00")
+                            docx_doc.add_paragraph("")
+                        _docx_heading(docx_doc, "Ringkasan Status", level=2)
+                        _rep_docx_add_rich(docx_doc.add_paragraph(), _INd["status_par"])
+                        if _INd["drivers"]:
+                            _docx_heading(docx_doc, "Faktor Pengendali", level=2)
+                            for _dn_d, _dt_d in _INd["drivers"]:
+                                _pfd = docx_doc.add_paragraph(style="List Bullet")
+                                _pfd.add_run(f"{_dn_d}: ").bold = True
+                                _pfd.add_run(_dt_d)
+                        if _INd["fit"]:
+                            _docx_heading(docx_doc, "Kesesuaian Kriteria", level=2)
+                            for _ft_d, _fc_d in _INd["fit"]:
+                                _pft = docx_doc.add_paragraph(style="List Bullet")
+                                _rep_docx_add_rich(_pft, _ft_d)
+                        if _INd["worst_narrative"]:
+                            _docx_heading(docx_doc, f"Catatan tambahan — {_Fd['worst'].get('label', '-')}", level=2)
+                            docx_doc.add_paragraph(_INd["worst_narrative"])
+                        if _INd["worst_recs"]:
+                            _docx_heading(docx_doc, f"Rekomendasi prioritas — {_Fd['worst'].get('label', '-')}", level=2)
+                            for _r_d in _INd["worst_recs"]:
+                                docx_doc.add_paragraph(str(_r_d), style="List Bullet")
+                        docx_doc.add_page_break()
 
                         if reviewer_name or reviewer_role or reviewer_signature_path:
                             _docx_heading(docx_doc, "LEMBAR PENGESAHAN", level=1)
