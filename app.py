@@ -333,7 +333,7 @@ _PROJECT_RESULT_KEYS = {
     "section_distance", "section_elevation", "section_erosion", "section_sediment",
     "model", "best_model", "df_pred",
     "design_recon_dxf_bytes", "design_recon_cutfill_cache", "design_recon_cutfill_sig",
-    "gen_report_run", "xs_run", "_cover_baseline",
+    "gen_report_run", "xs_run", "_cover_baseline", "fk_result",
 }
 _PROJECT_RESULT_PREFIXES = (
     "_flow_cache_", "_dem_cache_", "_d8_cache_", "orthophoto_parsed_", "sat_basemap_",
@@ -711,6 +711,9 @@ def _is_widget_event_key(_k, _v=None):
     # Objek internal Streamlit (mis. state seleksi chart) tidak boleh masuk project -- KECUALI file
     # upload (UploadedFile juga bertipe streamlit.*, tapi isinya DXF/orthophoto yang HARUS disimpan).
     if type(_v).__name__ == "_PlainState":
+        return True
+    # state data_editor ({"edited_rows","added_rows","deleted_rows"}) = state WIDGET: tak boleh di-assign lewat session_state
+    if isinstance(_v, dict) and {"edited_rows", "added_rows", "deleted_rows"} <= set(_v.keys()):
         return True
     # model ML (sklearn/xgboost/dst) TIDAK disimpan di project: kelasnya terlalu banyak untuk allowlist
     # keamanan dan model bisa dilatih ulang dari data (df_clean) di tab Machine Learning.
@@ -1956,6 +1959,20 @@ REFERENCE_LIBRARY = {
     "sni8460": ("standar", "SNI 8460:2017",
                 "SNI 8460:2017, Persyaratan perancangan geoteknik. Badan Standardisasi Nasional (memuat stabilitas lereng galian & timbunan dan "
                 "kriteria faktor keamanan; baca tabel pada dokumen resmi).", True),
+    "bishop1955": ("literatur", "Bishop (1955)",
+                   "Bishop, A.W. (1955). The use of the slip circle in the stability analysis of slopes. Geotechnique, 5(1), 7-17.", False),
+    "janbu1973": ("literatur", "Janbu (1973)",
+                  "Janbu, N. (1973). Slope stability computations. In: Hirschfeld, R.C. & Poulos, S.J. (eds.), Embankment-Dam Engineering (Casagrande Volume), "
+                  "Wiley, New York, 47-86 (faktor koreksi f0).", False),
+    "morgenstern_price1965": ("literatur", "Morgenstern & Price (1965)",
+                              "Morgenstern, N.R. & Price, V.E. (1965). The analysis of the stability of general slip surfaces. Geotechnique, 15(1), 79-93.", False),
+    "fredlund_krahn1977": ("literatur", "Fredlund & Krahn (1977)",
+                           "Fredlund, D.G. & Krahn, J. (1977). Comparison of slope stability methods of analysis. Canadian Geotechnical Journal, 14(3), 429-439.", False),
+    "taylor1937": ("literatur", "Taylor (1937)",
+                   "Taylor, D.W. (1937). Stability of earth slopes. Journal of the Boston Society of Civil Engineers, 24(3), 337-386.", False),
+    "giam_donald1989": ("literatur", "Giam & Donald (1989)",
+                        "Giam, P.S.K. & Donald, I.B. (1989). Example problems for testing soil slope stability programs. Civil Engineering Research Report "
+                        "No. 8/1989, Monash University (soal uji ACADS).", False),
     "hazen1892": ("literatur", "Hazen (1892)",
                   "Hazen, A. (1892). Some physical properties of sands and gravels, with special reference to their use "
                   "in filtration. 24th Annual Report, Massachusetts State Board of Health, 539-556.", False),
@@ -2235,6 +2252,24 @@ CLASSIFICATION_REGISTRY = {
                    "lurus antar dua elevasi rencana — untuk desain berbentuk lain gunakan tab Rekonstruksi Desain/perangkat CAD. Jarak antar penampang dianggap antara titik tengah garis section.",
                    "The average end-area method is standard for cut/fill volumes; it is accurate when sections are close and change gradually. The design line here is a straight line between two "
                    "design elevations — for other shapes use the Design Reconstruction tab/CAD. Spacing is taken between section-line midpoints."),
+    },
+    "slope_lem": {
+        "title": ("FK lereng 2-D: Bishop, Janbu, Morgenstern-Price (bidang gelincir lingkaran)", "2-D slope FS: Bishop, Janbu, Morgenstern-Price (circular slip surfaces)"),
+        "where": ("Tab Stabilitas Lereng (FK)", "Slope Stability (FS) tab"),
+        "rule": "Kesetimbangan batas metode irisan. Bishop: kesetimbangan momen, tanpa gaya geser antar-irisan. Janbu: kesetimbangan gaya horizontal, tanpa gaya geser antar-irisan; terkoreksi "
+                "f0 = 1 + b1[d/L − 1,4(d/L)²] (b1 = 0,31 c=0; 0,69 φ=0; 0,50 c-φ). Morgenstern-Price: gaya geser antar-irisan X = λ·f(x)·E, f half-sine (atau konstan = Spencer), "
+                "memenuhi kesetimbangan gaya DAN momen. Pencarian: grid pusat × jari-jari (Bishop) lalu optimasi Nelder-Mead per metode. Pseudo-statik: gaya horizontal kh·W.",
+        "basis": "campuran", "refs": ["bishop1955", "janbu1973", "morgenstern_price1965", "fredlund_krahn1977", "taylor1937", "giam_donald1989", "kepmen1827", "sni8460"],
+        "caveat": ("Metode dari literatur. Diuji internal: ACADS EX1(a) Bishop 0,985 / Janbu tanpa koreksi 0,935 / M-P 0,984 (literatur ≈ 1,0); Bishop sama dgn pustaka pembanding pyslope; "
+                   "Taylor φ=0 cocok; irisan planar cocok dgn infinite slope. Batasan: HANYA bidang lingkaran; lapisan berupa offset vertikal dari muka tanah; tanpa retak tarik, perkuatan, "
+                   "beban luar, gempa non-pseudostatik, dan probabilitas longsor (PK). Pencarian numerik bisa terjebak minimum lokal pada geometri rumit. Penilaian 'memenuhi kriteria' "
+                   "memakai FK minimum yang DIISI PENGGUNA: kriteria penerimaan ada di Kepmen ESDM 1827 K/30/MEM/2018 (FK/PK lereng tambang menurut jenis lereng & keparahan longsor) dan SNI 8460:2017 — "
+                   "baca dokumen resmi. Bukan pengganti Slide2/Slide3 pada laporan formal.",
+                   "Methods from the literature. Internal tests: ACADS EX1(a) Bishop 0.985 / uncorrected Janbu 0.935 / M-P 0.984 (literature ≈ 1.0); Bishop equals the independent library pyslope; "
+                   "Taylor φ=0 matches; planar slices match infinite slope. Limits: circular surfaces ONLY; layers are vertical offsets from the ground; no tension cracks, reinforcement, external loads, "
+                   "non-pseudo-static seismic loading or probability of failure (PoF). The numerical search may get trapped in local minima for complex geometry. The 'meets criterion' assessment uses a "
+                   "minimum FS ENTERED BY THE USER: acceptance criteria are in Kepmen ESDM 1827 K/30/MEM/2018 (mine-slope FS/PoF by slope type & consequence) and SNI 8460:2017 — read the official documents. "
+                   "Not a replacement for Slide2/Slide3 in formal reports."),
     },
     "slope_fs": {
         "title": ("Faktor Keamanan (FK) lereng — TIDAK dihitung di aplikasi ini", "Slope Factor of Safety (FS) — NOT computed in this app"),
@@ -3184,6 +3219,795 @@ def _render_xs_export_cutfill(section_results):
         else:
             st.caption(_t("Volume antar penampang butuh minimal 2 garis section (buat lebih dari satu garis).", "Volumes between sections need at least 2 section lines (draw more than one)."))
 
+
+# =====================================================================
+# KESTABILAN LERENG 2-D (kesetimbangan batas, metode irisan) -- fungsi murni
+# Bishop simplified, Janbu simplified (+ koreksi f0), Morgenstern-Price (half-sine / konstan = Spencer)
+# Permukaan gelincir: LINGKARAN. Lapisan tanah: offset vertikal dari muka tanah.
+# =====================================================================
+_GAMMA_W = 9.81
+
+
+def fk_normalize_profile(x, z, extend_frac=1.5):
+    """Urutkan x naik, cerminkan bila perlu agar lereng MENURUN ke kanan (crest kiri, toe kanan), lalu perpanjang
+    datar di kedua ujung. Return (x, z, flipped, C) dgn pemetaan cermin x' = C - x."""
+    x = np.asarray(x, dtype=float)
+    z = np.asarray(z, dtype=float)
+    o = np.argsort(x)
+    x, z = x[o], z[o]
+    C = float(x[0] + x[-1])
+    flipped = bool(z[0] < z[-1])
+    if flipped:
+        x, z = (C - x)[::-1], z[::-1]
+    H = float(z.max() - z.min())
+    L = float(x[-1] - x[0])
+    ext = float(extend_frac * max(H, 0.25 * L, 1.0))
+    xe = np.concatenate([[x[0] - ext], x, [x[-1] + ext]])
+    ze = np.concatenate([[z[0]], z, [z[-1]]])
+    return xe, ze, flipped, C
+
+
+def fk_materials(layers):
+    """layers: list dict {thickness (m, vertikal; terakhir diabaikan=tak hingga), gamma, gamma_sat, c, phi}."""
+    th = [float(l.get("thickness") or 0.0) for l in layers]
+    bottoms = np.cumsum(th)
+    bottoms[-1] = 1e9
+    return {"bottom": bottoms, "gamma": np.array([float(l["gamma"]) for l in layers]),
+            "gsat": np.array([float(l["gamma_sat"]) for l in layers]),
+            "c": np.array([float(l["c"]) for l in layers]),
+            "tanphi": np.tan(np.radians([float(l["phi"]) for l in layers])),
+            "phi": np.array([float(l["phi"]) for l in layers])}
+
+
+def _water_level(water, xq, zg):
+    """Elevasi muka air pada x (atau None). water: {'type': 'none'|'ru'|'depth'|'elev', 'value': ...}."""
+    t = (water or {}).get("type", "none")
+    if t == "depth":
+        return zg - float(water["value"])
+    if t == "elev":
+        return np.full_like(zg, float(water["value"]))
+    return None
+
+
+def fk_build_slices(prof, mat, water, cx, cy, R, n=40, kh=0.0, kv=0.0):
+    """Bangun irisan vertikal utk lingkaran (cx, cy, R). None bila lingkaran tidak sah."""
+    x, z = prof
+    xs = np.linspace(x[0], x[-1], 1200)
+    zg = np.interp(xs, x, z)
+    dxc = xs - cx
+    ok = np.abs(dxc) < R
+    yb = np.full_like(xs, np.nan)
+    yb[ok] = cy - np.sqrt(np.maximum(R * R - dxc[ok] ** 2, 0.0))
+    inside = ok & (yb < zg - 1e-9)
+    if inside.sum() < 5:
+        return None
+    idx = np.where(inside)[0]
+    i0, i1 = idx[0], idx[-1]
+    if (i1 - i0 + 1) != inside.sum():  # tidak kontigu -> lingkaran memotong tanah > 1 kali (tak sah)
+        return None
+    if i0 <= 1 or i1 >= len(xs) - 2:
+        return None  # keluar/masuk di luar profil
+    def _cross(i_a, i_b):
+        fa = zg[i_a] - yb[i_a] if np.isfinite(yb[i_a]) else -1.0
+        fb = zg[i_b] - yb[i_b] if np.isfinite(yb[i_b]) else -1.0
+        t = fa / (fa - fb) if (fa - fb) != 0 else 0.0
+        return xs[i_a] + t * (xs[i_b] - xs[i_a])
+    x_in = _cross(i0 - 1, i0)
+    x_out = _cross(i1 + 1, i1)
+    if x_out - x_in < 1e-3:
+        return None
+    b = (x_out - x_in) / n
+    xc = x_in + b * (np.arange(n) + 0.5)
+    zc = np.interp(xc, x, z)
+    dx = xc - cx
+    yc_b = cy - np.sqrt(np.maximum(R * R - dx * dx, 0.0))
+    H = zc - yc_b
+    keep = H > 1e-6
+    if keep.sum() < max(6, n // 2):
+        return None
+    sina = (cx - xc) / R
+    cosa = np.sqrt(np.maximum(1.0 - sina * sina, 0.0))
+    if np.any(cosa < 0.05):
+        return None
+    tanphi_l = mat["tanphi"]
+    # bahan di dasar irisan (kedalaman dasar dari muka tanah)
+    depth_b = zc - yc_b
+    kb = np.minimum(np.searchsorted(mat["bottom"], depth_b, side="left"), len(mat["bottom"]) - 1)
+    c_b = mat["c"][kb]
+    tphi_b = mat["tanphi"][kb]
+    # berat kolom per lapisan, dgn pembagian jenuh/lembab menurut muka air
+    tops = np.concatenate([[0.0], mat["bottom"][:-1]])
+    zw = _water_level(water, xc, zc)
+    if zw is not None:
+        zw = np.minimum(zw, zc)  # muka air dibatasi muka tanah (tak ada genangan di atas tanah)
+    W = np.zeros(n)
+    for k in range(len(mat["bottom"])):
+        top_e = zc - tops[k]
+        bot_e = np.maximum(zc - mat["bottom"][k], yc_b)
+        length = np.clip(top_e - bot_e, 0.0, None)
+        if zw is None:
+            sat = np.zeros(n)
+        else:
+            sat = np.clip(np.minimum(top_e, zw) - bot_e, 0.0, None)
+            sat = np.minimum(sat, length)
+        W += b * (mat["gamma"][k] * (length - sat) + mat["gsat"][k] * sat)
+    l = b / cosa
+    if (water or {}).get("type") == "ru":
+        u = float(water["value"]) * W / b
+    elif zw is not None:
+        u = _GAMMA_W * np.clip(zw - yc_b, 0.0, None)
+        if (water or {}).get("cos2"):
+            u = u * cosa * cosa  # aliran sejajar dasar irisan (tinggi tekan tegak lurus = tinggi vertikal x cos^2 alpha)
+    else:
+        u = np.zeros(n)
+    yc_cent = 0.5 * (zc + yc_b)
+    # jarak d/L utk koreksi Janbu
+    xa, za = x_in, float(np.interp(x_in, x, z))
+    xb_, zb_ = x_out, float(np.interp(x_out, x, z))
+    Lc = float(np.hypot(xb_ - xa, zb_ - za))
+    dist = np.abs((zb_ - za) * (xc - xa) - (xb_ - xa) * (yc_b - za)) / max(Lc, 1e-9)
+    return {"n": n, "b": b, "x": xc, "zg": zc, "yb": yc_b, "sina": sina, "cosa": cosa, "alpha": np.arcsin(sina),
+            "W": W, "l": l, "u": u, "c": c_b, "tphi": tphi_b, "phi": mat["phi"][kb], "ycen": yc_cent,
+            "cx": cx, "cy": cy, "R": R, "x_in": x_in, "x_out": x_out, "kh": kh, "kv": kv,
+            "chord_L": Lc, "d_max": float(dist.max()), "mat_idx": kb}
+
+
+def _sums(sl):
+    return sl["W"] * (1.0 - sl["kv"])
+
+
+def fk_bishop(sl, tol=1e-6, maxit=200):
+    W = _sums(sl)
+    cb = sl["c"] * sl["b"]
+    num_const = cb + (W - sl["u"] * sl["b"]) * sl["tphi"]
+    drive = np.sum(W * sl["sina"]) + sl["kh"] * np.sum(W * (sl["cy"] - sl["ycen"])) / sl["R"]
+    if drive <= 1e-9:
+        return float("inf")
+    F = 1.5
+    for _ in range(maxit):
+        m = sl["cosa"] + sl["sina"] * sl["tphi"] / F
+        Fn = float(np.sum(num_const / m) / drive)
+        if abs(Fn - F) < tol:
+            return Fn
+        F = Fn if Fn > 0.05 else 0.05
+    return float(F)
+
+
+def _N_S(sl, F, dX=0.0):
+    W = _sums(sl)
+    A = sl["cosa"] + sl["sina"] * sl["tphi"] / F
+    Bn = W - (sl["c"] * sl["l"] * sl["sina"] - sl["u"] * sl["l"] * sl["tphi"] * sl["sina"]) / F
+    N = (Bn + dX) / A
+    S = (sl["c"] * sl["l"] + (N - sl["u"] * sl["l"]) * sl["tphi"]) / F
+    return N, S
+
+
+def fk_janbu(sl, corrected=True, tol=1e-6, maxit=200):
+    """Janbu simplified: kesetimbangan gaya horizontal, tanpa gaya geser antar irisan. Bila corrected: x f0."""
+    W = _sums(sl)
+    F = 1.5
+    for _ in range(maxit):
+        N, _S = _N_S(sl, F)
+        res = np.sum((sl["c"] * sl["l"] + (N - sl["u"] * sl["l"]) * sl["tphi"]) * sl["cosa"])
+        drv = np.sum(N * sl["sina"] + sl["kh"] * W)
+        if drv <= 1e-9:
+            return float("inf")
+        Fn = float(res / drv)
+        if abs(Fn - F) < tol:
+            F = Fn
+            break
+        F = Fn if Fn > 0.05 else 0.05
+    if not corrected:
+        return float(F)
+    all_c0 = np.all(sl["c"] < 1e-6)
+    all_p0 = np.all(sl["phi"] < 1e-6)
+    b1 = 0.31 if all_c0 else (0.69 if all_p0 else 0.50)
+    dL = sl["d_max"] / max(sl["chord_L"], 1e-9)
+    f0 = 1.0 + b1 * (dL - 1.4 * dL * dL)
+    return float(F * f0)
+
+
+def _mp_run(sl, F, lam, fx):
+    """Rekursi gaya antar-irisan (Morgenstern-Price): X = lam*f(x)*E. Return (E_n, sum_S, N, S, E)."""
+    n = sl["n"]
+    W = _sums(sl)
+    A = sl["cosa"] + sl["sina"] * sl["tphi"] / F
+    Bn = W - (sl["c"] * sl["l"] * sl["sina"] - sl["u"] * sl["l"] * sl["tphi"] * sl["sina"]) / F
+    C0 = (sl["c"] * sl["l"] - sl["u"] * sl["l"] * sl["tphi"]) / F
+    t = sl["tphi"] / F
+    g = (sl["sina"] - t * sl["cosa"]) / A
+    E = np.zeros(n + 1)
+    for j in range(n):
+        fj, fj1 = fx[j + 1], fx[j]
+        den = 1.0 - g[j] * lam * fj
+        if abs(den) < 1e-9:
+            den = 1e-9
+        E[j + 1] = (E[j] * (1.0 - g[j] * lam * fj1) + g[j] * Bn[j] - C0[j] * sl["cosa"][j] + sl["kh"] * W[j]) / den
+    X = lam * fx * E
+    dX = X[1:] - X[:-1]
+    N = (Bn + dX) / A
+    S = (sl["c"] * sl["l"] + (N - sl["u"] * sl["l"]) * sl["tphi"]) / F
+    return E, X, N, S
+
+
+def fk_morgenstern_price(sl, ftype="halfsine", F0=None, return_detail=False):
+    """Morgenstern-Price (lingkaran): selesaikan (F, lambda) agar gaya horizontal DAN momen (thd pusat) seimbang."""
+    from scipy.optimize import root
+    n = sl["n"]
+    xb = np.linspace(sl["x_in"], sl["x_out"], n + 1)
+    fx = np.sin(np.pi * (xb - xb[0]) / (xb[-1] - xb[0])) if ftype == "halfsine" else np.ones(n + 1)
+    fx[0] = fx[-1] = 0.0 if ftype == "halfsine" else 1.0
+    W = _sums(sl)
+    sc = float(np.sum(W)) + 1e-9
+
+    def resid(p):
+        F, lam = p
+        if F <= 0.05:
+            return [1e3, 1e3]
+        E, X, N, S = _mp_run(sl, F, lam, fx)
+        m_res = np.sum(W * sl["sina"]) + sl["kh"] * np.sum(W * (sl["cy"] - sl["ycen"])) / sl["R"] - np.sum(S)
+        return [E[-1] / sc, m_res / sc]
+
+    Fb = F0 if F0 is not None else fk_bishop(sl)
+    if not np.isfinite(Fb):
+        return float("nan") if not return_detail else (float("nan"), None)
+    best = None
+    for lam0 in (0.0, 0.3, -0.2, 0.6):
+        sol = root(resid, [Fb, lam0], method="hybr", tol=1e-10)
+        if sol.success and sol.x[0] > 0.05 and max(abs(np.array(resid(sol.x)))) < 1e-6:
+            best = sol.x
+            break
+    if best is None:
+        return float("nan") if not return_detail else (float("nan"), None)
+    F, lam = float(best[0]), float(best[1])
+    if not return_detail:
+        return F
+    E, X, N, S = _mp_run(sl, F, lam, fx)
+    return F, {"lambda": lam, "E": E, "X": X, "N": N, "S": S, "xb": xb}
+
+
+def fk_eval(prof, mat, water, cx, cy, R, method, n=40, kh=0.0, mp_ftype="halfsine"):
+    sl = fk_build_slices(prof, mat, water, cx, cy, R, n=n, kh=kh)
+    if sl is None:
+        return float("nan"), None
+    if method == "bishop":
+        F = fk_bishop(sl)
+    elif method == "janbu":
+        F = fk_janbu(sl, corrected=True)
+    elif method == "janbu_simple":
+        F = fk_janbu(sl, corrected=False)
+    else:
+        F = fk_morgenstern_price(sl, ftype=mp_ftype)
+    return F, sl
+
+
+def fk_search(prof, mat, water, kh=0.0, methods=("bishop", "janbu", "mp"), n_search=30, n_final=50,
+              nx=14, ny=9, nr=8, mp_ftype="halfsine", depth_extra=None):
+    """Cari lingkaran kritis: grid pusat x jari-jari (Bishop) lalu perbaikan Nelder-Mead per metode."""
+    from scipy.optimize import minimize
+    x, z = prof
+    zmax, zmin = float(z.max()), float(z.min())
+    H = max(zmax - zmin, 1.0)
+    xs_ = np.linspace(x[0] + 0.15 * (x[-1] - x[0]), x[-1] - 0.15 * (x[-1] - x[0]), nx)
+    ys_ = np.linspace(zmax + 0.2 * H, zmax + 2.2 * H, ny)
+    depth_extra = 0.6 * H if depth_extra is None else depth_extra
+    grid_fs = np.full((ny, nx), np.inf)
+    cand = []
+    for iy, cy in enumerate(ys_):
+        for ix, cx in enumerate(xs_):
+            r_lo = max(cy - zmin - 0.02 * H, 0.05 * H)
+            r_hi = cy - (zmin - depth_extra)
+            for R in np.linspace(r_lo, r_hi, nr):
+                sl = fk_build_slices(prof, mat, water, cx, cy, R, n=n_search, kh=kh)
+                if sl is None:
+                    continue
+                F = fk_bishop(sl)
+                if np.isfinite(F) and F > 0:
+                    cand.append((F, cx, cy, R))
+                    if F < grid_fs[iy, ix]:
+                        grid_fs[iy, ix] = F
+    if not cand:
+        return None
+    cand.sort(key=lambda t: t[0])
+    out = {"grid_x": xs_, "grid_y": ys_, "grid_fs": np.where(np.isfinite(grid_fs), grid_fs, np.nan),
+           "trials": cand[:60], "results": {}}
+    starts = cand[0][1:]
+    for m in methods:
+        def f(p):
+            F, sl = fk_eval(prof, mat, water, p[0], p[1], p[2], m, n=n_search, kh=kh, mp_ftype=mp_ftype)
+            return F if (np.isfinite(F) and F > 0) else 50.0
+        # mulai dari beberapa kandidat terbaik agar tak terjebak minimum lokal
+        best = None
+        for st_ in [cand[0][1:]] + [c[1:] for c in cand[1:4]]:
+            r = minimize(f, list(st_), method="Nelder-Mead", options={"xatol": 1e-3 * H, "fatol": 1e-5, "maxiter": 220})
+            if best is None or r.fun < best.fun:
+                best = r
+        cx, cy, R = best.x
+        F, sl = fk_eval(prof, mat, water, cx, cy, R, m, n=n_final, kh=kh, mp_ftype=mp_ftype)
+        if sl is None or not np.isfinite(F):  # lingkaran hasil optimasi berada di tepi daerah sah -> pakai n pencarian / kandidat terbaik
+            F, sl = fk_eval(prof, mat, water, cx, cy, R, m, n=n_search, kh=kh, mp_ftype=mp_ftype)
+        if sl is None or not np.isfinite(F):
+            cx, cy, R = cand[0][1:]
+            F, sl = fk_eval(prof, mat, water, cx, cy, R, m, n=n_final, kh=kh, mp_ftype=mp_ftype)
+        if sl is not None and np.isfinite(F):
+            out["results"][m] = {"fs": float(F), "cx": float(cx), "cy": float(cy), "R": float(R),
+                                 "x_in": float(sl["x_in"]), "x_out": float(sl["x_out"])}
+    return out
+
+
+# =====================================================================
+# TAB "STABILITAS LERENG (FK)" -- UI + grafik bidang gelincir
+# =====================================================================
+_FK_METHOD_LABEL = {"bishop": "Bishop (simplified)", "janbu": "Janbu (simplified, terkoreksi f0)",
+                    "janbu_simple": "Janbu (simplified, tanpa koreksi)", "mp": "Morgenstern-Price"}
+_FK_LAYER_COLORS = ["#d9c48a", "#a9834b", "#8b6f47", "#6fae4a", "#7f8fa6", "#c9a0a0"]
+
+
+def _fk_disp_x(x, flipped, C):
+    x = np.asarray(x, dtype=float)
+    return (C - x) if flipped else x
+
+
+def _fk_arc(cx, cy, R, x_in, x_out, npts=120):
+    xs_ = np.linspace(x_in, x_out, npts)
+    return xs_, cy - np.sqrt(np.maximum(R * R - (xs_ - cx) ** 2, 0.0))
+
+
+def _fk_model_figure(prof, flipped, C, layers, water, res, method, show_trials=True, show_slices=True, n_show=40):
+    x, z = prof
+    xd = _fk_disp_x(x, flipped, C)
+    o = np.argsort(xd)
+    zmin, zmax = float(z.min()), float(z.max())
+    H = max(zmax - zmin, 1.0)
+    y_bot = zmin - 1.3 * H
+    fig = go.Figure()
+    tops = np.concatenate([[0.0], np.cumsum([float(l.get("thickness") or 0.0) for l in layers])[:-1]])
+    bots = list(np.cumsum([float(l.get("thickness") or 0.0) for l in layers])[:-1]) + [1e9]
+    for k, l in enumerate(layers):
+        top_line = np.maximum(z - tops[k], y_bot)
+        bot_line = np.maximum(z - bots[k], y_bot)
+        px = np.concatenate([xd[o], xd[o][::-1]])
+        py = np.concatenate([top_line[o], bot_line[o][::-1]])
+        fig.add_trace(go.Scatter(x=px, y=py, fill="toself", mode="lines", line=dict(width=0.5, color="#555"),
+                                 fillcolor=_FK_LAYER_COLORS[k % len(_FK_LAYER_COLORS)], name=str(l.get("name", f"Lapisan {k + 1}")),
+                                 hoverinfo="name", opacity=0.9))
+    fig.add_trace(go.Scatter(x=xd[o], y=z[o], mode="lines", line=dict(color="black", width=3), name=_t("Muka tanah", "Ground surface"), hoverinfo="skip"))
+    wt = (water or {}).get("type", "none")
+    if wt in ("depth", "elev"):
+        zw = np.minimum(z - float(water["value"]) if wt == "depth" else np.full_like(z, float(water["value"])), z)
+        fig.add_trace(go.Scatter(x=xd[o], y=zw[o], mode="lines", line=dict(color="#1f77ff", width=2, dash="dash"), name=_t("Muka air", "Water table")))
+    # kumpulan lingkaran percobaan
+    if show_trials and res.get("trials"):
+        Fs = np.array([t[0] for t in res["trials"]])
+        for (F, cx, cy, R) in res["trials"][:n_show][::-1]:
+            _xr = _fk_xrange((x, z), cx, cy, R)
+            if _xr[0] is None:
+                continue
+            xa, ya = _fk_arc(cx, cy, R, _xr[0], _xr[1])
+            fig.add_trace(go.Scatter(x=_fk_disp_x(xa, flipped, C), y=ya, mode="lines", line=dict(width=1, color="rgba(90,90,90,0.35)"),
+                                     hovertemplate=f"FK {F:.3f}<extra></extra>", showlegend=False))
+    r = res["results"].get(method)
+    if r:
+        xa, ya = _fk_arc(r["cx"], r["cy"], r["R"], r["x_in"], r["x_out"])
+        if show_slices:
+            nn = 30
+            xs_ = np.linspace(r["x_in"], r["x_out"], nn + 1)
+            for xv in xs_:
+                yb = r["cy"] - np.sqrt(max(r["R"] ** 2 - (xv - r["cx"]) ** 2, 0.0))
+                zg = float(np.interp(xv, x, z))
+                fig.add_trace(go.Scatter(x=_fk_disp_x([xv, xv], flipped, C), y=[yb, zg], mode="lines", line=dict(color="rgba(200,0,0,0.35)", width=1), showlegend=False, hoverinfo="skip"))
+        fig.add_trace(go.Scatter(x=_fk_disp_x(xa, flipped, C), y=ya, mode="lines", line=dict(color="#d10000", width=4),
+                                 name=f"{_FK_METHOD_LABEL.get(method, method)} — FK {r['fs']:.3f}"))
+        cxd = float(_fk_disp_x(r["cx"], flipped, C))
+        fig.add_trace(go.Scatter(x=[cxd], y=[r["cy"]], mode="markers+text", marker=dict(symbol="cross", size=12, color="#d10000"),
+                                 text=[f"FK = {r['fs']:.3f}"], textposition="top center", name=_t("Pusat", "Center"), showlegend=False))
+        fig.add_trace(go.Scatter(x=[cxd, float(_fk_disp_x(r["x_out"], flipped, C))], y=[r["cy"], float(np.interp(r["x_out"], x, z))],
+                                 mode="lines", line=dict(color="#d10000", width=1, dash="dot"), showlegend=False, hoverinfo="skip"))
+    xr = [float(xd.min()), float(xd.max())]
+    fig.update_layout(height=520, xaxis=dict(range=xr, title=_t("Jarak (m)", "Distance (m)")),
+                      yaxis=dict(range=[y_bot, (r["cy"] + 0.15 * H) if r else zmax + 1.5 * H], scaleanchor="x", scaleratio=1, title=_t("Elevasi (m)", "Elevation (m)")),
+                      margin=dict(l=10, r=10, t=30, b=10), legend=dict(orientation="h", y=-0.15), plot_bgcolor="white")
+    return fig
+
+
+def _fk_xrange(prof, cx, cy, R):
+    sl = fk_build_slices(prof, {"bottom": np.array([1e9]), "gamma": np.array([18.0]), "gsat": np.array([18.0]), "c": np.array([0.0]),
+                                "tanphi": np.array([0.5]), "phi": np.array([26.0])}, None, cx, cy, R, n=12)
+    return (sl["x_in"], sl["x_out"]) if sl else (None, None)
+
+
+def _fk_fs_map_figure(res, flipped, C):
+    gx = _fk_disp_x(res["grid_x"], flipped, C)
+    o = np.argsort(gx)
+    fig = go.Figure(go.Contour(x=gx[o], y=res["grid_y"], z=res["grid_fs"][:, o], colorscale="RdYlGn", reversescale=False,
+                               contours=dict(coloring="heatmap", showlabels=True), colorbar=dict(title="FK min"), connectgaps=True))
+    fig.update_layout(height=380, margin=dict(l=10, r=10, t=10, b=10), xaxis_title=_t("Pusat lingkaran x (m)", "Circle center x (m)"),
+                      yaxis_title=_t("Pusat lingkaran y (m)", "Circle center y (m)"))
+    return fig
+
+
+def _fk_animation_figure(prof, flipped, C, layers, water, res, method, max_disp, nfr=14):
+    r = res["results"][method]
+    x, z = prof
+    base = _fk_model_figure(prof, flipped, C, layers, water, {"results": {}, "trials": []}, method, show_trials=False, show_slices=False)
+    xa, ya = _fk_arc(r["cx"], r["cy"], r["R"], r["x_in"], r["x_out"], 90)
+    gxs = np.linspace(r["x_out"], r["x_in"], 60)
+    gz = np.interp(gxs, x, z)
+    px0 = np.concatenate([xa, gxs])
+    py0 = np.concatenate([ya, gz])
+    th_max = max_disp / r["R"]
+
+    def rot(th):
+        c, s = np.cos(th), np.sin(th)
+        dx, dy = px0 - r["cx"], py0 - r["cy"]
+        return r["cx"] + dx * c - dy * s, r["cy"] + dx * s + dy * c
+
+    x0, y0 = rot(0.0)
+    fig = base
+    fig.add_trace(go.Scatter(x=_fk_disp_x(xa, flipped, C), y=ya, mode="lines", line=dict(color="#d10000", width=2, dash="dash"),
+                             name=_t("Bidang gelincir", "Slip surface"), showlegend=True))
+    fig.add_trace(go.Scatter(x=_fk_disp_x(x0, flipped, C), y=y0, fill="toself", mode="lines", line=dict(color="#b30000", width=2),
+                             fillcolor="rgba(220,0,0,0.30)", name=_t("Massa longsor", "Sliding mass")))
+    idx = len(fig.data) - 1
+    frames = []
+    for k in range(nfr + 1):
+        xr_, yr_ = rot(th_max * k / nfr)
+        frames.append(go.Frame(data=[go.Scatter(x=_fk_disp_x(xr_, flipped, C), y=yr_, fill="toself", mode="lines", line=dict(color="#b30000", width=2),
+                                                fillcolor="rgba(220,0,0,0.30)")], traces=[idx], name=str(k)))
+    fig.frames = frames
+    fig.update_layout(
+        updatemenus=[dict(type="buttons", showactive=False, x=0.02, y=1.12, xanchor="left",
+                          buttons=[dict(label="▶ Putar", method="animate", args=[None, dict(frame=dict(duration=140, redraw=True), fromcurrent=True, transition=dict(duration=0))]),
+                                   dict(label="⏸ Jeda", method="animate", args=[[None], dict(frame=dict(duration=0, redraw=False), mode="immediate")]),
+                                   dict(label="⟲ Awal", method="animate", args=[["0"], dict(frame=dict(duration=0, redraw=True), mode="immediate")])])],
+        sliders=[dict(active=0, x=0.15, len=0.8, currentvalue=dict(prefix=_t("Perpindahan dasar ≈ ", "Base displacement ≈ "), suffix=" m"),
+                      steps=[dict(method="animate", label=f"{max_disp * k / nfr:.2f}", args=[[str(k)], dict(mode="immediate", frame=dict(duration=0, redraw=True))]) for k in range(nfr + 1)])])
+    return fig
+
+
+def _fk_default_points():
+    return pd.DataFrame({"x (m)": [0.0, 20.0, 40.0, 60.0], "z (m)": [10.0, 10.0, 0.0, 0.0]})
+
+
+def _fk_default_mats(kind):
+    if kind == "acads":
+        return pd.DataFrame([{"Nama": "Tanah homogen", "Tebal vertikal (m)": 0.0, "γ (kN/m³)": 20.0, "γ jenuh (kN/m³)": 20.0, "c' (kPa)": 3.0, "φ' (°)": 19.6}])
+    return pd.DataFrame([
+        {"Nama": "Lapisan atas (mis. timbunan/topsoil)", "Tebal vertikal (m)": 2.0, "γ (kN/m³)": 17.0, "γ jenuh (kN/m³)": 19.0, "c' (kPa)": 5.0, "φ' (°)": 28.0},
+        {"Nama": "Substrat (tebal tak hingga)", "Tebal vertikal (m)": 0.0, "γ (kN/m³)": 19.0, "γ jenuh (kN/m³)": 20.5, "c' (kPa)": 15.0, "φ' (°)": 30.0}])
+
+
+def _fk_load_cover_cb():
+    layers = st.session_state.get("cover_layers") or []
+    if not layers:
+        return
+    beta = np.radians(float(st.session_state.get("cover_slope_angle", 18.0)))
+    rows = []
+    for i, l in enumerate(layers):
+        g, gs, ph, c = COVER_STRENGTH_DEFAULTS.get(l["material"], COVER_STRENGTH_DEFAULTS["Custom"])
+        rows.append({"Nama": f"Cover {i + 1}: {l['material']}", "Tebal vertikal (m)": round(float(l["thickness_m"]) / max(np.cos(beta), 0.05), 3),
+                     "γ (kN/m³)": g, "γ jenuh (kN/m³)": gs, "c' (kPa)": c, "φ' (°)": ph})
+    rows.append({"Nama": "Substrat (tebal tak hingga)", "Tebal vertikal (m)": 0.0, "γ (kN/m³)": 19.0, "γ jenuh (kN/m³)": 20.5, "c' (kPa)": 15.0, "φ' (°)": 30.0})
+    st.session_state["fk_mat_base"] = pd.DataFrame(rows)
+    st.session_state["fk_mat_ver"] = st.session_state.get("fk_mat_ver", 0) + 1
+
+
+def _fk_reset_mats_cb(kind):
+    st.session_state["fk_mat_base"] = _fk_default_mats(kind)
+    st.session_state["fk_mat_ver"] = st.session_state.get("fk_mat_ver", 0) + 1
+
+
+def _render_fk_tab():
+    st.markdown("### " + _t("🛡️ Stabilitas Lereng (FK) — Bishop · Janbu · Morgenstern-Price", "🛡️ Slope Stability (FS) — Bishop · Janbu · Morgenstern-Price"))
+    _ui_caption(_t(
+        "Analisis kesetimbangan batas 2-D (metode irisan) dengan pencarian bidang gelincir LINGKARAN kritis. Lapisan tanah didefinisikan sebagai offset vertikal dari muka tanah "
+        "(lapisan terakhir tak hingga). Diuji terhadap benchmark ACADS EX1(a), solusi Taylor (φ=0), solusi analitik infinite slope, dan pustaka pembanding independen (pyslope) — "
+        "lihat catatan validasi di bawah. BUKAN pengganti Slide2/Slide3 untuk laporan formal: belum ada bidang non-lingkaran, retak tarik, perkuatan, beban luar, atau probabilitas longsor (PK).",
+        "2-D limit-equilibrium analysis (method of slices) searching the critical CIRCULAR slip surface. Soil layers are vertical offsets from the ground surface (the last layer is infinite). "
+        "Tested against the ACADS EX1(a) benchmark, Taylor's solution (φ=0), analytical infinite-slope solutions and an independent library (pyslope) — see the validation note below. "
+        "NOT a replacement for Slide2/Slide3 in formal reports: no non-circular surfaces, tension cracks, reinforcement, external loads or probability of failure (PoF) yet."))
+    _srcs = {"acads": _t("Contoh uji ACADS EX1(a)", "ACADS EX1(a) test example"), "xs": _t("Dari Cross Section", "From Cross Section"), "manual": _t("Manual (tabel titik)", "Manual (point table)")}
+    _src = st.radio(_t("Geometri lereng", "Slope geometry"), list(_srcs), format_func=lambda k: _srcs[k], horizontal=True, key="fk_src")
+    _x = _z = None
+    if _src == "acads":
+        _x, _z = np.array([0.0, 20.0, 40.0, 60.0]), np.array([10.0, 10.0, 0.0, 0.0])
+        st.caption(_t("Lereng 2H:1V setinggi 10 m; tanah homogen c'=3 kPa, φ'=19,6°, γ=20 kN/m³. Nilai rujukan literatur ≈ 1,0 (Bishop ≈ 0,99; Janbu tanpa koreksi ≈ 0,94).",
+                      "2H:1V slope, 10 m high; homogeneous soil c'=3 kPa, φ'=19.6°, γ=20 kN/m³. Literature reference ≈ 1.0 (Bishop ≈ 0.99; uncorrected Janbu ≈ 0.94)."))
+    elif _src == "xs":
+        _secs = st.session_state.get("section_results") or {}
+        if not _secs:
+            st.info(_t("Belum ada Cross Section. Buat garis section di tab Cross Section terlebih dahulu.", "No Cross Section yet. Create a section line in the Cross Section tab first."))
+        else:
+            _c1, _c2, _c3 = st.columns([2, 1, 1])
+            _nm = _c1.selectbox(_t("Penampang", "Section"), list(_secs), key="fk_sec_sel")
+            _np = _c2.number_input(_t("Jumlah titik", "Points"), 20, 300, 60, 10, key="fk_sec_np")
+            _sm = _c3.number_input(_t("Haluskan (jendela)", "Smoothing window"), 1, 15, 3, 2, key="fk_sec_sm")
+            _r = _secs[_nm]
+            _d, _e = np.asarray(_r["distance"], dtype=float), np.asarray(_r["elevation"], dtype=float)
+            _ok = np.isfinite(_d) & np.isfinite(_e)
+            _d, _e = _d[_ok], _e[_ok]
+            if len(_d) >= 5:
+                _xg = np.linspace(_d.min(), _d.max(), int(_np))
+                _zg = np.interp(_xg, _d, _e)
+                if _sm > 1:
+                    _zg = np.convolve(np.pad(_zg, (_sm // 2, _sm // 2), mode="edge"), np.ones(int(_sm)) / int(_sm), mode="valid")
+                _x, _z = _xg, _zg
+    else:
+        _pts = st.data_editor(_fk_default_points(), num_rows="dynamic", hide_index=True, key="fk_pts_ed")
+        _pts = _pts.dropna()
+        if len(_pts) >= 3:
+            _x, _z = _pts["x (m)"].to_numpy(dtype=float), _pts["z (m)"].to_numpy(dtype=float)
+    # ---- material ----
+    st.markdown("**" + _t("Material (lapisan offset vertikal dari muka tanah)", "Materials (layers as vertical offsets from the ground surface)") + "**")
+    if "fk_mat_base" not in st.session_state or st.session_state.get("fk_mat_src") != _src:
+        st.session_state["fk_mat_base"] = _fk_default_mats("acads" if _src == "acads" else "generic")
+        st.session_state["fk_mat_src"] = _src
+        st.session_state["fk_mat_ver"] = st.session_state.get("fk_mat_ver", 0) + 1
+    _mb1, _mb2 = st.columns(2)
+    _mb1.button(_t("↧ Ambil dari desain Surface/Cover", "↧ Take from Surface/Cover design"), key="fk_load_cover", on_click=_fk_load_cover_cb, width="stretch")
+    _mb2.button(_t("↺ Reset material", "↺ Reset materials"), key="fk_reset_mat", on_click=_fk_reset_mats_cb, args=("acads" if _src == "acads" else "generic",), width="stretch")
+    _mat_df = st.data_editor(st.session_state["fk_mat_base"], num_rows="dynamic", hide_index=True, key=f"fk_mat_ed_{st.session_state.get('fk_mat_ver', 0)}",
+                             column_config={"Tebal vertikal (m)": st.column_config.NumberColumn(min_value=0.0, help=_t("Baris TERAKHIR diabaikan (tebal tak hingga).", "The LAST row is ignored (infinite thickness).")),
+                                            "γ (kN/m³)": st.column_config.NumberColumn(min_value=1.0, max_value=30.0), "γ jenuh (kN/m³)": st.column_config.NumberColumn(min_value=1.0, max_value=30.0),
+                                            "c' (kPa)": st.column_config.NumberColumn(min_value=0.0), "φ' (°)": st.column_config.NumberColumn(min_value=0.0, max_value=50.0)})
+    _mat_df = _mat_df.dropna()
+    # ---- air, gempa, kriteria ----
+    _w1, _w2, _w3, _w4 = st.columns(4)
+    _wt = _w1.selectbox(_t("Muka air / tekanan pori", "Water / pore pressure"), ["none", "depth", "elev", "ru"], key="fk_wt",
+                        format_func=lambda k: {"none": _t("Kering", "Dry"), "depth": _t("Piezometrik: kedalaman (sejajar permukaan)", "Piezometric: depth (parallel to surface)"),
+                                               "elev": _t("Piezometrik: elevasi horizontal", "Piezometric: horizontal elevation"), "ru": "Ru"}[k])
+    _wv = _w2.number_input(_t("Nilai (m / elevasi / Ru)", "Value (m / elevation / Ru)"), 0.0, 1000.0, 3.0 if _wt == "depth" else (5.0 if _wt == "elev" else 0.2), 0.1, key="fk_wv", disabled=(_wt == "none"))
+    _kh = _w3.number_input(_t("Koef. gempa horizontal kh", "Horizontal seismic coeff. kh"), 0.0, 0.6, 0.0, 0.01, key="fk_kh")
+    _fsr = _w4.number_input(_t("FK minimum disyaratkan", "Required minimum FS"), 1.0, 3.0, 1.3, 0.05, key="fk_fsr",
+                            help=_t("Isi menurut kriteria yang berlaku (Kepmen ESDM 1827 K/30/MEM/2018: FK/PK menurut jenis lereng & keparahan longsor; SNI 8460:2017). Nilai bawaan BUKAN kutipan tabel.",
+                                    "Enter per the applicable criteria (Kepmen ESDM 1827 K/30/MEM/2018: FS/PoF by slope type & consequence; SNI 8460:2017). The default is NOT a table quotation."))
+    _cos2 = st.checkbox(_t("Tekanan pori × cos²α (aliran sejajar dasar irisan)", "Pore pressure × cos²α (flow parallel to slice base)"), value=False, key="fk_cos2",
+                        help=_t("Nonaktif = tinggi vertikal penuh (lebih konservatif). Sebagian program (mis. pyslope) memakai cos²α.", "Off = full vertical head (more conservative). Some programs (e.g. pyslope) use cos²α."))
+    _m1, _m2 = st.columns([2, 1])
+    _methods = _m1.multiselect(_t("Metode", "Methods"), ["bishop", "janbu", "janbu_simple", "mp"], default=["bishop", "janbu", "mp"], format_func=lambda k: _FK_METHOD_LABEL[k], key="fk_methods")
+    _ft = _m2.selectbox(_t("f(x) Morgenstern-Price", "Morgenstern-Price f(x)"), ["halfsine", "const"], key="fk_ftype",
+                        format_func=lambda k: _t("Half-sine (M-P)", "Half-sine (M-P)") if k == "halfsine" else _t("Konstan (= Spencer)", "Constant (= Spencer)"))
+    with st.expander(_t("Pengaturan pencarian bidang gelincir", "Slip-surface search settings")):
+        _s1, _s2, _s3, _s4 = st.columns(4)
+        _nx = _s1.number_input(_t("Grid pusat X", "Center grid X"), 6, 30, 14, 1, key="fk_nx")
+        _ny = _s2.number_input(_t("Grid pusat Y", "Center grid Y"), 4, 20, 9, 1, key="fk_ny")
+        _nr = _s3.number_input(_t("Jari-jari per pusat", "Radii per center"), 3, 20, 8, 1, key="fk_nr")
+        _nsl = _s4.number_input(_t("Jumlah irisan (akhir)", "Slices (final)"), 20, 120, 50, 5, key="fk_nsl")
+    if _x is None or len(_mat_df) == 0:
+        return
+    if st.button(_t("▶ Jalankan analisis FK", "▶ Run FS analysis"), key="fk_run", type="primary"):
+        if not _methods:
+            st.warning(_t("Pilih minimal satu metode.", "Select at least one method."))
+        else:
+            try:
+                _layers = [{"name": r["Nama"], "thickness": float(r["Tebal vertikal (m)"]), "gamma": float(r["γ (kN/m³)"]), "gamma_sat": float(r["γ jenuh (kN/m³)"]),
+                            "c": float(r["c' (kPa)"]), "phi": float(r["φ' (°)"])} for _, r in _mat_df.iterrows()]
+                _px, _pz, _flip, _C = fk_normalize_profile(_x, _z, 1.5)
+                _water = {"type": _wt, "value": float(_wv), "cos2": bool(_cos2)}
+                with st.spinner(_t("Mencari bidang gelincir kritis...", "Searching the critical slip surface...")):
+                    _res = fk_search((_px, _pz), fk_materials(_layers), _water, kh=float(_kh), methods=tuple(_methods), n_final=int(_nsl),
+                                     nx=int(_nx), ny=int(_ny), nr=int(_nr), mp_ftype=_ft)
+                if not _res or not _res["results"]:
+                    st.error(_t("Tidak ada bidang gelincir sah ditemukan. Periksa geometri/material atau perlebar pencarian.", "No valid slip surface found. Check geometry/materials or widen the search."))
+                else:
+                    st.session_state["fk_result"] = {"res": _res, "prof": (_px, _pz), "flipped": _flip, "C": _C, "layers": _layers, "water": _water, "kh": float(_kh), "fsr": float(_fsr), "ft": _ft}
+            except Exception as _e_fk:
+                st.error(_t(f"Analisis FK gagal: {_e_fk}", f"FS analysis failed: {_e_fk}"))
+    _R = st.session_state.get("fk_result")
+    if not _R:
+        return
+    _res, _prof, _fl, _C, _lay, _wat = _R["res"], _R["prof"], _R["flipped"], _R["C"], _R["layers"], _R["water"]
+    _fsr_use = float(_fsr)
+    st.markdown("**" + _t("Hasil (FK minimum tiap metode)", "Results (minimum FS of each method)") + "**")
+    _rows = []
+    for m, r in _res["results"].items():
+        _rows.append([_FK_METHOD_LABEL[m], f"{r['fs']:.3f}", stab_verdict(r["fs"], _fsr_use), f"({float(_fk_disp_x(r['cx'], _fl, _C)):.1f}; {r['cy']:.1f})", f"{r['R']:.1f}",
+                      f"{float(_fk_disp_x(r['x_in'], _fl, _C)):.1f} → {float(_fk_disp_x(r['x_out'], _fl, _C)):.1f}"])
+    st.table(pd.DataFrame(_rows, columns=[_t("Metode", "Method"), "FK", _t(f"Penilaian (FK min {_fsr_use:.2f})", f"Assessment (min FS {_fsr_use:.2f})"),
+                                          _t("Pusat (x; y)", "Center (x; y)"), "R (m)", _t("Masuk → keluar (x)", "Entry → exit (x)")]))
+    _fsmin = min(r["fs"] for r in _res["results"].values())
+    if _fsmin < 1.0:
+        st.error(_t("FK < 1,0: lereng TIDAK STABIL pada kondisi ini.", "FS < 1.0: the slope is UNSTABLE under these conditions."))
+    elif _fsmin < _fsr_use:
+        st.warning(_t(f"FK minimum {_fsmin:.3f} < {_fsr_use:.2f}: belum memenuhi kriteria yang Anda tetapkan.", f"Minimum FS {_fsmin:.3f} < {_fsr_use:.2f}: does not meet your criterion."))
+    else:
+        st.success(_t(f"FK minimum {_fsmin:.3f} ≥ {_fsr_use:.2f}: memenuhi kriteria yang Anda tetapkan.", f"Minimum FS {_fsmin:.3f} ≥ {_fsr_use:.2f}: meets your criterion."))
+    _vm = st.radio(_t("Tampilkan bidang gelincir metode", "Show slip surface of"), list(_res["results"]), horizontal=True, format_func=lambda k: _FK_METHOD_LABEL[k], key="fk_view_m")
+    _t1, _t2, _t3 = st.tabs([_t("Penampang model + bidang gelincir", "Model section + slip surface"), _t("Simulasi bidang gelincir", "Slip simulation"), _t("Peta FK pusat lingkaran", "FS map of circle centers")])
+    with _t1:
+        _o1, _o2 = st.columns(2)
+        _st_tr = _o1.checkbox(_t("Tampilkan kumpulan bidang percobaan", "Show trial surfaces"), value=True, key="fk_show_tr")
+        _st_sl = _o2.checkbox(_t("Tampilkan irisan", "Show slices"), value=True, key="fk_show_sl")
+        st.plotly_chart(_fk_model_figure(_prof, _fl, _C, _lay, _wat, _res, _vm, _st_tr, _st_sl), width="stretch", key="fk_fig_model")
+    with _t2:
+        _H = float(_prof[1].max() - _prof[1].min())
+        _md = st.slider(_t("Perpindahan dasar maksimum pada animasi (m)", "Max base displacement in animation (m)"), 0.1, float(max(_H, 1.0)), float(max(0.35 * _H, 0.2)), 0.1, key="fk_anim_disp")
+        st.plotly_chart(_fk_animation_figure(_prof, _fl, _C, _lay, _wat, _res, _vm, _md), width="stretch", key="fk_fig_anim")
+        st.caption(_t("Animasi kinematik ILUSTRATIF: massa di atas bidang kritis diputar kaku terhadap pusat lingkaran. Bukan analisis deformasi/kecepatan longsor.",
+                      "ILLUSTRATIVE kinematic animation: the mass above the critical surface rotates rigidly about the circle center. Not a deformation/runout analysis."))
+    with _t3:
+        st.plotly_chart(_fk_fs_map_figure(_res, _fl, _C), width="stretch", key="fk_fig_map")
+        st.caption(_t("Tiap titik = FK minimum (Bishop) di antara jari-jari yang dicoba untuk pusat itu. Pusat kritis berada di cekungan warna merah.", "Each point = minimum FS (Bishop) over the radii tried for that center. The critical center lies in the red basin."))
+    # ---- FK tiap metode pada bidang kritis Bishop + detail M-P ----
+    _rb = _res["results"].get("bishop") or next(iter(_res["results"].values()))
+    _sl = fk_build_slices(_prof, fk_materials(_lay), _wat, _rb["cx"], _rb["cy"], _rb["R"], n=int(_nsl), kh=_R["kh"])
+    if _sl is not None:
+        with st.expander(_t("FK semua metode pada SATU bidang (bidang kritis Bishop) & diagnostik gaya antar-irisan", "FS of all methods on ONE surface (Bishop-critical) & interslice-force diagnostics")):
+            _F_b, _F_js, _F_j = fk_bishop(_sl), fk_janbu(_sl, False), fk_janbu(_sl, True)
+            _F_mp, _det = fk_morgenstern_price(_sl, ftype=_R["ft"], return_detail=True)
+            st.table(pd.DataFrame([["Bishop", f"{_F_b:.3f}"], [_t("Janbu tanpa koreksi", "Janbu uncorrected"), f"{_F_js:.3f}"], [_t("Janbu terkoreksi (f0)", "Janbu corrected (f0)"), f"{_F_j:.3f}"],
+                                   ["Morgenstern-Price", f"{_F_mp:.3f}" if np.isfinite(_F_mp) else _t("tidak konvergen", "not converged")]], columns=[_t("Metode", "Method"), "FK"]))
+            if _det:
+                _lam = -_det["lambda"]  # konvensi umum: gaya geser antar-irisan mengarah ke bawah lereng -> λ positif
+                _emin = float(_det["E"].min())
+                st.caption(_t(f"λ (M-P) = {_lam:.3f}; gaya normal antar-irisan E maksimum {float(_det['E'].max()):.1f} kN/m, minimum {_emin:.1f} kN/m. "
+                              + ("E negatif = tarik antar-irisan (tidak wajar) — periksa parameter/geometri." if _emin < -0.02 * float(_det["E"].max()) else "Semua E ≥ 0 (tekan) — wajar."),
+                              f"λ (M-P) = {_lam:.3f}; interslice normal force E max {float(_det['E'].max()):.1f} kN/m, min {_emin:.1f} kN/m. "
+                              + ("Negative E = interslice tension (unrealistic) — check parameters/geometry." if _emin < -0.02 * float(_det["E"].max()) else "All E ≥ 0 (compression) — reasonable.")))
+                _sd = pd.DataFrame({"x (m)": _fk_disp_x(_sl["x"], _fl, _C), "α (°)": np.degrees(_sl["alpha"]), "W (kN/m)": _sl["W"], "u (kPa)": _sl["u"], "c' (kPa)": _sl["c"], "φ' (°)": _sl["phi"],
+                                    "N (kN/m)": _det["N"], "S (kN/m)": _det["S"], "E (kN/m)": _det["E"][1:]}).round(3)
+                st.dataframe(_sd, hide_index=True)
+                st.download_button(_t("CSV detail irisan (M-P)", "Slice detail CSV (M-P)"), data=_sd.to_csv(index=False).encode("utf-8"), file_name="FK_detail_irisan.csv", mime="text/csv", key="fk_csv_slices")
+    st.caption(_t(
+        "Catatan validasi (uji internal): pada ACADS EX1(a) Bishop 0,985, Janbu tanpa koreksi 0,935, Morgenstern-Price 0,984 (literatur ≈ 1,0); Bishop identik dengan pyslope (0,985 vs 0,985) dan "
+        "dengan air 0,628 vs 0,629 (opsi cos²α); kasus Taylor φ=0 β=45° FK 1,534 (Ns=0,181 → 1,535); irisan planar cocok dengan solusi infinite slope (kering, rembesan, pseudo-statik). "
+        "Janbu terkoreksi memakai f0 = 1 + b1[d/L − 1,4(d/L)²]; M-P memakai f(x) half-sine; gaya seismik pseudo-statik horizontal kh.",
+        "Validation note (internal tests): ACADS EX1(a) Bishop 0.985, uncorrected Janbu 0.935, Morgenstern-Price 0.984 (literature ≈ 1.0); Bishop identical to pyslope (0.985 vs 0.985) and "
+        "with water 0.628 vs 0.629 (cos²α option); Taylor φ=0 β=45° FS 1.534 (Ns=0.181 → 1.535); planar slices match the infinite-slope solution (dry, seepage, pseudo-static). "
+        "Corrected Janbu uses f0 = 1 + b1[d/L − 1.4(d/L)²]; M-P uses half-sine f(x); horizontal pseudo-static seismic force kh."))
+
+
+# =====================================================================
+# DAFTAR MODUL (landing page & panduan) -- SATU sumber, mengikuti tab aplikasi
+# =====================================================================
+# Tab "Monitoring Deviation" (khusus admin) SENGAJA tidak ditampilkan sebagai modul.
+
+def _hub_module_specs():
+    L1, L2, L3 = _t("TUJUAN UTAMA", "MAIN OBJECTIVE"), _t("FITUR & KAPABILITAS", "FEATURES &amp; CAPABILITIES"), _t("Parameter Kunci:", "Key Parameters:")
+    common = dict(intro_label=L1, feat_label=L2, tag_label=L3)
+    return [
+        dict(common, header_gradient="linear-gradient(135deg, #4FB783 0%, #034561 100%)", badge_text=_t("MODUL 01: PEMETAAN RISIKO", "MODULE 01: RISK MAPPING"),
+             badge_color="green", fmt_text="DXF / PDF / DOCX", title="Erosion Mapping",
+             subtitle=_t("Prediksi risiko erosi & sedimentasi dari kontur/boundary DXF, lengkap hidrologi-hidrolika, hujan rencana, estimasi kuantitatif (RUSLE/MUSLE) dan rekomendasi rekayasa.",
+                         "Predicts erosion & sedimentation risk from DXF contours/boundaries, with hydrology-hydraulics, design rainfall, quantitative estimates (RUSLE/MUSLE) and engineering recommendations."),
+             intro_text=_t("Membangun DEM dari DXF kontur & boundary tiap segmen, menelusuri aliran (D8 + depression filling), menghitung debit rencana (Rasional + Mononobe) dan kecepatan (Manning), "
+                           "lalu mengklasifikasikan risiko dengan metode Hjulström, Shields, atau Partheniades + Flow Accumulation.",
+                           "Builds a DEM from each segment's contour & boundary DXF, traces flow (D8 + depression filling), computes design discharge (Rational + Mononobe) and velocity (Manning), "
+                           "then classifies risk with the Hjulström, Shields, or Partheniades + Flow Accumulation method."),
+             features=[(_t("Multi-Segmen", "Multi-Segment"), _t("Tiap sekat/channel dianalisis terpisah dengan DXF & parameter sendiri.", "Each check-dam/channel is analysed separately with its own DXF & parameters.")),
+                       (_t("Hujan Rencana & Erosivitas", "Design Rainfall & Erosivity"), _t("Analisis frekuensi (Gumbel, Log-Pearson III, dst), IDF Mononobe, R Bols/Lenvain.", "Frequency analysis (Gumbel, Log-Pearson III, etc.), Mononobe IDF, Bols/Lenvain R.")),
+                       (_t("Peta Risiko 2D/3D + Validasi", "2D/3D Risk Map + Validation"), _t("Peta risiko di atas medan 3D, level TARP, dan validasi lapangan (confusion matrix & Kappa).", "Risk map over 3D terrain, TARP levels, and field validation (confusion matrix & Kappa).")),
+                       (_t("Estimasi Kuantitatif", "Quantitative Estimate"), _t("RUSLE (ton/ha/th), sedimen event MUSLE, TSS, dan dimensi kolam pengendap.", "RUSLE (t/ha/yr), MUSLE event sediment, TSS and settling-pond size.")),
+                       (_t("Laporan PDF/DOCX & AI", "PDF/DOCX Report & AI"), _t("Laporan siap cetak, narasi rekomendasi berbasis AI (opsional).", "Print-ready report, optional AI recommendation narrative."))],
+             tags=["Manning's n", "R24 (mm)", _t("Ukuran Butir", "Grain Size"), _t("Kemiringan", "Slope")]),
+        dict(common, header_gradient="linear-gradient(135deg, #409D9B 0%, #034561 100%)", badge_text=_t("MODUL 02: DIAGNOSIS LAPANGAN", "MODULE 02: FIELD DIAGNOSIS"),
+             badge_color="amber", fmt_text=_t("Titik / DXF", "Point / DXF"), title="Back Analysis",
+             subtitle=_t("Melacak balik penyebab paling mungkin dari erosi/sedimentasi yang SUDAH terjadi di lapangan, berbasis hasil analisis desain.",
+                         "Traces back the most likely cause of erosion/sedimentation that has ALREADY occurred in the field, based on the design analysis results."),
+             intro_text=_t("Dipakai SETELAH kejadian nyata (bukan prediksi). Titik/area kejadian dibandingkan ke seluruh faktor risiko hasil Erosion Mapping, lalu diranking untuk menemukan faktor yang paling menyimpang dari kondisi normal.",
+                           "Used AFTER a real event (not a prediction). The event point/area is compared against every risk factor from Erosion Mapping, then ranked to find the factor that deviates most from normal."),
+             features=[(_t("Klik Peta / Koordinat", "Map Click / Coordinates"), _t("Tandai lokasi kejadian lewat klik peta atau input X,Y.", "Mark the event location by map click or X,Y input.")),
+                       (_t("Ranking Faktor", "Factor Ranking"), _t("Persentil tiap faktor risiko di titik tsb dibanding seluruh segmen.", "Percentile of each risk factor at that point versus the whole segment.")),
+                       (_t("Hitung Mundur Parameter", "Reverse Parameter Calc"), _t("Dari scour/volume sedimentasi terukur dihitung parameter efektif yang diperlukan.", "From measured scour/sediment volume, back-calculates the required effective parameter.")),
+                       (_t("Boundary Erosi Aktual", "Actual Erosion Boundary"), _t("Bisa juga lewat DXF area yang benar-benar tererosi.", "Can also use a DXF of the area actually eroded."))],
+             tags=[_t("Kecepatan Aliran", "Flow Velocity"), _t("Kemiringan", "Slope"), _t("Skor Overflow", "Overflow Score")]),
+        dict(common, header_gradient="linear-gradient(135deg, #FEEB97 0%, #409D9B 100%)", badge_text=_t("MODUL 03: PREDIKSI RAPID DRAWDOWN", "MODULE 03: RAPID DRAWDOWN PREDICTION"),
+             badge_color="green", fmt_text="CSV / Excel", title="Machine Learning",
+             subtitle=_t("Memprediksi Faktor Keamanan (FK) lereng selama skenario rapid drawdown (penurunan muka air cepat) dari data simulasi atau monitoring.",
+                         "Predicts slope Factor of Safety (FS) during rapid-drawdown scenarios (fast water-level drop) from simulation or monitoring data."),
+             intro_text=_t("Rapid drawdown terjadi saat muka air turun lebih cepat daripada tekanan air pori dalam lereng bisa terdisipasi, sehingga FK turun. Modul ini melatih model ML "
+                           "(regresi FK atau klasifikasi FAIL/CRITICAL/STABLE) dari dataset simulasi/monitoring, lalu memprediksi FK skenario baru dengan cepat.",
+                           "Rapid drawdown happens when the water level falls faster than pore pressure inside the slope can dissipate, lowering the FS. This module trains ML models "
+                           "(FS regression or FAIL/CRITICAL/STABLE classification) from simulation/monitoring datasets, then predicts the FS of new scenarios quickly."),
+             features=[(_t("Data Training", "Training Data"), _t("Dataset dari simulasi kesetimbangan batas/numerik atau catatan monitoring (template CSV tersedia).", "Dataset from limit-equilibrium/numerical simulation or monitoring records (CSV template available).")),
+                       (_t("AutoML", "AutoML"), _t("Linear/Logistic, Random Forest, XGBoost; pilih model terbaik otomatis.", "Linear/Logistic, Random Forest, XGBoost; automatic best-model selection.")),
+                       (_t("Prediksi & Status FK", "FS Prediction & Status"), _t("FK prediksi + status FAIL/CRITICAL/STABLE dengan ambang yang bisa diatur.", "Predicted FS + FAIL/CRITICAL/STABLE status with adjustable thresholds.")),
+                       (_t("Time Series FK vs Muka Air", "FS vs Water-Level Time Series"), _t("Pantau FK terhadap penurunan muka air, tandai titik di bawah batas.", "Track FS against the falling water level, flag points below the limit."))],
+             tags=[_t("Laju Drawdown", "Drawdown Rate"), _t("Muka Air (WL)", "Water Level (WL)"), _t("Faktor Keamanan", "Factor of Safety")]),
+        dict(common, header_gradient="linear-gradient(135deg, #FEEB97 0%, #4FB783 100%)", badge_text=_t("MODUL 04: SIMULASI 3D", "MODULE 04: 3D SIMULATION"),
+             badge_color="amber", fmt_text=_t("Animasi 3D", "3D Animation"), title=_t("Simulasi Aliran 3D", "3D Flow Simulation"),
+             subtitle=_t("Simulasi penjalaran debris/longsoran dan genangan banjir menuruni medan 3D hasil DEM segmen, lengkap animasi waktu.",
+                         "Simulates debris/landslide flow and flood inundation across the segment's 3D DEM terrain, with time-based animation."),
+             intro_text=_t("Dari titik sumber di peta interaktif, menjalankan cellular-automaton (debris/longsoran) atau shallow-water diffusive-wave (genangan banjir) di atas medan 3D, divisualisasikan sebagai animasi. Bersifat ilustratif, belum terkalibrasi.",
+                           "From a source point on an interactive map, runs a cellular-automaton (debris/landslide) or shallow-water diffusive-wave (flood) model over 3D terrain, shown as an animation. Illustrative, not yet calibrated."),
+             features=[(_t("Klik Peta Interaktif", "Interactive Map Click"), _t("Tandai titik sumber di peta DEM ber-citra satelit.", "Mark the source point on the satellite-imagery DEM map.")),
+                       (_t("Debris/Longsoran", "Debris/Landslide"), _t("Cellular-automaton penyebaran material berbasis kemiringan.", "Slope-based cellular-automaton material spreading.")),
+                       (_t("Genangan Banjir", "Flood Inundation"), _t("Shallow-water diffusive-wave mengikuti kontur.", "Shallow-water diffusive-wave following the terrain.")),
+                       (_t("Animasi 3D + Citra Satelit", "3D Animation + Satellite"), _t("Playback waktu di atas medan 3D dengan konteks citra satelit.", "Time playback over 3D terrain with satellite context."))],
+             tags=["Manning's n", _t("Radius Sumber", "Source Radius"), _t("Eksagerasi Vertikal", "Vertical Exaggeration")]),
+        dict(common, header_gradient="linear-gradient(135deg, #4FB783 0%, #409D9B 100%)", badge_text=_t("MODUL 05: DESAIN CHANNEL", "MODULE 05: CHANNEL DESIGN"),
+             badge_color="green", fmt_text="DXF 3D", title=_t("Rekonstruksi Desain", "Design Reconstruction"),
+             subtitle=_t("Bangun ulang geometri channel secara parametrik (slope, lebar dasar, kedalaman, bench), hitung cut-fill dan saran kapasitas Manning, lalu ekspor DXF 3D.",
+                         "Rebuilds channel geometry parametrically (slopes, bottom width, depth, benches), computes cut-fill and Manning capacity suggestions, then exports a 3D DXF."),
+             intro_text=_t("Mengubah desain channel yang berpotensi erosi menjadi desain revisi: geometri diambil dari DXF baru atau langsung dari hasil Erosion Mapping, diubah parametrik, dan hasilnya dapat diunduh sebagai acuan revisi.",
+                           "Turns an erosion-prone channel design into a revised design: geometry comes from a new DXF or directly from Erosion Mapping results, is changed parametrically, and the result can be downloaded as a revision reference."),
+             features=[(_t("Sumber Fleksibel", "Flexible Source"), _t("Upload DXF baru atau ambil dari hasil Erosion Mapping.", "Upload a new DXF or use Erosion Mapping results.")),
+                       (_t("Parametrik + Bench", "Parametric + Benches"), _t("Ubah sudut slope, lebar dasar, kedalaman; tambah/kurangi bench (grading).", "Change slope angles, bottom width, depth; add/remove benches (grading).")),
+                       (_t("Volume Cut-Fill", "Cut-Fill Volume"), _t("Volume galian/timbunan terhadap medan eksisting.", "Cut/fill volume versus the existing terrain.")),
+                       (_t("Ekspor DXF 3D", "3D DXF Export"), _t("Geometri revisi siap dibuka di CAD.", "Revised geometry ready to open in CAD."))],
+             tags=[_t("Sudut Slope", "Slope Angle"), _t("Lebar Dasar", "Bottom Width"), _t("Kedalaman", "Depth")]),
+        dict(common, header_gradient="linear-gradient(135deg, #409D9B 0%, #4FB783 100%)", badge_text=_t("MODUL 06: PROTEKSI PERMUKAAN", "MODULE 06: SURFACE PROTECTION"),
+             badge_color="amber", fmt_text="DXF", title="Surface/Cover Slope",
+             subtitle=_t("Rancang susunan lapisan cover lereng: permeabilitas efektif, ketahanan erosi lapisan atas, rekomendasi dari Erosion Mapping, dan cek kestabilan lapisan tipis.",
+                         "Design the slope cover layer stack: effective permeability, top-layer erosion resistance, recommendations from Erosion Mapping, and a thin-layer stability check."),
+             intro_text=_t("Menyusun lapisan cover (topsoil, growth medium, barrier, drainase, dst), menilai ketahanan erosi lapisan atas, dan mengirim cover ke Erosion Mapping sehingga hasil analisis erosi ikut berubah. FK lapisan tipis dicek dengan infinite slope.",
+                           "Builds the cover layers (topsoil, growth medium, barrier, drainage, etc.), assesses top-layer erosion resistance, and sends the cover to Erosion Mapping so the erosion analysis changes. Thin-layer FS is checked with infinite slope."),
+             features=[(_t("Layer Builder", "Layer Builder"), _t("Susun lapisan, properti k & τc bisa ditimpa, k efektif otomatis.", "Stack layers; k & τc overridable; effective k computed.")),
+                       (_t("Rekomendasi dari Erosion Mapping", "Recommendation from Erosion Mapping"), _t("Slope, D50, permeabilitas tanah, dan kecepatan → susunan cover yang disarankan.", "Slope, D50, soil permeability and velocity → suggested cover stack.")),
+                       (_t("Terapkan ke Erosion Mapping", "Apply to Erosion Mapping"), _t("Parameter efektif analisis (τc, erodibilitas, C) mengikuti cover.", "Effective analysis parameters (τc, erodibility, C) follow the cover.")),
+                       (_t("Kestabilan Lapisan Tipis", "Thin-Layer Stability"), _t("FK infinite slope kering/jenuh, kh, dan sudut maksimum.", "Infinite-slope FS dry/saturated, kh, and maximum angle."))],
+             tags=["k efektif", "τc", _t("Sudut Slope", "Slope Angle"), "FK"]),
+        dict(common, header_gradient="linear-gradient(135deg, #FEEB97 0%, #034561 100%)", badge_text=_t("MODUL 07: PENAMPANG", "MODULE 07: CROSS SECTION"),
+             badge_color="green", fmt_text="CSV / PNG / DXF", title="Cross Section",
+             subtitle=_t("Penampang melintang 2D dengan mesh berlapis & kontur rainbow (risiko erosi, sedimentasi, kecepatan), muka air, ekspor CSV/PNG/DXF, dan volume cut-fill.",
+                         "2-D cross section with layered mesh & rainbow contours (erosion risk, sedimentation, velocity), water level, CSV/PNG/DXF export and cut-fill volumes."),
+             intro_text=_t("Garis section digambar (lurus, polyline DXF, atau di peta) pada segmen hasil analisis; profil disampel dengan interpolasi bilinear dan ditampilkan bersama strip parameter lain. Beberapa section dapat dihitung volume cut-fill-nya (average end-area).",
+                           "Section lines are drawn (straight, DXF polyline, or on the map) on analysed segments; the profile is sampled with bilinear interpolation and shown with other parameter strips. Several sections can be used for cut-fill volumes (average end-area)."),
+             features=[(_t("Garis Section", "Section Lines"), _t("Lurus, polyline DXF, atau gambar langsung di peta (layout atas-bawah).", "Straight, DXF polyline, or drawn on the map (top-bottom layout).")),
+                       (_t("Kontur Rainbow + Muka Air", "Rainbow Contour + Water"), _t("Parameter pilihan, mesh terrain-following, muka air, dan strip parameter.", "Selectable parameter, terrain-following mesh, water level, parameter strips.")),
+                       (_t("Ekspor", "Export"), _t("CSV, PNG, dan DXF per penampang.", "CSV, PNG and DXF per section.")),
+                       (_t("Cut-Fill Antar Penampang", "Cut-Fill Between Sections"), _t("Luas & volume terhadap garis desain (average end-area).", "Areas & volumes versus a design line (average end-area)."))],
+             tags=[_t("Jarak (m)", "Distance (m)"), _t("Elevasi (m)", "Elevation (m)"), "Cut / Fill"]),
+        dict(common, header_gradient="linear-gradient(135deg, #034561 0%, #4FB783 100%)", badge_text=_t("MODUL 08: STABILITAS LERENG", "MODULE 08: SLOPE STABILITY"),
+             badge_color="amber", fmt_text=_t("Penampang / Manual", "Section / Manual"), title=_t("Stabilitas Lereng (FK)", "Slope Stability (FS)"),
+             subtitle=_t("Faktor Keamanan lereng 2-D dengan metode Bishop, Janbu, dan Morgenstern-Price, pencarian bidang gelincir kritis, dan animasi simulasi bidang gelincir.",
+                         "2-D slope Factor of Safety with the Bishop, Janbu and Morgenstern-Price methods, critical slip-surface search, and a slip-surface animation."),
+             intro_text=_t("Analisis kesetimbangan batas (irisan) dengan bidang gelincir lingkaran: geometri dari Cross Section atau tabel titik, lapisan tanah (bisa diambil dari desain cover), muka air/Ru, dan gempa pseudo-statik. Penilaian dibandingkan dengan FK minimum yang Anda isi sesuai kriteria (Kepmen 1827/2018, SNI 8460:2017).",
+                           "Limit-equilibrium (slices) analysis with circular slip surfaces: geometry from Cross Section or a point table, soil layers (can come from the cover design), water table/Ru and pseudo-static seismic loading. Results are compared with the minimum FS you enter per the applicable criteria (Kepmen 1827/2018, SNI 8460:2017)."),
+             features=[(_t("3 Metode", "3 Methods"), _t("Bishop, Janbu (terkoreksi f0), Morgenstern-Price (half-sine/Spencer).", "Bishop, Janbu (f0-corrected), Morgenstern-Price (half-sine/Spencer).")),
+                       (_t("Bidang Gelincir Kritis", "Critical Slip Surface"), _t("Grid pusat × jari-jari lalu optimasi; peta FK pusat lingkaran.", "Center × radius grid then optimisation; FS map of circle centers.")),
+                       (_t("Simulasi Bidang Gelincir", "Slip-Surface Simulation"), _t("Penampang model + massa longsor berotasi (animasi ilustratif).", "Model section + rotating sliding mass (illustrative animation).")),
+                       (_t("Air & Gempa", "Water & Seismic"), _t("Piezometrik/Ru dan koefisien pseudo-statik kh.", "Piezometric/Ru and pseudo-static coefficient kh."))],
+             tags=["FK / FS", "c' / φ'", _t("Muka Air", "Water Table"), "kh"]),
+    ]
+
+
+def _render_module_workflow():
+    """Alur kerja tiap modul (panduan) -- dipakai di sidebar dan landing page."""
+    steps = [
+        (_t("Modul 01 — Erosion Mapping", "Module 01 — Erosion Mapping"), True, _t(
+            "1. Buat/tambah segmen (sekat/channel) di bagian A.\n2. Upload DXF kontur & boundary tiap segmen.\n3. Isi hidrologi-hidrolika: hujan (online/manual) atau buka **Hujan Rencana** untuk R24 kala ulang T, Manning's n, geometri channel.\n"
+            "4. Isi parameter tambahan (ukuran butir, dsb).\n5. Jalankan RUN ANALYSIS → peta risiko 2D/3D dan rekomendasi.\n6. Buka **Estimasi Kuantitatif** (R, K, C, P) untuk ton/ha/th, TSS, dan kolam pengendap.\n7. (Opsional) narasi AI, data reviewer, lalu unduh laporan PDF/DOCX.",
+            "1. Create/add a segment (check-dam/channel) in section A.\n2. Upload the contour & boundary DXF of each segment.\n3. Fill hydrology-hydraulics: rainfall (online/manual) or open **Design Rainfall** for R24 at return period T, Manning's n, channel geometry.\n"
+            "4. Fill additional parameters (grain size, etc.).\n5. Run RUN ANALYSIS → 2D/3D risk map and recommendations.\n6. Open **Quantitative Estimate** (R, K, C, P) for t/ha/yr, TSS and settling pond.\n7. (Optional) AI narrative, reviewer data, then download the PDF/DOCX report.")),
+        (_t("Modul 02 — Back Analysis", "Module 02 — Back Analysis"), False, _t(
+            "1. Pastikan Erosion Mapping segmen terkait sudah dijalankan.\n2. Pilih segmen yang mengalami kejadian di lapangan.\n3. Tandai lokasi: klik titik di peta risiko ATAU upload DXF boundary area tererosi.\n4. Lihat ranking faktor yang paling menyimpang (Mode A).\n"
+            "5. Bila ada data ukur (scour/volume sedimentasi), isi Mode B untuk hitung mundur parameter efektif.\n6. Bandingkan dengan asumsi desain awal untuk menentukan penyebab paling mungkin.",
+            "1. Make sure Erosion Mapping for the relevant segment has been run.\n2. Select the segment where the event occurred.\n3. Mark the location: click a point on the risk map OR upload a DXF boundary of the eroded area.\n4. Review the ranking of the most deviating factors (Mode A).\n"
+            "5. If measured data exist (scour/sediment volume), fill Mode B to back-calculate the effective parameter.\n6. Compare with the original design assumption to identify the most likely cause.")),
+        (_t("Modul 03 — Machine Learning (Rapid Drawdown)", "Module 03 — Machine Learning (Rapid Drawdown)"), False, _t(
+            "1. Siapkan dataset: FK (dari simulasi kesetimbangan batas/numerik, mis. modul Stabilitas Lereng, atau back analysis) beserta fitur drawdown (muka air WL, laju drawdown, ΔWL, k, c', φ', geometri). Unduh template CSV di tab.\n"
+            "2. Upload data training, pilih target (FK) dan fitur, atur cleaning (opsional outlier IQR).\n3. Tinjau korelasi & scatter, jalankan Cek Model Terbaik, lalu Train Model.\n4. Baca evaluasi (R², MAE, RMSE / accuracy) — hanya berlaku pada rentang data training.\n"
+            "5. Upload data skenario/monitoring baru → FK prediksi + status FAIL/CRITICAL/STABLE.\n6. Tinjau time series FK vs muka air dan verifikasi skenario kritis dengan modul Stabilitas Lereng (FK).",
+            "1. Prepare the dataset: FS (from limit-equilibrium/numerical simulation, e.g. the Slope Stability module, or back analysis) with drawdown features (water level WL, drawdown rate, ΔWL, k, c', φ', geometry). Download the CSV template in the tab.\n"
+            "2. Upload training data, choose the target (FS) and features, set cleaning (optional IQR outliers).\n3. Review correlation & scatter, run Check Best Model, then Train Model.\n4. Read the evaluation (R², MAE, RMSE / accuracy) — valid only within the training range.\n"
+            "5. Upload new scenario/monitoring data → predicted FS + FAIL/CRITICAL/STABLE status.\n6. Review the FS vs water-level time series and verify critical scenarios with the Slope Stability (FS) module.")),
+        (_t("Modul 04 — Simulasi Aliran 3D", "Module 04 — 3D Flow Simulation"), False, _t(
+            "1. Pastikan Erosion Mapping segmen terkait sudah dijalankan (sumber DEM).\n2. Pilih segmen & jenis simulasi (Debris/Longsoran atau Genangan Banjir).\n3. Tandai titik sumber: klik di peta DEM atau input koordinat.\n4. Isi parameter (radius sumber, Manning's n, frame, eksagerasi vertikal).\n5. Jalankan Simulasi.\n6. Putar animasi dan tinjau kedalaman maksimum, volume, titik limpasan.",
+            "1. Make sure Erosion Mapping for the relevant segment has been run (DEM source).\n2. Select the segment & simulation type (Debris/Landslide or Flood Inundation).\n3. Mark the source point: click on the DEM map or enter coordinates.\n4. Fill the parameters (source radius, Manning's n, frames, vertical exaggeration).\n5. Run the simulation.\n6. Play the animation and review max depth, volume, overflow points.")),
+        (_t("Modul 05 — Rekonstruksi Desain", "Module 05 — Design Reconstruction"), False, _t(
+            "1. Pilih sumber geometri: upload DXF channel baru atau ambil dari hasil Erosion Mapping.\n2. Ubah parameter: sudut slope, lebar dasar, kedalaman, bench (grading).\n3. Tinjau volume cut-fill dan saran kapasitas Manning.\n4. Unduh DXF 3D desain revisi sebagai acuan.",
+            "1. Choose the geometry source: upload a new channel DXF or use Erosion Mapping results.\n2. Change parameters: slope angles, bottom width, depth, benches (grading).\n3. Review cut-fill volumes and Manning capacity suggestions.\n4. Download the revised design as a 3D DXF reference.")),
+        (_t("Modul 06 — Surface/Cover Slope", "Module 06 — Surface/Cover Slope"), False, _t(
+            "1. Buka 'Ambil data dari Erosion Mapping' untuk slope, D50, permeabilitas, dan rekomendasi cover.\n2. Susun lapisan cover (atau terapkan susunan yang disarankan); timpa properti k/τc bila punya data uji.\n3. Baca k efektif dan ketahanan erosi lapisan atas.\n"
+            "4. Cek **kestabilan lapisan tipis** (infinite slope): isi kuat geser, muka air (m), kh, dan FK minimum.\n5. **Terapkan ke Erosion Mapping** pada segmen terpilih untuk melihat dampak pada hasil erosi.\n6. (Opsional) unduh DXF penampang cover.",
+            "1. Open 'Take data from Erosion Mapping' for slope, D50, permeability and cover recommendations.\n2. Build the cover layers (or apply the suggested stack); override k/τc if you have test data.\n3. Read the effective k and top-layer erosion resistance.\n"
+            "4. Check **thin-layer stability** (infinite slope): enter shear strengths, water fraction (m), kh and the minimum FS.\n5. **Apply to Erosion Mapping** for the selected segments to see the impact on erosion results.\n6. (Optional) download the cover cross-section DXF.")),
+        (_t("Modul 07 — Cross Section", "Module 07 — Cross Section"), False, _t(
+            "1. Pastikan Erosion Mapping sudah dijalankan; pilih segmen.\n2. Pilih tipe section: Straight Line, Polyline DXF, atau Gambar di Peta (klik titik, simpan garis).\n3. Generate Cross Section.\n4. Pilih parameter warna (risiko erosi, sedimentasi, kecepatan, dst), mesh, muka air.\n"
+            "5. Buka **Ekspor & Volume Cut-Fill**: unduh CSV/PNG/DXF dan isi elevasi rencana untuk volume antar penampang.",
+            "1. Make sure Erosion Mapping has been run; select the segment.\n2. Choose the section type: Straight Line, Polyline DXF, or Draw on Map (click points, save the line).\n3. Generate Cross Section.\n4. Choose the colour parameter (erosion risk, sedimentation, velocity, etc.), mesh, water level.\n"
+            "5. Open **Export & Cut-Fill Volume**: download CSV/PNG/DXF and enter design elevations for volumes between sections.")),
+        (_t("Modul 08 — Stabilitas Lereng (FK)", "Module 08 — Slope Stability (FS)"), False, _t(
+            "1. Pilih geometri: contoh ACADS EX1(a) (uji), dari Cross Section, atau tabel titik manual.\n2. Isi material (lapisan offset vertikal; bisa ambil dari desain Surface/Cover): γ, γ jenuh, c', φ'.\n3. Atur muka air (piezometrik/Ru), kh, dan FK minimum sesuai kriteria (Kepmen ESDM 1827 K/30/MEM/2018, SNI 8460:2017).\n"
+            "4. Pilih metode (Bishop, Janbu, Morgenstern-Price) lalu Jalankan analisis FK.\n5. Tinjau tabel FK, penampang dengan bidang gelincir kritis, simulasi bidang gelincir (animasi), dan peta FK pusat lingkaran.\n6. Untuk laporan formal, verifikasi dengan perangkat lunak khusus (mis. Slide2).",
+            "1. Choose the geometry: ACADS EX1(a) test example, from Cross Section, or a manual point table.\n2. Fill the materials (vertical-offset layers; can be taken from the Surface/Cover design): γ, γ sat, c', φ'.\n3. Set the water table (piezometric/Ru), kh and the minimum FS per the criteria (Kepmen ESDM 1827 K/30/MEM/2018, SNI 8460:2017).\n"
+            "4. Choose the methods (Bishop, Janbu, Morgenstern-Price) then Run FS analysis.\n5. Review the FS table, the section with the critical slip surface, the slip-surface simulation (animation) and the FS map of circle centers.\n6. For formal reports, verify with dedicated software (e.g. Slide2).")),
+    ]
+    for title, expanded, text in steps:
+        with st.expander(title, expanded=expanded):
+            st.markdown(text)
+
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
     st.session_state["auth_username"] = None
@@ -4047,70 +4871,7 @@ with st.sidebar:
             </div>
             """, unsafe_allow_html=True)
 
-            with st.expander(_t("Modul 01 — Erosion Mapping", "Module 01 — Erosion Mapping"), expanded=True):
-                st.markdown(_t(
-                    "1. Buat/tambah segmen (sekat/channel) di bagian A.\n"
-                    "2. Upload DXF kontur & boundary untuk tiap segmen.\n"
-                    "3. Isi parameter hidrologi-hidrolika (hujan, Manning's n, geometri channel), atau aktifkan mode otomatis berbasis hujan.\n"
-                    "4. Isi parameter tambahan (ukuran butir, dsb) sesuai kondisi segmen.\n"
-                    "5. Jalankan RUN ANALYSIS untuk menghasilkan peta risiko 2D/3D dan rekomendasi.\n"
-                    "6. Aktifkan narasi AI (opsional) untuk rekomendasi naratif per segmen.\n"
-                    "7. Isi data reviewer (opsional) lalu unduh laporan PDF / PPTX.",
-                    "1. Create/add a segment (check-dam/channel) in section A.\n"
-                    "2. Upload the contour & boundary DXF for each segment.\n"
-                    "3. Fill in hydrology-hydraulics parameters (rainfall, Manning's n, channel geometry), or enable rainfall-based automatic mode.\n"
-                    "4. Fill in additional parameters (grain size, etc.) matching the segment's conditions.\n"
-                    "5. Run RUN ANALYSIS to generate the 2D/3D risk map and recommendations.\n"
-                    "6. Enable the AI narrative (optional) for a per-segment recommendation narrative.\n"
-                    "7. Fill in reviewer data (optional) then download the PDF / PPTX report."
-                ))
-
-            with st.expander(_t("Modul 02 — Back Analysis", "Module 02 — Back Analysis")):
-                st.markdown(_t(
-                    "1. Pastikan analisis desain (Erosion Mapping) pada segmen terkait sudah dijalankan (RUN ANALYSIS).\n"
-                    "2. Pilih segmen yang mengalami kejadian erosi/sedimentasi di lapangan.\n"
-                    "3. Tandai lokasi kejadian: klik satu titik di peta risiko, ATAU upload DXF boundary area yang tererosi.\n"
-                    "4. Lihat ranking faktor risiko yang paling menyimpang di lokasi tersebut (Mode A).\n"
-                    "5. Kalau ada data ukur lapangan (kedalaman scour / volume sedimentasi), isi di Mode B untuk hitung mundur parameter efektif.\n"
-                    "6. Bandingkan hasil hitung mundur terhadap asumsi desain awal untuk menentukan penyebab paling mungkin.",
-                    "1. Make sure the design analysis (Erosion Mapping) for the relevant segment has been run (RUN ANALYSIS).\n"
-                    "2. Select the segment where the erosion/sedimentation event occurred in the field.\n"
-                    "3. Mark the event location: click a point on the risk map, OR upload a DXF boundary of the eroded area.\n"
-                    "4. Review the ranking of risk factors that deviate most at that location (Mode A).\n"
-                    "5. If field measurement data is available (scour depth / sediment volume), fill it in Mode B to back-calculate the effective parameter.\n"
-                    "6. Compare the back-calculated result against the original design assumption to identify the most likely cause."
-                ))
-
-            with st.expander(_t("Modul 03 — Machine Learning", "Module 03 — Machine Learning")):
-                st.markdown(_t(
-                    "1. Pastikan analisis desain (Erosion Mapping) pada segmen terkait sudah dijalankan.\n"
-                    "2. Pilih segmen yang akan divalidasi.\n"
-                    "3. Masukkan data observasi lapangan: tabel titik sampel (3 kelas risiko), ATAU boundary erosi aktual (DXF, 2 kelas).\n"
-                    "4. Lihat hasil Confusion Matrix, Overall Accuracy, dan Cohen's Kappa.\n"
-                    "5. (Opsional) Jalankan perbandingan metode Hjulström vs Shields vs Partheniades+Flow Accumulation untuk segmen yang sama.",
-                    "1. Make sure the design analysis (Erosion Mapping) for the relevant segment has been run.\n"
-                    "2. Select the segment to validate.\n"
-                    "3. Enter field observation data: a sample-point table (3 risk classes), OR an actual erosion boundary (DXF, 2 classes).\n"
-                    "4. Review the Confusion Matrix, Overall Accuracy, and Cohen's Kappa results.\n"
-                    "5. (Optional) Run the Hjulström vs Shields vs Partheniades+Flow Accumulation method comparison for the same segment."
-                ))
-
-            with st.expander(_t("Modul 04 — Simulasi Aliran 3D", "Module 04 — 3D Flow Simulation")):
-                st.markdown(_t(
-                    "1. Pastikan analisis desain (Erosion Mapping) pada segmen terkait sudah dijalankan (sumber DEM-nya dari sini).\n"
-                    "2. Pilih segmen & jenis simulasi (Debris/Longsoran atau Genangan Banjir).\n"
-                    "3. Tandai titik sumber: klik langsung di peta DEM, atau input koordinat manual.\n"
-                    "4. Isi parameter simulasi (radius sumber, Manning's n, jumlah frame, eksagerasi vertikal, dsb).\n"
-                    "5. Tekan tombol Jalankan Simulasi.\n"
-                    "6. Putar animasi hasil (Play/Pause/slider) dan tinjau kedalaman maksimum, volume, serta titik limpasan (untuk genangan).",
-                    "1. Make sure the design analysis (Erosion Mapping) for the relevant segment has been run (it supplies the DEM source).\n"
-                    "2. Select the segment & simulation type (Debris/Landslide or Flood Inundation).\n"
-                    "3. Mark the source point: click directly on the DEM map, or enter coordinates manually.\n"
-                    "4. Fill in the simulation parameters (source radius, Manning's n, frame count, vertical exaggeration, etc.).\n"
-                    "5. Press the Run Simulation button.\n"
-                    "6. Play back the animation (Play/Pause/slider) and review the maximum depth, volume, and overflow points (for flood)."
-                ))
-
+            _render_module_workflow()
 
     st.markdown('<hr class="mwm-side-divider"/>', unsafe_allow_html=True)
     st.caption(f"Sesi berjalan sejak login · {pd.Timestamp.now().strftime('%H:%M, %d %b %Y')}")
@@ -4257,7 +5018,7 @@ if st.session_state.home_page:
         display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:14px;
     ">
         <div style="color:rgba(255,255,255,0.85); font-size:13.5px; max-width:340px;">
-            {_t("Platform terintegrasi 4 modul analisis geoteknik & manajemen air tambang.", "Integrated platform with 4 connected geotechnical &amp; mine water analysis modules.")}
+            {_t("Platform terintegrasi 8 modul analisis geoteknik & manajemen air tambang.", "Integrated platform with 8 connected geotechnical &amp; mine water analysis modules.")}
         </div>
         <div style="display:flex; gap:10px; flex-wrap:wrap; font-size:12.5px; color:#EAF6EE;">
             <span style="background:rgba(63,169,160,0.18); border:1px solid rgba(143,217,196,0.30); border-radius:20px; padding:6px 14px;">1. {_t("Upload DXF/Data", "Upload DXF/Data")}</span>
@@ -4334,13 +5095,13 @@ if st.session_state.home_page:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    with st.expander(_t("📖 Lihat detail 4 modul & alur kerja penggunaan", "📖 View module details & usage workflow"), expanded=False):
+    with st.expander(_t("📖 Lihat detail 8 modul & alur kerja penggunaan", "📖 View details of 8 modules & usage workflow"), expanded=False):
 
         st.markdown(f"""
         <div style="margin-bottom:22px;">
             <h2 style="color:#fff; margin-bottom:4px;">{_t('Platform Terintegrasi Analisis Geoteknik & Manajemen Air Tambang', 'Integrated Platform for Mine Water &amp; Geotechnical Analysis')}</h2>
             <p style="color:rgba(255,255,255,0.6); font-size:14.5px;">
-                {_t('4 modul analisis yang saling terhubung — mulai dari pemetaan risiko desain sampai simulasi aliran 3D.', 'Four connected analysis modules — from design risk mapping to 3D flow simulation.')}
+                {_t('8 modul analisis yang saling terhubung — dari pemetaan risiko erosi, hidrologi, dan desain sampai stabilitas lereng (FK).', 'Eight connected analysis modules — from erosion risk mapping, hydrology and design to slope stability (FS).')}
             </p>
         </div>
         """, unsafe_allow_html=True)
@@ -4384,127 +5145,15 @@ if st.session_state.home_page:
             </div>
             """, unsafe_allow_html=True)
 
-        _hub_row1_c1, _hub_row1_c2 = st.columns(2)
-
-        with _hub_row1_c1:
-            _render_hub_card(
-                header_gradient="linear-gradient(135deg, #4FB783 0%, #034561 100%)",
-                badge_text=_t("MODUL 01: PEMETAAN RISIKO", "MODULE 01: RISK MAPPING"),
-                badge_color="green",
-                fmt_text="DXF / PDF / PPTX",
-                title=_t("Erosion Mapping", "Erosion Mapping"),
-                subtitle=_t(
-                    "Prediksi risiko erosi & sedimentasi dari desain kontur/boundary DXF, lengkap hidrologi-hidrolika dan rekomendasi rekayasa.",
-                    "Predicts erosion & sedimentation risk from DXF contour/boundary design, complete with hydrology-hydraulics and engineering recommendations."
-                ),
-                intro_label=_t("TUJUAN UTAMA", "MAIN OBJECTIVE"),
-                intro_text=_t(
-                    "Modul ini memakai data DXF kontur & boundary tiap segmen sekat/channel untuk menghitung debit rencana (metode Rasional + Mononobe), "
-                    "kecepatan aliran (Manning), lalu mengklasifikasikan risiko erosi/sedimentasi per segmen sebelum menghasilkan rekomendasi & laporan.",
-                    "This module uses DXF contour & boundary data per segment to compute design discharge (Rational + Mononobe method), flow velocity "
-                    "(Manning), then classifies erosion/sedimentation risk per segment before generating recommendations & a report."
-                ),
-                feat_label=_t("FITUR & KAPABILITAS", "FEATURES &amp; CAPABILITIES"),
-                features=[
-                    (_t("Multi-Segmen", "Multi-Segment"), _t("Setiap sekat/channel dianalisis sebagai segmen terpisah dengan DXF & parameter sendiri.", "Each check-dam/channel is analyzed as a separate segment with its own DXF & parameters.")),
-                    (_t("Hidrologi Otomatis", "Automated Hydrology"), _t("Debit rencana dari data hujan (Rasional + Mononobe), bisa juga input manual.", "Design discharge from rainfall data (Rational + Mononobe), manual input also supported.")),
-                    (_t("Peta Risiko 2D/3D", "2D/3D Risk Map"), _t("Visualisasi risiko erosi/sedimentasi di atas medan 3D hasil DXF.", "Erosion/sedimentation risk visualized over the 3D terrain from DXF.")),
-                    (_t("Laporan PDF & AI", "PDF Report & AI"), _t("Ekspor laporan PDF siap cetak, dengan opsi narasi rekomendasi berbasis AI.", "Export a print-ready PDF report, with an optional AI-generated recommendation narrative.")),
-                ],
-                tag_label=_t("Parameter Kunci:", "Key Parameters:"),
-                tags=["Manning's n", "R24 (mm)", _t("Ukuran Butir", "Grain Size"), _t("Kemiringan", "Slope")],
-            )
-
-        with _hub_row1_c2:
-            _render_hub_card(
-                header_gradient="linear-gradient(135deg, #409D9B 0%, #034561 100%)",
-                badge_text=_t("MODUL 02: DIAGNOSIS LAPANGAN", "MODULE 02: FIELD DIAGNOSIS"),
-                badge_color="amber",
-                fmt_text=_t("Titik / DXF", "Point / DXF"),
-                title=_t("Back Analysis", "Back Analysis"),
-                subtitle=_t(
-                    "Melacak balik penyebab paling mungkin dari erosi/sedimentasi yang SUDAH terjadi di lapangan, berbasis hasil analisis desain.",
-                    "Traces back the most likely cause of erosion/sedimentation that has ALREADY occurred in the field, based on the design analysis results."
-                ),
-                intro_label=_t("TUJUAN UTAMA", "MAIN OBJECTIVE"),
-                intro_text=_t(
-                    "Dipakai SETELAH kejadian nyata di lapangan (bukan prediksi ke depan). Titik/area kejadian dibandingkan ke seluruh faktor risiko "
-                    "yang sudah dihitung Erosion Mapping, lalu diranking untuk menemukan faktor mana yang paling menyimpang dari kondisi normal.",
-                    "Used AFTER a real field event (not a forward prediction). The event point/area is compared against every risk factor already "
-                    "computed by Erosion Mapping, then ranked to find which factor deviates most from normal conditions."
-                ),
-                feat_label=_t("FITUR & KAPABILITAS", "FEATURES &amp; CAPABILITIES"),
-                features=[
-                    (_t("Klik Peta / Koordinat", "Map Click / Coordinates"), _t("Tandai lokasi kejadian lewat klik peta atau input X,Y hasil ukur lapangan.", "Mark the event location by clicking the map or entering surveyed X,Y coordinates.")),
-                    (_t("Ranking Faktor", "Factor Ranking"), _t("Persentil tiap faktor risiko di titik tsb dibanding seluruh segmen.", "Percentile of each risk factor at that point compared to the whole segment.")),
-                    (_t("Hitung Mundur Parameter", "Reverse Parameter Calc"), _t("Dari kedalaman scour/volume sedimentasi terukur, dihitung parameter efektif yang diperlukan.", "From measured scour depth/sediment volume, back-calculates the effective parameter required.")),
-                    (_t("Boundary Erosi Aktual", "Actual Erosion Boundary"), _t("Bisa juga input via DXF area yang benar-benar tererosi di lapangan.", "Can also take a DXF of the area actually eroded in the field.")),
-                ],
-                tag_label=_t("Parameter Kunci:", "Key Parameters:"),
-                tags=[_t("Kecepatan Aliran", "Flow Velocity"), _t("Kemiringan", "Slope"), _t("Skor Overflow", "Overflow Score")],
-            )
-
-        _hub_row2_c1, _hub_row2_c2 = st.columns(2)
-
-        with _hub_row2_c1:
-            _render_hub_card(
-                header_gradient="linear-gradient(135deg, #FEEB97 0%, #409D9B 100%)",
-                badge_text=_t("MODUL 03: VALIDASI MODEL", "MODULE 03: MODEL VALIDATION"),
-                badge_color="green",
-                fmt_text=_t("Titik Sampel / DXF", "Sample Points / DXF"),
-                title=_t("Machine Learning", "Machine Learning"),
-                subtitle=_t(
-                    "Menguji akurasi klasifikasi risiko model terhadap kondisi aktual lapangan, membandingkan beberapa metode sekaligus.",
-                    "Tests the model's risk classification accuracy against actual field conditions, comparing multiple methods at once."
-                ),
-                intro_label=_t("TUJUAN UTAMA", "MAIN OBJECTIVE"),
-                intro_text=_t(
-                    "Data observasi lapangan (titik sampel atau boundary erosi aktual) dibandingkan ke prediksi model lewat confusion matrix & "
-                    "Cohen's Kappa, sekaligus membandingkan akurasi metode Hjulström, Shields, dan Partheniades+Flow Accumulation.",
-                    "Field observation data (sample points or actual erosion boundary) is compared against the model's prediction via a confusion "
-                    "matrix & Cohen's Kappa, while also comparing the accuracy of the Hjulström, Shields, and Partheniades+Flow Accumulation methods."
-                ),
-                feat_label=_t("FITUR & KAPABILITAS", "FEATURES &amp; CAPABILITIES"),
-                features=[
-                    (_t("Confusion Matrix", "Confusion Matrix"), _t("Akurasi klasifikasi risiko per kelas (Rendah/Sedang/Tinggi).", "Per-class risk classification accuracy (Low/Medium/High).")),
-                    (_t("Cohen's Kappa", "Cohen's Kappa"), _t("Interpretasi kesesuaian model mengikuti Landis & Koch (1977).", "Model agreement interpretation following Landis & Koch (1977).")),
-                    (_t("2 Mode Input", "2 Input Modes"), _t("Titik sampel (tabel/CSV) atau boundary erosi aktual (DXF).", "Sample points (table/CSV) or actual erosion boundary (DXF).")),
-                    (_t("Bandingkan Metode", "Method Comparison"), _t("Hjulström vs Shields vs Partheniades+Flow Accumulation.", "Hjulström vs Shields vs Partheniades+Flow Accumulation.")),
-                ],
-                tag_label=_t("Parameter Kunci:", "Key Parameters:"),
-                tags=[_t("Akurasi", "Accuracy"), "Cohen's Kappa", _t("Kelas Risiko", "Risk Class")],
-            )
-
-        with _hub_row2_c2:
-            _render_hub_card(
-                header_gradient="linear-gradient(135deg, #FEEB97 0%, #4FB783 100%)",
-                badge_text=_t("MODUL 04: SIMULASI 3D", "MODULE 04: 3D SIMULATION"),
-                badge_color="amber",
-                fmt_text=_t("Animasi 3D", "3D Animation"),
-                title=_t("Simulasi Aliran 3D", "3D Flow Simulation"),
-                subtitle=_t(
-                    "Simulasi penjalaran debris/longsoran dan genangan banjir menuruni medan 3D hasil DEM segmen, lengkap animasi waktu.",
-                    "Simulates debris/landslide flow and flood inundation across the segment's 3D DEM terrain, with time-based animation."
-                ),
-                intro_label=_t("TUJUAN UTAMA", "MAIN OBJECTIVE"),
-                intro_text=_t(
-                    "Dari titik sumber yang ditandai di peta (klik langsung di peta interaktif), modul ini menjalankan simulasi cellular-automaton "
-                    "(debris/longsoran) atau shallow-water diffusive-wave (genangan banjir) di atas medan 3D hasil DEM, divisualisasikan sebagai animasi.",
-                    "From a source point marked on an interactive map (click directly on the map), this module runs a cellular-automaton simulation "
-                    "(debris/landslide) or shallow-water diffusive-wave simulation (flood) over the segment's 3D DEM terrain, visualized as an animation."
-                ),
-                feat_label=_t("FITUR & KAPABILITAS", "FEATURES &amp; CAPABILITIES"),
-                features=[
-                    (_t("Klik Peta Interaktif", "Interactive Map Click"), _t("Tandai titik sumber langsung di peta DEM ber-citra satelit.", "Mark the source point directly on the satellite-imagery DEM map.")),
-                    (_t("Simulasi Debris/Longsoran", "Debris/Landslide Simulation"), _t("Model cellular-automaton penyebaran material berbasis kemiringan.", "Slope-based cellular-automaton material spreading model.")),
-                    (_t("Simulasi Genangan Banjir", "Flood Inundation Simulation"), _t("Model shallow-water diffusive-wave, menjalar mengikuti kontur.", "Shallow-water diffusive-wave model, propagating along terrain contours.")),
-                    (_t("Animasi 3D + Citra Satelit", "3D Animation + Satellite Imagery"), _t("Playback animasi waktu di atas medan 3D dengan konteks citra satelit.", "Time-based animation playback over the 3D terrain with satellite imagery context.")),
-                ],
-                tag_label=_t("Parameter Kunci:", "Key Parameters:"),
-                tags=["Manning's n", _t("Radius Sumber", "Source Radius"), _t("Eksagerasi Vertikal", "Vertical Exaggeration")],
-            )
-
-
+        # 8 modul mengikuti tab aplikasi (tab Monitoring Deviation khusus admin -> TIDAK ditampilkan sbg modul)
+        _mods = _hub_module_specs()
+        for _mi in range(0, len(_mods), 2):
+            _mcA, _mcB = st.columns(2)
+            with _mcA:
+                _render_hub_card(**_mods[_mi])
+            if _mi + 1 < len(_mods):
+                with _mcB:
+                    _render_hub_card(**_mods[_mi + 1])
 
         st.markdown(f"""
         <div style="margin-bottom:18px;">
@@ -4515,69 +5164,7 @@ if st.session_state.home_page:
         </div>
         """, unsafe_allow_html=True)
 
-        with st.expander(_t("Modul 01 — Erosion Mapping", "Module 01 — Erosion Mapping"), expanded=True):
-            st.markdown(_t(
-                "1. Buat/tambah segmen (sekat/channel) di bagian A.\n"
-                "2. Upload DXF kontur & boundary untuk tiap segmen.\n"
-                "3. Isi parameter hidrologi-hidrolika (hujan, Manning's n, geometri channel), atau aktifkan mode otomatis berbasis hujan.\n"
-                "4. Isi parameter tambahan (ukuran butir, dsb) sesuai kondisi segmen.\n"
-                "5. Jalankan RUN ANALYSIS untuk menghasilkan peta risiko 2D/3D dan rekomendasi.\n"
-                "6. Aktifkan narasi AI (opsional) untuk rekomendasi naratif per segmen.\n"
-                "7. Isi data reviewer (opsional) lalu unduh laporan PDF / PPTX.",
-                "1. Create/add a segment (check-dam/channel) in section A.\n"
-                "2. Upload the contour & boundary DXF for each segment.\n"
-                "3. Fill in hydrology-hydraulics parameters (rainfall, Manning's n, channel geometry), or enable rainfall-based automatic mode.\n"
-                "4. Fill in additional parameters (grain size, etc.) matching the segment's conditions.\n"
-                "5. Run RUN ANALYSIS to generate the 2D/3D risk map and recommendations.\n"
-                "6. Enable the AI narrative (optional) for a per-segment recommendation narrative.\n"
-                "7. Fill in reviewer data (optional) then download the PDF / PPTX report."
-            ))
-
-        with st.expander(_t("Modul 02 — Back Analysis", "Module 02 — Back Analysis")):
-            st.markdown(_t(
-                "1. Pastikan analisis desain (Erosion Mapping) pada segmen terkait sudah dijalankan (RUN ANALYSIS).\n"
-                "2. Pilih segmen yang mengalami kejadian erosi/sedimentasi di lapangan.\n"
-                "3. Tandai lokasi kejadian: klik satu titik di peta risiko, ATAU upload DXF boundary area yang tererosi.\n"
-                "4. Lihat ranking faktor risiko yang paling menyimpang di lokasi tersebut (Mode A).\n"
-                "5. Kalau ada data ukur lapangan (kedalaman scour / volume sedimentasi), isi di Mode B untuk hitung mundur parameter efektif.\n"
-                "6. Bandingkan hasil hitung mundur terhadap asumsi desain awal untuk menentukan penyebab paling mungkin.",
-                "1. Make sure the design analysis (Erosion Mapping) for the relevant segment has been run (RUN ANALYSIS).\n"
-                "2. Select the segment where the erosion/sedimentation event occurred in the field.\n"
-                "3. Mark the event location: click a point on the risk map, OR upload a DXF boundary of the eroded area.\n"
-                "4. Review the ranking of risk factors that deviate most at that location (Mode A).\n"
-                "5. If field measurement data is available (scour depth / sediment volume), fill it in Mode B to back-calculate the effective parameter.\n"
-                "6. Compare the back-calculated result against the original design assumption to identify the most likely cause."
-            ))
-
-        with st.expander(_t("Modul 03 — Machine Learning", "Module 03 — Machine Learning")):
-            st.markdown(_t(
-                "1. Pastikan analisis desain (Erosion Mapping) pada segmen terkait sudah dijalankan.\n"
-                "2. Pilih segmen yang akan divalidasi.\n"
-                "3. Masukkan data observasi lapangan: tabel titik sampel (3 kelas risiko), ATAU boundary erosi aktual (DXF, 2 kelas).\n"
-                "4. Lihat hasil Confusion Matrix, Overall Accuracy, dan Cohen's Kappa.\n"
-                "5. (Opsional) Jalankan perbandingan metode Hjulström vs Shields vs Partheniades+Flow Accumulation untuk segmen yang sama.",
-                "1. Make sure the design analysis (Erosion Mapping) for the relevant segment has been run.\n"
-                "2. Select the segment to validate.\n"
-                "3. Enter field observation data: a sample-point table (3 risk classes), OR an actual erosion boundary (DXF, 2 classes).\n"
-                "4. Review the Confusion Matrix, Overall Accuracy, and Cohen's Kappa results.\n"
-                "5. (Optional) Run the Hjulström vs Shields vs Partheniades+Flow Accumulation method comparison for the same segment."
-            ))
-
-        with st.expander(_t("Modul 04 — Simulasi Aliran 3D", "Module 04 — 3D Flow Simulation")):
-            st.markdown(_t(
-                "1. Pastikan analisis desain (Erosion Mapping) pada segmen terkait sudah dijalankan (sumber DEM-nya dari sini).\n"
-                "2. Pilih segmen & jenis simulasi (Debris/Longsoran atau Genangan Banjir).\n"
-                "3. Tandai titik sumber: klik langsung di peta DEM, atau input koordinat manual.\n"
-                "4. Isi parameter simulasi (radius sumber, Manning's n, jumlah frame, eksagerasi vertikal, dsb).\n"
-                "5. Tekan tombol Jalankan Simulasi.\n"
-                "6. Putar animasi hasil (Play/Pause/slider) dan tinjau kedalaman maksimum, volume, serta titik limpasan (untuk genangan).",
-                "1. Make sure the design analysis (Erosion Mapping) for the relevant segment has been run (it supplies the DEM source).\n"
-                "2. Select the segment & simulation type (Debris/Landslide or Flood Inundation).\n"
-                "3. Mark the source point: click directly on the DEM map, or enter coordinates manually.\n"
-                "4. Fill in the simulation parameters (source radius, Manning's n, frame count, vertical exaggeration, etc.).\n"
-                "5. Press the Run Simulation button.\n"
-                "6. Play back the animation (Play/Pause/slider) and review the maximum depth, volume, and overflow points (for flood)."
-            ))
+        _render_module_workflow()
 
 
 
@@ -5108,12 +5695,13 @@ _tab_labels.append(_t("Simulasi Aliran 3D", "3D Flow Simulation"))
 _tab_labels.append(_t("Rekonstruksi Desain", "Design Reconstruction"))
 _tab_labels.append(_t("Surface/Cover Slope", "Surface/Cover Slope"))
 _tab_labels.append(_t("Cross Section", "Cross Section"))
+_tab_labels.append(_t("Stabilitas Lereng (FK)", "Slope Stability (FS)"))
 
 if _is_admin:
-    tab1, tab4, tab2, tab3, tab5, tab6, tab7, tab8 = st.tabs(_tab_labels)
+    tab1, tab4, tab2, tab3, tab5, tab6, tab7, tab8, tab9 = st.tabs(_tab_labels)
 else:
     # User surveyor tidak menampilkan tab "Monitoring Deviation" sama sekali.
-    tab1, tab4, tab2, tab5, tab6, tab7, tab8 = st.tabs(_tab_labels)
+    tab1, tab4, tab2, tab5, tab6, tab7, tab8, tab9 = st.tabs(_tab_labels)
     tab3 = None
 
 # (tab_hub & tab_workflow dipindah ke landing page -- lihat blok "if st.session_state.home_page:")
@@ -14048,17 +14636,80 @@ with tab1:
 # =========================================================
 with tab2:
 
-    _sub_header("Submit Data Training")
-    train_file = st.file_uploader("Upload CSV / Excel", type=["csv", "xlsx"])
+    st.markdown("### " + _t("🤖 Machine Learning — Prediksi FK Lereng akibat Rapid Drawdown",
+                           "🤖 Machine Learning — Slope FS Prediction under Rapid Drawdown"))
+    _ui_caption(_t(
+        "Rapid drawdown = penurunan muka air (kolam/pit lake, sump, atau muka air tanah) yang lebih cepat daripada tekanan air pori di dalam lereng bisa terdisipasi. "
+        "Tekanan air yang tadinya menyangga lereng hilang sementara tekanan pori di dalam lereng masih tinggi, sehingga tegangan efektif dan FK turun. "
+        "Modul ini melatih model ML dari data simulasi atau monitoring untuk memprediksi FK skenario drawdown baru dengan cepat.",
+        "Rapid drawdown = a water-level fall (pit lake, sump or groundwater level) faster than pore pressure inside the slope can dissipate. "
+        "The water pressure that supported the slope is lost while the internal pore pressure is still high, so effective stress and FS drop. "
+        "This module trains ML models on simulation or monitoring data to predict the FS of new drawdown scenarios quickly."))
+    with st.expander(_t("ℹ️ Cara kerja, data yang dibutuhkan, dan batasan", "ℹ️ How it works, required data and limitations"), expanded=False):
+        st.markdown(_t(
+            "**Alur:** (1) siapkan dataset FK vs kondisi drawdown → (2) upload & pilih target/fitur → (3) cleaning & eksplorasi → (4) cek model terbaik & train → "
+            "(5) evaluasi → (6) upload data skenario/monitoring baru → (7) baca FK prediksi & status, lalu verifikasi kasus kritis dengan modul **Stabilitas Lereng (FK)**.\n\n"
+            "**Kolom yang disarankan** (nama bebas, sesuaikan dengan data Anda):\n"
+            "- `Date` — tanggal (agar time series dapat ditampilkan)\n"
+            "- `WL` — elevasi/tinggi muka air di kolam/pit/sump (m)\n"
+            "- `delta_WL`, `drawdown_rate` — total penurunan (m) dan laju penurunan (m/hari)\n"
+            "- `WL_awal` — muka air sebelum drawdown (m)\n"
+            "- `k_ms` — permeabilitas material lereng (m/s); `c_kpa`, `phi_deg` — kuat geser efektif\n"
+            "- `slope_deg`, `H_m` — sudut dan tinggi lereng\n"
+            "- `FS` — **target**: FK dari simulasi kesetimbangan batas/numerik yang tervalidasi, atau hasil back analysis\n\n"
+            "**Batasan penting:** ML hanya mengenali pola pada data training dan **tidak tahu fisika** — jangan dipakai di luar rentang laju drawdown, muka air, atau parameter material yang ada di data training. "
+            "Kualitas prediksi bergantung pada kualitas FK yang dipakai untuk melatih. Hasilnya adalah alat skrining/peringatan dini, bukan pengganti analisis geoteknik formal; "
+            "ambang FK mengikuti kriteria proyek (mis. Kepmen ESDM 1827 K/30/MEM/2018 untuk lereng tambang).",
+            "**Workflow:** (1) prepare a dataset of FS vs drawdown conditions → (2) upload & choose target/features → (3) cleaning & exploration → (4) check best model & train → "
+            "(5) evaluate → (6) upload new scenario/monitoring data → (7) read the predicted FS & status, then verify critical cases with the **Slope Stability (FS)** module.\n\n"
+            "**Suggested columns** (free names, adapt to your data):\n"
+            "- `Date` — date (so the time series can be shown)\n"
+            "- `WL` — water level/elevation in the pit lake/sump (m)\n"
+            "- `delta_WL`, `drawdown_rate` — total drop (m) and drawdown rate (m/day)\n"
+            "- `WL_awal` — water level before drawdown (m)\n"
+            "- `k_ms` — slope material permeability (m/s); `c_kpa`, `phi_deg` — effective shear strength\n"
+            "- `slope_deg`, `H_m` — slope angle and height\n"
+            "- `FS` — **target**: FS from validated limit-equilibrium/numerical simulation, or back-analysis results\n\n"
+            "**Important limits:** ML only recognises patterns in the training data and **knows no physics** — do not use it outside the drawdown-rate, water-level or material-parameter ranges in the training data. "
+            "Prediction quality depends on the quality of the FS used for training. The result is a screening/early-warning tool, not a substitute for formal geotechnical analysis; "
+            "FS thresholds follow project criteria (e.g. Kepmen ESDM 1827 K/30/MEM/2018 for mine slopes)."))
+    _mlc1, _mlc2, _mlc3 = st.columns([1, 1, 1.4])
+    _ml_fk_crit = _mlc1.number_input(_t("Batas FK 'CRITICAL'", "'CRITICAL' FS limit"), 1.0, 3.0, 1.2, 0.05, key="ml_fk_crit",
+                                     help=_t("FK < 1,0 = FAIL; 1,0 sampai batas ini = CRITICAL; di atasnya STABLE. Ambang internal bawaan — sesuaikan dengan kriteria proyek/rapid drawdown.",
+                                             "FS < 1.0 = FAIL; 1.0 up to this limit = CRITICAL; above = STABLE. Internal default threshold — adjust to project/rapid-drawdown criteria."))
+    _ml_fk_limit = _mlc2.number_input(_t("Garis FK minimum (grafik)", "Minimum FS line (chart)"), 1.0, 3.0, 1.5, 0.05, key="ml_fk_limit",
+                                      help=_t("Garis putus-putus pada grafik time series. Isi sesuai FK minimum yang disyaratkan.", "Dashed line on the time-series chart. Set to the required minimum FS."))
+    _mlc3.download_button(
+        _t("⬇️ Template CSV (contoh format rapid drawdown)", "⬇️ CSV template (rapid-drawdown format example)"),
+        data=("Date,WL,delta_WL,drawdown_rate,WL_awal,k_ms,c_kpa,phi_deg,slope_deg,H_m,FS\n"
+              "2026-01-01,120.0,0.0,0.0,120.0,1e-7,10,28,35,40,1.62\n"
+              "2026-01-02,118.5,1.5,1.5,120.0,1e-7,10,28,35,40,1.48\n"
+              "2026-01-03,116.0,4.0,2.5,120.0,1e-7,10,28,35,40,1.21\n"
+              "2026-01-04,112.0,8.0,4.0,120.0,1e-7,10,28,35,40,0.98\n").encode("utf-8"),
+        file_name="template_rapid_drawdown_CONTOH_FORMAT.csv", mime="text/csv", key="ml_template_dl")
+    st.caption(_t("Angka pada template hanya menunjukkan FORMAT kolom, bukan data nyata.", "The template values only show the column FORMAT, not real data."))
+
+    def klasifikasi_fs(fs):
+        if fs < 1:
+            return "FAIL"
+        elif fs < _ml_fk_crit:
+            return "CRITICAL"
+        else:
+            return "STABLE"
+
+    _sub_header(_t("1. Data Training (simulasi / monitoring rapid drawdown)", "1. Training Data (rapid-drawdown simulation / monitoring)"))
+    train_file = st.file_uploader(_t("Upload CSV / Excel data training", "Upload training CSV / Excel"), type=["csv", "xlsx"])
 
     if train_file:
         df = pd.read_csv(train_file) if train_file.name.endswith(".csv") else pd.read_excel(train_file)
 
         st.dataframe(df)
 
-        target = st.selectbox("Target", df.columns)
-        features = st.multiselect("Fitur", df.columns.drop(target))
-        model_type = st.selectbox("Model", ["Regression", "Classification"])
+        target = st.selectbox(_t("Target (mis. FS / FK)", "Target (e.g. FS)"), df.columns)
+        features = st.multiselect(_t("Fitur (mis. WL, laju drawdown, delta_WL, k, c', φ', sudut lereng)", "Features (e.g. WL, drawdown rate, delta_WL, k, c', φ', slope angle)"), df.columns.drop(target))
+        model_type = st.selectbox(_t("Jenis model", "Model type"), ["Regression", "Classification"],
+                                  help=_t("Regression = prediksi nilai FK; Classification = prediksi kelas (mis. FAIL/CRITICAL/STABLE) bila target berupa kelas.",
+                                          "Regression = predict the FS value; Classification = predict a class (e.g. FAIL/CRITICAL/STABLE) when the target is a class."))
         test_size = st.slider("Test Size (%)", 10, 40, 20) / 100
 
 
@@ -14084,14 +14735,6 @@ with tab2:
             _ui_warning(f"Outlier terhapus: {removed} data")
 
         st.dataframe(df_clean)
-
-        def klasifikasi_fs(fs):
-            if fs < 1:
-                return "FAIL"
-            elif fs < 1.2:
-                return "CRITICAL"
-            else:
-                return "STABLE"
 
          # ================= VISUAL AWAL =================
         _sub_header("Correlation Heatmap")
@@ -14211,7 +14854,7 @@ with tab2:
                 fig_v.add_trace(go.Violin(y=df_clean[col], name=col, box_visible=True))
             st.plotly_chart(fig_v, width="stretch")
         # ================= AUTO MODEL =================
-        _sub_header("Auto Model Selection")
+        _sub_header(_t("Pemilihan Model Otomatis", "Automatic Model Selection"))
 
         if st.button(_t("Cek Model Terbaik", "Check Best Model")):
 
@@ -14329,11 +14972,18 @@ with tab2:
             else:
                 _metric_card("Accuracy", f"{accuracy_score(y_test, y_pred):.3f}")
                 st.dataframe(confusion_matrix(y_test, y_pred))
+            st.caption(_t(
+                "Skor evaluasi berlaku pada rentang data training/test ini saja. Skenario drawdown di luar rentang laju penurunan, muka air, atau parameter material yang dilatih akan diekstrapolasi tanpa dasar fisika — "
+                "verifikasi kasus kritis dengan modul Stabilitas Lereng (FK).",
+                "Evaluation scores hold only within this training/test range. Drawdown scenarios outside the trained drawdown-rate, water-level or material-parameter ranges are extrapolated without physical basis — "
+                "verify critical cases with the Slope Stability (FS) module."))
 
     # ================= PREDIKSI =================
-    _sub_header(_t("Submit Data Prediksi", "Submit Prediction Data"))
+    _sub_header(_t("2. Prediksi FK skenario / monitoring drawdown", "2. FS prediction for drawdown scenario / monitoring"))
+    _ui_caption(_t("Upload data skenario atau monitoring baru dengan kolom fitur yang SAMA seperti saat training (tanpa kolom FS). Hasil: FS_PRED dan STATUS (FAIL / CRITICAL / STABLE menurut ambang di atas).",
+                   "Upload new scenario or monitoring data with the SAME feature columns as in training (without the FS column). Result: FS_PRED and STATUS (FAIL / CRITICAL / STABLE per the thresholds above)."))
 
-    pred_file = st.file_uploader("Upload Data Baru", type=["csv", "xlsx"], key="predict")
+    pred_file = st.file_uploader(_t("Upload data skenario/monitoring (fitur sama dengan training)", "Upload scenario/monitoring data (same features as training)"), type=["csv", "xlsx"], key="predict")
 
     if pred_file and "model" in st.session_state:
 
@@ -14359,7 +15009,7 @@ with tab2:
         st.session_state["df_pred"] = df_pred
 
     # ================= TIME SERIES PREDIKSI =================
-    st.markdown("### Time Series Prediction (Dual Axis)")
+    st.markdown("### " + _t("Time Series Prediksi FK vs Muka Air (Rapid Drawdown)", "Predicted FS vs Water-Level Time Series (Rapid Drawdown)"))
 
     df_pred = st.session_state.get("df_pred", None)
 
@@ -14377,14 +15027,14 @@ with tab2:
 
             with col1:
                 primary_cols = st.multiselect(
-                    "Primary Y (Line - kiri)",
+                    _t("Sumbu kiri (garis) — mis. muka air WL", "Left axis (line) — e.g. water level WL"),
                     options=all_cols,
                     default=[col for col in ["WL", "ML"] if col in all_cols]
                 )
 
             with col2:
                 secondary_cols = st.multiselect(
-                    "Secondary Y (Area - kanan)",
+                    _t("Sumbu kanan (area) — mis. FS_PRED", "Right axis (area) — e.g. FS_PRED"),
                     options=all_cols,
                     default=[col for col in ["FS_PRED"] if col in all_cols]
                 )
@@ -14421,16 +15071,16 @@ with tab2:
                     x=unstable["Date"],
                     y=unstable["FS_PRED"],
                     mode='markers',
-                    name='UNSTABLE',
+                    name=_t('FK di bawah batas STABLE', 'FS below STABLE'),
                     marker=dict(size=10, symbol='x'),
                     yaxis="y2"
                 ))
 
             # ================= FS LIMIT
             fig.add_hline(
-                y=1.5,
+                y=_ml_fk_limit,
                 line_dash="dash",
-                annotation_text="FS Limit",
+                annotation_text=_t(f"FK minimum {_ml_fk_limit:.2f}", f"Minimum FS {_ml_fk_limit:.2f}"),
                 yref="y2"
             )
 
@@ -14440,8 +15090,8 @@ with tab2:
                 height=550,
                 hovermode="x unified",
                 xaxis=dict(title="Date"),
-                yaxis=dict(title="Primary Axis", side="left"),
-                yaxis2=dict(title="Secondary Axis", overlaying="y", side="right"),
+                yaxis=dict(title=_t("Muka air / parameter drawdown", "Water level / drawdown parameter"), side="left"),
+                yaxis2=dict(title=_t("FK prediksi", "Predicted FS"), overlaying="y", side="right"),
                 legend=dict(orientation="h"),
                 margin=dict(l=20, r=20, t=40, b=20)
             )
@@ -14449,10 +15099,10 @@ with tab2:
             st.plotly_chart(fig, width="stretch")
 
         else:
-            _ui_warning("Kolom 'Date' tidak ditemukan di data prediksi")
+            _ui_warning(_t("Kolom 'Date' tidak ditemukan di data prediksi (dibutuhkan untuk time series).", "Column 'Date' not found in the prediction data (needed for the time series)."))
 
     else:
-        _ui_info("Upload data prediksi dulu untuk menampilkan grafik")
+        _ui_info(_t("Latih model, lalu upload data skenario/monitoring drawdown untuk menampilkan grafik FK vs muka air.", "Train a model, then upload drawdown scenario/monitoring data to show the FS vs water-level chart."))
 
 
 
@@ -19211,3 +19861,10 @@ with tab8:
                     _render_xs_export_cutfill(st.session_state.get("section_results"))
                 except Exception as _e_xsx:
                     st.warning(f"Panel ekspor penampang tidak dapat ditampilkan: {_e_xsx}")
+
+
+with tab9:
+    try:
+        _render_fk_tab()
+    except Exception as _e_fk_tab:
+        st.error(f"Tab Stabilitas Lereng tidak dapat ditampilkan: {_e_fk_tab}")
