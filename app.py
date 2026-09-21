@@ -31,6 +31,7 @@ from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.patches import Patch
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 import requests
+from scipy import stats as _scipy_stats
 
 from matplotlib_scalebar.scalebar import ScaleBar
 
@@ -315,6 +316,7 @@ _PROJECT_EXCLUDE_KEYS = {
     "project_download_bytes", "project_download_name", "project_download_top",
     "project_download_static_url",
     "dl_project_light", "dl_alt_show", "dl_project_inputs_only", "save_project_inputs_only",
+    "rf_daily", "rf_daily_meta", "rf_R_bols", "rf_R_lenvain",  # seri hujan harian: besar & bisa diambil ulang
 }
 
 # Mode "ringan" pada download: lewati citra hasil olahan yang otomatis dibuat ulang dari
@@ -360,17 +362,158 @@ class _PlainState(dict):
     Unpickler di bawah, semua kelas dari modul streamlit.* dibaca sebagai dict biasa."""
 
 
+# ---------------------------------------------------------------------------------------------
+# KEAMANAN FILE PROJECT (.eroproj = pickle). pickle.load pada file sembarang = eksekusi kode
+# sembarang di server (server memegang API key/secrets). Karena itu file dibaca dengan Unpickler
+# ALLOWLIST: hanya (modul, nama) yang lazim dipakai data project (numpy, pandas, shapely, tipe
+# standar) yang boleh direkonstruksi; selain itu (os.system, subprocess, eval, dst) DITOLAK.
+# Daftar ini direkam dari pickle nyata (numpy 1.26/2.x, pandas 2.2/3.0, shapely 2.x). Bila file
+# lama Anda berisi objek lain, pesan error menyebut nama objeknya. Untuk keadaan darurat admin
+# server bisa memasang env EROSI_ALLOW_UNSAFE_PROJECT_PICKLE=1 (TIDAK AMAN -- hanya utk file tepercaya).
+# ---------------------------------------------------------------------------------------------
+_PROJECT_PICKLE_ALLOW = frozenset({
+    ("builtins", "bytearray"),
+    ("builtins", "complex"),
+    ("builtins", "frozenset"),
+    ("builtins", "list"),
+    ("builtins", "object"),
+    ("builtins", "range"),
+    ("builtins", "set"),
+    ("builtins", "slice"),
+    ("collections", "OrderedDict"),
+    ("collections", "defaultdict"),
+    ("copyreg", "_reconstructor"),
+    ("datetime", "date"),
+    ("datetime", "datetime"),
+    ("datetime", "time"),
+    ("datetime", "timedelta"),
+    ("datetime", "timezone"),
+    ("decimal", "Decimal"),
+    ("numpy", "dtype"),
+    ("numpy", "ndarray"),
+    ("numpy._core.multiarray", "_reconstruct"),
+    ("numpy._core.multiarray", "scalar"),
+    ("numpy._core.numeric", "_frombuffer"),
+    ("numpy.core.multiarray", "_reconstruct"),
+    ("numpy.core.multiarray", "scalar"),
+    ("numpy.core.numeric", "_frombuffer"),
+    ("numpy.ma", "MaskedArray"),
+    ("numpy.ma.core", "MaskedArray"),
+    ("numpy.ma.core", "_mareconstruct"),
+    ("pandas", "Categorical"),
+    ("pandas", "CategoricalDtype"),
+    ("pandas", "DataFrame"),
+    ("pandas", "DatetimeIndex"),
+    ("pandas", "Index"),
+    ("pandas", "Int64Dtype"),
+    ("pandas", "Interval"),
+    ("pandas", "MultiIndex"),
+    ("pandas", "NA"),
+    ("pandas", "Period"),
+    ("pandas", "RangeIndex"),
+    ("pandas", "Series"),
+    ("pandas", "StringDtype"),
+    ("pandas._libs.arrays", "__pyx_unpickle_NDArrayBacked"),
+    ("pandas._libs.internals", "_unpickle_block"),
+    ("pandas._libs.interval", "Interval"),
+    ("pandas._libs.missing", "NA"),
+    ("pandas._libs.tslibs.nattype", "__nat_unpickle"),
+    ("pandas._libs.tslibs.nattype", "_nat_unpickle"),
+    ("pandas._libs.tslibs.offsets", "Day"),
+    ("pandas._libs.tslibs.offsets", "MonthEnd"),
+    ("pandas._libs.tslibs.period", "Period"),
+    ("pandas._libs.tslibs.timedeltas", "Timedelta"),
+    ("pandas._libs.tslibs.timedeltas", "_timedelta_unpickle"),
+    ("pandas._libs.tslibs.timestamps", "Timestamp"),
+    ("pandas._libs.tslibs.timestamps", "_unpickle_timestamp"),
+    ("pandas.arrays", "ArrowStringArray"),
+    ("pandas.arrays", "DatetimeArray"),
+    ("pandas.arrays", "IntegerArray"),
+    ("pandas.arrays", "TimedeltaArray"),
+    ("pandas.core.arrays.boolean", "BooleanArray"),
+    ("pandas.core.arrays.categorical", "Categorical"),
+    ("pandas.core.arrays.datetimes", "DatetimeArray"),
+    ("pandas.core.arrays.floating", "FloatingArray"),
+    ("pandas.core.arrays.integer", "Int64Dtype"),
+    ("pandas.core.arrays.integer", "IntegerArray"),
+    ("pandas.core.arrays.masked", "BaseMaskedArray"),
+    ("pandas.core.arrays.numpy_", "NumpyExtensionArray"),
+    ("pandas.core.arrays.numpy_", "PandasArray"),
+    ("pandas.core.arrays.string_", "StringArray"),
+    ("pandas.core.arrays.string_", "StringDtype"),
+    ("pandas.core.arrays.string_arrow", "ArrowStringArray"),
+    ("pandas.core.arrays.timedeltas", "TimedeltaArray"),
+    ("pandas.core.dtypes.dtypes", "CategoricalDtype"),
+    ("pandas.core.dtypes.dtypes", "DatetimeTZDtype"),
+    ("pandas.core.dtypes.dtypes", "IntervalDtype"),
+    ("pandas.core.dtypes.dtypes", "PeriodDtype"),
+    ("pandas.core.frame", "DataFrame"),
+    ("pandas.core.indexes.base", "Index"),
+    ("pandas.core.indexes.base", "_new_Index"),
+    ("pandas.core.indexes.category", "CategoricalIndex"),
+    ("pandas.core.indexes.datetimes", "DatetimeIndex"),
+    ("pandas.core.indexes.datetimes", "_new_DatetimeIndex"),
+    ("pandas.core.indexes.interval", "IntervalIndex"),
+    ("pandas.core.indexes.multi", "MultiIndex"),
+    ("pandas.core.indexes.numeric", "Float64Index"),
+    ("pandas.core.indexes.numeric", "Int64Index"),
+    ("pandas.core.indexes.period", "PeriodIndex"),
+    ("pandas.core.indexes.range", "RangeIndex"),
+    ("pandas.core.indexes.timedeltas", "TimedeltaIndex"),
+    ("pandas.core.indexes.timedeltas", "_new_TimedeltaIndex"),
+    ("pandas.core.internals.managers", "BlockManager"),
+    ("pandas.core.internals.managers", "SingleBlockManager"),
+    ("pandas.core.series", "Series"),
+    ("pyarrow.lib", "_restore_array"),
+    ("pyarrow.lib", "py_buffer"),
+    ("pyarrow.lib", "type_for_alias"),
+    ("shapely.geometry.collection", "GeometryCollection"),
+    ("shapely.geometry.linestring", "LineString"),
+    ("shapely.geometry.multilinestring", "MultiLineString"),
+    ("shapely.geometry.multipoint", "MultiPoint"),
+    ("shapely.geometry.multipolygon", "MultiPolygon"),
+    ("shapely.geometry.point", "Point"),
+    ("shapely.geometry.polygon", "LinearRing"),
+    ("shapely.geometry.polygon", "Polygon"),
+    ("shapely.io", "from_wkb"),
+    ("shapely.wkb", "loads"),
+})
+_MAX_PROJECT_UNCOMPRESSED = 1_500_000_000  # batas ukuran setelah dekompresi (cegah "zip bomb")
+
+
+class _LimitedReader:
+    def __init__(self, f, limit=_MAX_PROJECT_UNCOMPRESSED):
+        self._f, self._limit, self._n = f, limit, 0
+
+    def _count(self, data):
+        self._n += len(data)
+        if self._n > self._limit:
+            raise ValueError("Isi file project terlalu besar setelah dekompresi (dibatasi demi keamanan).")
+        return data
+
+    def read(self, n=-1):
+        return self._count(self._f.read(n))
+
+    def readline(self, *a):
+        return self._count(self._f.readline(*a))
+
+
 class _ProjectUnpickler(pickle.Unpickler):
     def find_class(self, module, name):
         if module.startswith("streamlit"):
             return _PlainState
-        return super().find_class(module, name)
+        if (module, name) in _PROJECT_PICKLE_ALLOW or os.environ.get("EROSI_ALLOW_UNSAFE_PROJECT_PICKLE") == "1":
+            return super().find_class(module, name)
+        raise pickle.UnpicklingError(
+            f"File project berisi objek yang tidak diizinkan ({module}.{name}). Demi keamanan hanya data "
+            f"project standar yang boleh dimuat -- file ini mungkin bukan buatan aplikasi ini atau berasal "
+            f"dari versi yang sangat berbeda.")
 
 
 def _project_load(fileobj):
     """Baca payload project; otomatis mendeteksi gzip (baru) atau pickle polos (file lama).
     Melempar ValueError berpesan jelas kalau isinya bukan file project (mis. halaman HTML hasil
-    download yang gagal)."""
+    download yang gagal) dan menolak objek berbahaya (Unpickler allowlist)."""
     _head = fileobj.read(64)
     fileobj.seek(0)
     if _head.lstrip()[:1] == b"<":
@@ -379,8 +522,12 @@ def _project_load(fileobj):
             "gagal. Unduh ulang file project dari aplikasi (pakai tombol Download atau cara alternatif).")
     if _head[:2] == b"\x1f\x8b":
         with gzip.GzipFile(fileobj=fileobj, mode="rb") as _gz:
-            return _ProjectUnpickler(_gz).load()
-    return _ProjectUnpickler(fileobj).load()
+            _payload = _ProjectUnpickler(_LimitedReader(_gz)).load()
+    else:
+        _payload = _ProjectUnpickler(_LimitedReader(fileobj)).load()
+    if not isinstance(_payload, dict) or not isinstance(_payload.get("state"), dict):
+        raise ValueError("Struktur file project tidak dikenali (bukan file .eroproj buatan aplikasi ini).")
+    return _payload
 
 
 def _project_user_dir(username):
@@ -564,6 +711,10 @@ def _is_widget_event_key(_k, _v=None):
     # Objek internal Streamlit (mis. state seleksi chart) tidak boleh masuk project -- KECUALI file
     # upload (UploadedFile juga bertipe streamlit.*, tapi isinya DXF/orthophoto yang HARUS disimpan).
     if type(_v).__name__ == "_PlainState":
+        return True
+    # model ML (sklearn/xgboost/dst) TIDAK disimpan di project: kelasnya terlalu banyak untuk allowlist
+    # keamanan dan model bisa dilatih ulang dari data (df_clean) di tab Machine Learning.
+    if type(_v).__module__.split(".")[0] in ("sklearn", "xgboost", "lightgbm", "catboost", "torch", "tensorflow", "keras"):
         return True
     if type(_v).__module__.startswith("streamlit") and not _is_uploaded_file_like(_v):
         return True
@@ -1762,6 +1913,49 @@ REFERENCE_LIBRARY = {
     "cohen1960": ("literatur", "Cohen (1960)",
                   "Cohen, J. (1960). A coefficient of agreement for nominal scales. Educational and Psychological "
                   "Measurement, 20(1), 37-46.", False),
+    "desmet_govers1996": ("literatur", "Desmet & Govers (1996)",
+                          "Desmet, P.J.J. & Govers, G. (1996). A GIS procedure for automatically calculating the USLE LS factor on "
+                          "topographically complex landscape units. Journal of Soil and Water Conservation, 51(5), 427-433.", True),
+    "mccool1987": ("literatur", "McCool dkk. (1987)",
+                   "McCool, D.K., Brown, L.C., Foster, G.R., Mutchler, C.K. & Meyer, L.D. (1987). Revised slope steepness factor for the "
+                   "Universal Soil Loss Equation. Transactions of the ASAE, 30(5), 1387-1396.", False),
+    "wischmeier_smith1978": ("literatur", "Wischmeier & Smith (1978)",
+                             "Wischmeier, W.H. & Smith, D.D. (1978). Predicting Rainfall Erosion Losses: A Guide to Conservation Planning. "
+                             "USDA Agriculture Handbook No. 537.", False),
+    "renard1997": ("literatur", "Renard dkk. (1997)",
+                   "Renard, K.G., Foster, G.R., Weesies, G.A., McCool, D.K. & Yoder, D.C. (1997). Predicting Soil Erosion by Water: A Guide to "
+                   "Conservation Planning with the Revised Universal Soil Loss Equation (RUSLE). USDA Agriculture Handbook No. 703.", False),
+    "williams1975": ("literatur", "Williams (1975)",
+                     "Williams, J.R. (1975). Sediment-yield prediction with Universal Equation using runoff energy factor. In: Present and "
+                     "Prospective Technology for Predicting Sediment Yields and Sources, ARS-S-40, USDA, 244-252 (MUSLE: Y = 11,8 (Q qp)^0,56 K LS C P).", True),
+    "bols1978": ("literatur", "Bols (1978)",
+                 "Bols, P.L. (1978). The iso-erodent map of Java and Madura. Belgian Technical Assistance Project ATA 105, Soil Research "
+                 "Institute, Bogor (dikutip melalui literatur Indonesia -- kutipan sekunder).", False),
+    "dephut_erosi": ("regulasi", "Dephut (1998) / Permenhut P.32/2009",
+                     "Departemen Kehutanan (1998) dan Peraturan Menteri Kehutanan No. P.32/Menhut-II/2009 tentang Tata Cara Penyusunan Rencana Teknik "
+                     "Rehabilitasi Hutan dan Lahan DAS -- klasifikasi tingkat bahaya erosi; batas kelas laju erosi 15/60/180/480 ton/ha/th lazim "
+                     "dipakai di Indonesia (kutipan sekunder; penetapan TBE resmi memperhitungkan faktor lain, baca dokumen resmi).", True),
+    "kepmenlh113": ("regulasi", "Kepmen LH 113/2003",
+                    "Keputusan Menteri Negara Lingkungan Hidup No. 113 Tahun 2003 tentang Baku Mutu Air Limbah bagi Usaha dan/atau Kegiatan "
+                    "Pertambangan Batubara (memuat pH, residu tersuspensi/TSS, Fe, Mn). Periksa status berlaku dan baku mutu yang lebih baru/ketat "
+                    "(mis. Permen LH 5/2014, izin, peraturan daerah).", True),
+    "kirpich1940": ("literatur", "Kirpich (1940)",
+                    "Kirpich, Z.P. (1940). Time of concentration of small agricultural watersheds. Civil Engineering, 10(6), 362.", False),
+    "hazen1904": ("literatur", "Hazen (1904)", "Hazen, A. (1904). On sedimentation. Transactions of the ASCE, 53, 45-71.", False),
+    "camp1946": ("literatur", "Camp (1946)",
+                 "Camp, T.R. (1946). Sedimentation and the design of settling tanks. Transactions of the ASCE, 111, 895-936.", False),
+    "gumbel1958": ("literatur", "Gumbel (1958)", "Gumbel, E.J. (1958). Statistics of Extremes. Columbia University Press, New York.", False),
+    "bulletin17c": ("literatur", "USGS Bulletin 17C (2019)",
+                    "England, J.F. Jr. dkk. (2019). Guidelines for Determining Flood Flow Frequency -- Bulletin 17C. USGS Techniques and Methods, "
+                    "book 4, chap. B5 (Log-Pearson III).", False),
+    "nrcs_neh4": ("literatur", "NRCS NEH-630 Ch.10",
+                  "USDA-NRCS. National Engineering Handbook Part 630 Hydrology, Chapter 10: Estimation of Direct Runoff from Storm Rainfall (SCS-CN).", False),
+    "skempton_delory1957": ("literatur", "Skempton & DeLory (1957)",
+                            "Skempton, A.W. & DeLory, F.A. (1957). Stability of natural slopes in London Clay. Proc. 4th ICSMFE, London, 2, 378-381.", False),
+    "duncan_wright2005": ("literatur", "Duncan & Wright (2005)", "Duncan, J.M. & Wright, S.G. (2005). Soil Strength and Slope Stability. Wiley.", False),
+    "sni8460": ("standar", "SNI 8460:2017",
+                "SNI 8460:2017, Persyaratan perancangan geoteknik. Badan Standardisasi Nasional (memuat stabilitas lereng galian & timbunan dan "
+                "kriteria faktor keamanan; baca tabel pada dokumen resmi).", True),
     "hazen1892": ("literatur", "Hazen (1892)",
                   "Hazen, A. (1892). Some physical properties of sands and gravels, with special reference to their use "
                   "in filtration. 24th Annual Report, Massachusetts State Board of Health, 539-556.", False),
@@ -1830,13 +2024,13 @@ CLASSIFICATION_REGISTRY = {
         "caveat": ("Parameter Shields mengacu Shields (1936). Nilai kritisnya tidak universal: Buffington & Montgomery (1997) melaporkan rentang "
                    "0,030-0,073 (pengamatan visual) dan 0,052-0,086 (acuan laju angkut) untuk sungai berkerikil; Meyer-Peter & Muller memakai "
                    "0,047. Batas 0,03 dan 0,06 di aplikasi adalah pilihan internal di dalam rentang tersebut. Berlaku untuk butir non-kohesif "
-                   "(pasir-kerikil), bukan tanah kohesif atau permukaan bervegetasi. Catatan: slope pada analisis dihitung per sel (m/sel, belum "
-                   "dibagi jarak sel), sehingga τ0 absolut belum dalam Pa sebenarnya.",
+                   "(pasir-kerikil), bukan tanah kohesif atau permukaan bervegetasi. Slope pada analisis dihitung dari gradien DEM dengan "
+                   "jarak sel sebenarnya (m/m), jadi τ0 dalam Pa; tetapi h (kedalaman aliran) tetap asumsi input.",
                    "Shields parameter follows Shields (1936). The critical value is not universal: Buffington & Montgomery (1997) report ranges "
                    "of 0.030-0.073 (visual observation) and 0.052-0.086 (transport-rate reference) for gravel-bed rivers; Meyer-Peter & Muller "
                    "use 0.047. The 0.03 and 0.06 limits in the app are an internal choice within that range. Valid for non-cohesive grains "
-                   "(sand-gravel), not for cohesive soils or vegetated surfaces. Note: the analysis slope is per cell (m/cell, not divided by "
-                   "cell size), so absolute τ0 is not yet in true Pa."),
+                   "(sand-gravel), not for cohesive soils or vegetated surfaces. The analysis slope is computed from the DEM gradient with the "
+                   "true cell spacing (m/m), so τ0 is in Pa; the flow depth h remains an input assumption."),
     },
     "partheniades_index": {
         "title": ("Indeks erosi Partheniades + Flow Accumulation", "Partheniades + Flow Accumulation erosion index"),
@@ -1845,10 +2039,10 @@ CLASSIFICATION_REGISTRY = {
         "basis": "campuran", "refs": ["partheniades1965"],
         "caveat": ("Bentuk laju erosi mengacu Partheniades (1965). Normalisasi persentil-99 dan pembobotan flow accumulation adalah rancangan "
                    "internal, sehingga indeks bersifat RELATIF (bukan laju erosi absolut). M dan τc perlu dikalibrasi (mis. uji jet/flume). "
-                   "Slope per sel (m/sel) — lihat catatan Shields.",
+                   "Slope dihitung dari gradien DEM dengan jarak sel sebenarnya (m/m).",
                    "The erosion-rate form follows Partheniades (1965). The 99th-percentile normalisation and flow-accumulation weighting are "
                    "internal design choices, so the index is RELATIVE (not an absolute erosion rate). M and τc need calibration (e.g. jet/flume "
-                   "tests). Per-cell slope (m/cell) — see the Shields note."),
+                   "tests). Slope computed from the DEM gradient with the true cell spacing (m/m)."),
     },
     "froude": {
         "title": ("Regime aliran (Froude)", "Flow regime (Froude)"),
@@ -1968,6 +2162,80 @@ CLASSIFICATION_REGISTRY = {
                    "Simon, 2001) — the 0.5 exponent and the C formula are internal assumptions, and M here (kg/m²·s) has different units from kd in that "
                    "paper. 0.047 follows Meyer-Peter & Muller (1948). Calibrate with field data before using as a design basis."),
     },
+    "rf_frequency": {
+        "title": ("Hujan rencana (analisis frekuensi) & uji kecocokan distribusi", "Design rainfall (frequency analysis) & distribution goodness-of-fit"),
+        "where": ("Data Curah Hujan → Hujan Rencana", "Rainfall Data → Design Rainfall"),
+        "rule": "Hujan harian maksimum tahunan (tahun dengan data >= 80% hari) dipasang ke Gumbel (momen), Log-Normal, Log-Pearson III, Normal; kuantil pada T = 2-100 tahun; "
+                "uji Smirnov-Kolmogorov (peluang Weibull, alpha 5%); distribusi terbaik = D terkecil di antara yang lolos. IDF: Mononobe I = R24/24·(24/t)^(2/3).",
+        "basis": "literatur", "refs": ["gumbel1958", "bulletin17c", "permenpu12"],
+        "caveat": ("Butuh >= 10 tahun (idealnya >= 30). Uji S-K memakai parameter dari data yang sama sehingga cenderung meloloskan. Data reanalysis (ERA5) cenderung mengecilkan "
+                   "ekstrem harian di daerah tropis: pakai data stasiun atau faktor koreksi bias. Pemilihan kala ulang mengikuti ketentuan/desain proyek (Permen PU 12/2014 mengatur "
+                   "kala ulang drainase perkotaan, bukan tambang).",
+                   "Needs >= 10 years (ideally >= 30). The S-K test uses parameters from the same data so it tends to pass. Reanalysis (ERA5) tends to underestimate tropical daily "
+                   "extremes: use station data or a bias factor. The return period follows project requirements (Permen PU 12/2014 covers urban drainage, not mining)."),
+    },
+    "rusle_soil_loss": {
+        "title": ("Kehilangan tanah RUSLE (ton/ha/th) & faktor LS", "RUSLE soil loss (t/ha/yr) & LS factor"),
+        "where": ("Erosion Mapping → Estimasi Kuantitatif", "Erosion Mapping → Quantitative Estimate"),
+        "rule": "A = R·K·LS·C·P. LS 2-D: L Desmet & Govers (1996) dari D8 flow accumulation (luas hulu per lebar kontur; panjang lereng dibatasi), S McCool dkk. (1987): "
+                "10,8 sinθ + 0,03 (tanθ < 0,09) atau 16,8 sinθ − 0,50. R dari Bols (1978)/Lenvain (klimatologi bulanan) atau input.",
+        "basis": "literatur", "refs": ["wischmeier_smith1978", "renard1997", "desmet_govers1996", "mccool1987", "bols1978"],
+        "caveat": ("Model empiris jangka panjang untuk erosi lembar/alur, bukan erosi parit/longsor. Tanpa kalibrasi hasil bisa meleset besar. Faktor K, C, P HARUS dari data/uji "
+                   "(nilai awal hanya penanda). Konvensi Indonesia (R Bols/Lenvain, K nomograf/Hammer, hasil ton/ha/th) tidak melakukan konversi satuan US→SI, jadi angkanya "
+                   "tidak langsung sebanding dgn RUSLE satuan SI. LS RUSLE tervalidasi untuk lereng & panjang terbatas; S McCool diekstrapolasi untuk lereng curam tambang. "
+                   "Faktor x pada Desmet & Govers dianggap 1 (aliran D8).",
+                   "A long-term empirical model for sheet/rill erosion, not gully erosion/landslides. Uncalibrated results can be far off. K, C, P MUST come from data/tests "
+                   "(defaults are placeholders). The Indonesian convention (Bols/Lenvain R, nomograph/Hammer K, t/ha/yr) applies no US→SI conversion, so values are not directly "
+                   "comparable to SI-unit RUSLE. RUSLE LS is validated for limited slopes/lengths; McCool S is extrapolated to steep mine slopes. Desmet & Govers x is taken as 1 (D8 flow)."),
+    },
+    "erosion_rate_class": {
+        "title": ("Kelas laju erosi (Sangat Ringan - Sangat Berat)", "Erosion-rate class (Very Slight - Very Severe)"),
+        "where": ("Erosion Mapping → Estimasi Kuantitatif (tabel kelas)", "Erosion Mapping → Quantitative Estimate (class table)"),
+        "rule": "< 15 Sangat Ringan; 15-60 Ringan; 60-180 Sedang; 180-480 Berat; > 480 Sangat Berat (ton/ha/tahun).",
+        "basis": "regulasi", "refs": ["dephut_erosi"],
+        "caveat": ("Batas kelas ini lazim dipakai di Indonesia (Departemen Kehutanan 1998; Permenhut P.32/Menhut-II/2009) — dikutip dari sumber sekunder, baca dokumen resmi. Penetapan "
+                   "Tingkat Bahaya Erosi resmi juga memperhitungkan faktor lain (mis. kedalaman solum tanah), dan peraturan itu ditujukan untuk perencanaan rehabilitasi hutan/lahan/DAS, bukan "
+                   "kriteria penerimaan lahan tambang.",
+                   "These class limits are commonly used in Indonesia (Forestry Dept 1998; Permenhut P.32/Menhut-II/2009) — quoted from secondary sources, read the official document. The "
+                   "official erosion-hazard determination also considers other factors (e.g. soil depth), and that regulation targets forest/land/watershed rehabilitation planning, not "
+                   "mine-land acceptance criteria."),
+    },
+    "musle_tss_pond": {
+        "title": ("Sedimen event (MUSLE), TSS, dan kolam pengendap", "Event sediment (MUSLE), TSS and settling pond"),
+        "where": ("Erosion Mapping → Estimasi Kuantitatif", "Erosion Mapping → Quantitative Estimate"),
+        "rule": "Y = 11,8 (Q_vol·qp)^0,56 K_SI·LS·C·P (Williams 1975; K_SI = 0,1317·K_US); qp Rasional (C efektif = limpasan/hujan; intensitas Mononobe pada tc Kirpich); TSS = Y/Q_vol; "
+                "Stokes vs = g(ρs−ρw)d²/(18μ); A = faktor·Q/vs (Hazen/Camp). Baku mutu TSS: input (bawaan 400 mg/L, Kepmen LH 113/2003).",
+        "basis": "campuran", "refs": ["williams1975", "kirpich1940", "nrcs_neh4", "hazen1904", "camp1946", "kepmenlh113"],
+        "caveat": ("Bentuk model dari literatur; nilai koefisien tanpa kalibrasi lokal. MUSLE memberi sedimen total event (bukan hanya TSS) dan sering tinggi untuk lahan terbuka. Kolam dihitung "
+                   "sebagai dimensi MINIMUM ideal pada debit puncak untuk satu ukuran partikel target — kolam nyata dirancang dengan hidrograf, distribusi butir, dan kriteria lokasi. "
+                   "Baku mutu TSS bergantung jenis kegiatan/izin dan bisa lebih ketat dari nilai bawaan; periksa peraturan yang berlaku.",
+                   "The model form is from the literature; coefficients are uncalibrated locally. MUSLE gives TOTAL event sediment (not only TSS) and is often high for bare land. The pond is "
+                   "sized as an ideal MINIMUM at peak flow for one target particle size — real ponds are designed with hydrographs, particle-size distribution and site criteria. The TSS "
+                   "limit depends on activity/permit and may be stricter than the default; check the applicable regulation."),
+    },
+    "cover_stability": {
+        "title": ("Kestabilan lapisan tipis cover di lereng (FK infinite slope)", "Thin cover layer slope stability (infinite-slope FS)"),
+        "where": ("Tab Surface/Cover Slope", "Surface/Cover Slope tab"),
+        "rule": "FK = [c' + (W·cosβ − u − kh·W·sinβ)·tanφ'] / [W·(sinβ + kh·cosβ)], u = γw·hw·cosβ (rembesan sejajar lereng); bidang di dasar tiap lapisan (+ interface opsional). "
+                "Penilaian: FK < 1,0 tidak stabil; 1,0 ≤ FK < FK minimum belum memenuhi; FK ≥ FK minimum memenuhi.",
+        "basis": "campuran", "refs": ["skempton_delory1957", "duncan_wright2005", "kepmen1827", "sni8460"],
+        "caveat": ("Rumus infinite slope adalah baku untuk lapisan tipis pada lereng panjang; tidak menangkap efek ujung/kaki, gempa non-pseudostatik, atau retak tarik. Kuat geser awal "
+                   "INDIKATIF (bukan uji). FK minimum diisi PENGGUNA: kriteria penerimaan ada di Kepmen ESDM 1827 K/30/MEM/2018 (FK/PK lereng tambang menurut jenis lereng & keparahan longsor) "
+                   "dan SNI 8460:2017 (lereng galian/timbunan) — nilai bawaan 1,5 bukan kutipan tabel; baca dokumen resmi dan pilih kriteria yang sesuai (lereng tambang vs timbunan/reklamasi).",
+                   "The infinite-slope formula is standard for thin layers on long slopes; it does not capture toe/crest effects, non-pseudo-static seismic loading or tension cracks. Default "
+                   "strengths are INDICATIVE (not tests). The minimum FS is entered by the USER: acceptance criteria are in Kepmen ESDM 1827 K/30/MEM/2018 (mine-slope FS/PoF by slope type & "
+                   "failure consequence) and SNI 8460:2017 (cut/fill slopes) — the default 1.5 is not a table quotation; read the official documents and choose the applicable criterion."),
+    },
+    "xs_cutfill": {
+        "title": ("Volume cut-fill antar penampang (average end-area)", "Cut-fill volume between sections (average end-area)"),
+        "where": ("Tab Cross Section → Ekspor & Volume", "Cross Section tab → Export & Volume"),
+        "rule": "Luas CUT/FILL tiap penampang = integrasi trapezoid selisih tanah eksisting-garis desain (titik potong dihitung eksak); volume = ½(A1+A2)·jarak.",
+        "basis": "literatur", "refs": [],
+        "caveat": ("Metode luas rata-rata (average end-area) baku pada perhitungan volume galian/timbunan; akurat bila penampang rapat & bentuknya berubah bertahap. Garis desain di sini berupa garis "
+                   "lurus antar dua elevasi rencana — untuk desain berbentuk lain gunakan tab Rekonstruksi Desain/perangkat CAD. Jarak antar penampang dianggap antara titik tengah garis section.",
+                   "The average end-area method is standard for cut/fill volumes; it is accurate when sections are close and change gradually. The design line here is a straight line between two "
+                   "design elevations — for other shapes use the Design Reconstruction tab/CAD. Spacing is taken between section-line midpoints."),
+    },
     "slope_fs": {
         "title": ("Faktor Keamanan (FK) lereng — TIDAK dihitung di aplikasi ini", "Slope Factor of Safety (FS) — NOT computed in this app"),
         "where": ("(informasi)", "(information)"),
@@ -2054,7 +2322,7 @@ def _classification_registry_dialog():
 
 
 _PDF_GLYPH_MAP = {"τ": "tau", "θ": "theta", "ρ": "rho", "κ": "kappa", "Σ": "Sum", "≥": ">=", "≤": "<=", "≈": "~",
-                  "→": "->", "−": "-", "√": "sqrt", "·": "*", "×": "x", "²": "^2", "🏛": "", "📖": "", "⚙️": "", "📐": ""}
+                  "→": "->", "−": "-", "√": "sqrt", "·": "*", "×": "x", "²": "^2", "μ": "mu", "β": "beta", "γ": "gamma", "φ": "phi", "≠": "!=", "½": "1/2", "α": "alpha", "🏛": "", "📖": "", "⚙️": "", "📐": ""}
 
 
 def _ascii_glyphs(txt):
@@ -2093,6 +2361,828 @@ def _classification_report_refs(pdf_safe=False,
     return _out
 
 
+
+
+# =====================================================================
+# MODUL KUANTITATIF & KEAMANAN (fungsi murni, tanpa UI) -- dites terpisah
+# =====================================================================
+
+# ---------- 1. HUJAN RENCANA (analisis frekuensi) & EROSIVITAS ----------
+_RF_T_LIST = (2, 5, 10, 25, 50, 100)
+_RF_DISTS = ("Gumbel", "Log-Normal", "Log-Pearson III", "Normal")
+
+
+def rf_annual_maxima(daily, min_valid_frac=0.8):
+    """Hujan harian maksimum tahunan (AMS) dari deret harian (pd.Series ber-index tanggal).
+    Tahun dengan data valid < min_valid_frac ikut dibuang (tahun parsial memberi maksimum bias-rendah)."""
+    import calendar
+    s = pd.Series(daily).dropna()
+    s.index = pd.to_datetime(s.index)
+    out = {}
+    for yr, g in s.groupby(s.index.year):
+        n_days = 366 if calendar.isleap(int(yr)) else 365
+        if len(g) >= min_valid_frac * n_days:
+            out[int(yr)] = float(g.max())
+    return pd.Series(out, dtype=float).sort_index()
+
+
+def _rf_moments(x):
+    x = np.asarray(x, dtype=float)
+    return float(np.mean(x)), float(np.std(x, ddof=1)), float(_scipy_stats.skew(x, bias=False)) if len(x) > 2 else 0.0
+
+
+def rf_fit(x, dist):
+    """Kembalikan (fungsi_kuantil(T), fungsi_cdf(x), parameter dict) utk distribusi terpilih."""
+    x = np.asarray(x, dtype=float)
+    if np.any(x <= 0) and dist in ("Log-Normal", "Log-Pearson III"):
+        raise ValueError("Distribusi log memerlukan seluruh data > 0.")
+    if dist == "Gumbel":
+        m, s, _ = _rf_moments(x)
+        a = s * np.sqrt(6.0) / np.pi
+        u = m - 0.5772156649 * a
+        q = lambda T: u - a * np.log(-np.log(1.0 - 1.0 / np.asarray(T, dtype=float)))
+        cdf = lambda v: np.exp(-np.exp(-(np.asarray(v, dtype=float) - u) / a))
+        return q, cdf, {"u": u, "a": a}
+    if dist == "Normal":
+        m, s, _ = _rf_moments(x)
+        q = lambda T: m + _scipy_stats.norm.ppf(1.0 - 1.0 / np.asarray(T, dtype=float)) * s
+        cdf = lambda v: _scipy_stats.norm.cdf((np.asarray(v, dtype=float) - m) / s)
+        return q, cdf, {"mean": m, "sd": s}
+    y = np.log10(x)
+    m, s, g = _rf_moments(y)
+    if dist == "Log-Normal":
+        q = lambda T: 10 ** (m + _scipy_stats.norm.ppf(1.0 - 1.0 / np.asarray(T, dtype=float)) * s)
+        cdf = lambda v: _scipy_stats.norm.cdf((np.log10(np.asarray(v, dtype=float)) - m) / s)
+        return q, cdf, {"mean_log": m, "sd_log": s}
+    if dist == "Log-Pearson III":
+        q = lambda T: 10 ** (m + _scipy_stats.pearson3.ppf(1.0 - 1.0 / np.asarray(T, dtype=float), g) * s)
+        cdf = lambda v: _scipy_stats.pearson3.cdf((np.log10(np.asarray(v, dtype=float)) - m) / s, g)
+        return q, cdf, {"mean_log": m, "sd_log": s, "skew_log": g}
+    raise ValueError(f"Distribusi tidak dikenal: {dist}")
+
+
+def rf_smirnov_kolmogorov(x, cdf, alpha=0.05):
+    """Uji Smirnov-Kolmogorov: Dmax = maks|P_empiris(Weibull) - P_teoritis| (peluang lampau); D kritis
+    eksak utk n data (scipy.stats.kstwo). Catatan: parameter diestimasi dari data yg sama -> uji ini
+    konservatif (cenderung meloloskan)."""
+    x = np.sort(np.asarray(x, dtype=float))[::-1]
+    n = len(x)
+    p_emp = np.arange(1, n + 1) / (n + 1.0)
+    p_teo = 1.0 - np.asarray(cdf(x), dtype=float)
+    d = float(np.max(np.abs(p_emp - p_teo)))
+    d_crit = float(_scipy_stats.kstwo.ppf(1.0 - alpha, n))
+    return d, d_crit, bool(d < d_crit)
+
+
+def rf_frequency_analysis(ams, T_list=_RF_T_LIST, dists=_RF_DISTS):
+    """Tabel hujan rencana (mm) per distribusi & kala ulang + uji kecocokan. Butuh >= 10 tahun data."""
+    x = np.asarray(ams, dtype=float)
+    x = x[np.isfinite(x)]
+    if len(x) < 10:
+        raise ValueError("Data kurang: analisis frekuensi butuh minimal 10 tahun hujan harian maksimum.")
+    m, s, g = _rf_moments(x)
+    cs = g
+    ck = float(_scipy_stats.kurtosis(x, fisher=False, bias=False)) if len(x) > 3 else float("nan")
+    rows = {}
+    for d in dists:
+        try:
+            q, cdf, prm = rf_fit(x, d)
+            dm, dc, ok = rf_smirnov_kolmogorov(x, cdf)
+            rows[d] = {"quantiles": {int(T): float(q(T)) for T in T_list}, "params": prm,
+                       "D": dm, "D_crit": dc, "pass": ok}
+        except Exception as e:  # distribusi tak bisa dipasang pada data ini
+            rows[d] = {"error": str(e)}
+    ok_rows = {k: v for k, v in rows.items() if "error" not in v}
+    best = min(ok_rows, key=lambda k: (not ok_rows[k]["pass"], ok_rows[k]["D"])) if ok_rows else None
+    return {"n": int(len(x)), "mean": m, "sd": s, "cv": s / m if m else float("nan"), "cs": cs, "ck": ck,
+            "dists": rows, "best": best}
+
+
+def rf_idf_mononobe(r24_mm, durations_min):
+    """Intensitas (mm/jam) rumus Mononobe: I = R24/24 * (24/t)^(2/3), t dalam jam."""
+    t_h = np.asarray(durations_min, dtype=float) / 60.0
+    return float(r24_mm) / 24.0 * (24.0 / t_h) ** (2.0 / 3.0)
+
+
+def rf_monthly_climatology(daily, rainy_day_mm=1.0):
+    """Klimatologi bulanan: hujan bulanan rata-rata (cm), hari hujan rata-rata, hujan harian maks. rata-rata (cm)."""
+    s = pd.Series(daily).dropna()
+    s.index = pd.to_datetime(s.index)
+    df = pd.DataFrame({"r": s.values, "y": s.index.year, "m": s.index.month})
+    g = df.groupby(["y", "m"])
+    per = pd.DataFrame({"total_mm": g["r"].sum(), "days": g["r"].apply(lambda v: int((v >= rainy_day_mm).sum())),
+                        "max_mm": g["r"].max(), "n": g["r"].count()}).reset_index()
+    per = per[per["n"] >= 25]  # bulan lengkap saja
+    clim = per.groupby("m").agg(rain_cm=("total_mm", lambda v: float(np.mean(v)) / 10.0),
+                                days=("days", "mean"), maxp_cm=("max_mm", lambda v: float(np.mean(v)) / 10.0),
+                                n_years=("y", "nunique")).reindex(range(1, 13))
+    return clim
+
+
+def rf_erosivity(clim):
+    """Erosivitas hujan tahunan dari klimatologi bulanan (konvensi USLE Indonesia):
+    Bols (1978): Rm = 6,119 Rain^1,21 Days^-0,47 MaxP^0,53 ; Lenvain: Rm = 2,21 Rain^1,36 (Rain, MaxP dalam cm)."""
+    c = clim.dropna()
+    if len(c) < 12:
+        return None
+    bols = 6.119 * c["rain_cm"] ** 1.21 * np.maximum(c["days"], 1e-6) ** -0.47 * np.maximum(c["maxp_cm"], 1e-6) ** 0.53
+    lenv = 2.21 * c["rain_cm"] ** 1.36
+    return {"bols_month": bols, "lenvain_month": lenv, "bols_annual": float(bols.sum()),
+            "lenvain_annual": float(lenv.sum()), "rain_annual_mm": float(c["rain_cm"].sum() * 10.0)}
+
+
+# ---------- 2. RUSLE / MUSLE / TSS / KOLAM PENGENDAP ----------
+_QT_TBE_BINS = (15.0, 60.0, 180.0, 480.0)
+_QT_TBE_LABELS = ("Sangat Ringan", "Ringan", "Sedang", "Berat", "Sangat Berat")
+
+
+def qt_ls_factor(slope_tan, acc_cells, dx, dy, inside=None, lam_max=100.0):
+    """Faktor LS RUSLE per sel (2-D): L = Desmet & Govers (1996) dgn luas hulu per lebar kontur (x=1),
+    S = McCool dkk (1987). acc_cells = D8 flow accumulation (jumlah sel hulu termasuk dirinya).
+    lam_max membatasi panjang lereng efektif (m) -- L RUSLE tak tervalidasi utk lereng sangat panjang."""
+    D = float(np.sqrt(abs(dx) * abs(dy)))
+    tan = np.clip(np.asarray(slope_tan, dtype=float), 1e-6, None)
+    s = np.sin(np.arctan(tan))
+    beta = (s / 0.0896) / (3.0 * s ** 0.8 + 0.56)
+    m = beta / (1.0 + beta)
+    a_in = np.clip(np.asarray(acc_cells, dtype=float) - 1.0, 0.0, None) * D * D
+    a_in = np.minimum(a_in, lam_max * D)
+    L = ((a_in + D * D) ** (m + 1.0) - a_in ** (m + 1.0)) / (D ** (m + 2.0) * 22.13 ** m)
+    S = np.where(tan < 0.09, 10.8 * s + 0.03, 16.8 * s - 0.50)
+    ls = np.clip(L * S, 0.0, None)
+    if inside is not None:
+        ls = np.where(inside, ls, np.nan)
+    return ls
+
+
+def qt_classify_tbe(a_tha):
+    """Indeks kelas laju erosi 0..4 (Sangat Ringan..Sangat Berat) menurut batas 15/60/180/480 ton/ha/th."""
+    return np.digitize(np.asarray(a_tha, dtype=float), _QT_TBE_BINS)
+
+
+def qt_rusle_stats(a_tha, cell_area_m2, inside):
+    a = np.asarray(a_tha, dtype=float)
+    ok = np.asarray(inside, dtype=bool) & np.isfinite(a)
+    if not ok.any():
+        return None
+    ha = cell_area_m2 / 1e4
+    v = a[ok]
+    cls = qt_classify_tbe(v)
+    area_ha = [float(np.sum(cls == i) * ha) for i in range(5)]
+    tot_ha = float(v.size * ha)
+    return {"area_ha": tot_ha, "mean_tha": float(v.mean()), "p95_tha": float(np.percentile(v, 95)),
+            "max_tha": float(v.max()), "total_t_yr": float(v.sum() * ha),
+            "class_area_ha": area_ha, "class_pct": [x / tot_ha * 100.0 for x in area_ha]}
+
+
+def qt_event_runoff_mm(p_mm, method="C", c_runoff=0.7, cn=90.0):
+    """Kedalaman limpasan (mm) dari hujan rencana: 'C' -> Q = C*P ; 'CN' -> SCS-CN (NRCS NEH-4)."""
+    p = float(p_mm)
+    if method == "CN":
+        s = 25400.0 / float(cn) - 254.0
+        ia = 0.2 * s
+        return 0.0 if p <= ia else (p - ia) ** 2 / (p - ia + s)
+    return max(0.0, float(c_runoff) * p)
+
+
+def qt_tc_kirpich_min(length_m, slope_mm):
+    """Waktu konsentrasi Kirpich (1940): tc[menit] = 0,0195 L^0,77 S^-0,385 (L dalam m, S m/m)."""
+    return 0.0195 * max(length_m, 1.0) ** 0.77 * max(slope_mm, 1e-4) ** -0.385
+
+
+def qt_musle_event(q_mm, p_mm, tc_min, area_ha, k_us, ls_mean, c_factor, p_factor):
+    """MUSLE (Williams, 1975): Y[ton] = 11,8 (Q_vol[m3] * qp[m3/s])^0,56 K LS C P, K dalam SI
+    (K_SI = 0,1317 * K_US). qp dari metode Rasional (C_eff = Q/P) dgn intensitas Mononobe pada tc."""
+    if q_mm <= 0 or p_mm <= 0:
+        return {"y_ton": 0.0, "q_vol_m3": 0.0, "qp_m3s": 0.0, "i_mmh": 0.0, "c_eff": 0.0}
+    i = float(rf_idf_mononobe(p_mm, [max(tc_min, 5.0)])[0])
+    c_eff = q_mm / p_mm
+    qp = c_eff * i * area_ha / 360.0
+    q_vol = q_mm / 1000.0 * area_ha * 1e4
+    y = 11.8 * (q_vol * qp) ** 0.56 * (k_us * 0.1317) * ls_mean * c_factor * p_factor
+    return {"y_ton": float(y), "q_vol_m3": float(q_vol), "qp_m3s": float(qp), "i_mmh": i, "c_eff": float(c_eff)}
+
+
+def qt_tss_mg_l(y_ton, q_vol_m3):
+    """Konsentrasi sedimen rata-rata event (mg/L) = massa / volume limpasan."""
+    return float(y_ton) * 1e6 / max(float(q_vol_m3), 1e-9)
+
+
+def qt_stokes_velocity(d_mm, rho_s=2650.0, rho_w=1000.0, mu=1.0e-3):
+    """Kecepatan endap Stokes (m/s) & bilangan Reynolds partikel (Stokes sah bila Re < ~1)."""
+    d = d_mm / 1000.0
+    vs = 9.81 * (rho_s - rho_w) * d * d / (18.0 * mu)
+    re = vs * d * rho_w / mu
+    return float(vs), float(re)
+
+
+def qt_pond_design(q_m3s, d_mm, design_factor=1.5, depth_m=2.0, lw_ratio=3.0, sed_volume_m3=0.0,
+                   rho_s=2650.0, mu=1.0e-3):
+    """Kolam pengendap ideal (Hazen, 1904; Camp, 1946): partikel dgn vs >= overflow rate (Q/A) tertangkap.
+    A_perlu = faktor_desain * Q / vs. Volume total = A*kedalaman_pengendapan + volume simpanan sedimen."""
+    vs, re = qt_stokes_velocity(d_mm, rho_s=rho_s, mu=mu)
+    a_req = design_factor * q_m3s / max(vs, 1e-12)
+    w = float(np.sqrt(a_req / lw_ratio))
+    l = lw_ratio * w
+    v_settle = a_req * depth_m
+    return {"vs_ms": vs, "re": re, "area_m2": float(a_req), "width_m": w, "length_m": float(l),
+            "vol_settle_m3": float(v_settle), "vol_total_m3": float(v_settle + sed_volume_m3),
+            "retention_min": float(v_settle / max(q_m3s, 1e-9) / 60.0), "overflow_rate_ms": float(q_m3s / a_req)}
+
+
+# ---------- 3. KESTABILAN LAPISAN TIPIS DI LERENG (infinite slope) ----------
+COVER_STRENGTH_DEFAULTS = {
+    # (gamma lembab kN/m3, gamma jenuh kN/m3, phi' derajat, c' kPa) -- NILAI AWAL INDIKATIF (bukan hasil uji)
+    "Vegetasi / Topsoil": (16.0, 18.0, 28.0, 2.0),
+    "Growth Medium / Subsoil": (17.5, 19.0, 30.0, 3.0),
+    "Mulsa / Organik": (6.0, 9.0, 30.0, 0.0),
+    "Clay / Subsoil Barrier": (18.0, 19.5, 22.0, 5.0),
+    "Pasir / Kerikil Drainase": (18.0, 20.0, 34.0, 0.0),
+    "Geomembrane / Liner Sintetis": (10.0, 10.0, 18.0, 0.0),
+    "Custom": (17.0, 19.0, 28.0, 2.0),
+}
+
+
+def stab_infinite_slope(layers, beta_deg, m=0.0, kh=0.0, gamma_w=9.81, interface=None):
+    """Kestabilan lapisan tipis (infinite slope, bidang gelincir sejajar lereng).
+    layers: list dict {material, thickness_m (tegak lurus lereng), gamma, gamma_sat, phi, c} dari ATAS ke bawah.
+    Bidang gelincir dievaluasi di dasar tiap lapisan memakai kuat geser lapisan tsb; opsional 'interface'
+    = dict(phi, c) utk bidang di dasar SELURUH cover (kontak dgn substrat/geosintetik).
+    m = fraksi tebal di atas bidang yg jenuh (rembesan sejajar lereng; 0 kering, 1 jenuh penuh).
+    kh = koefisien pseudo-statik horizontal.
+    FK = [c + (W cos b - u - kh W sin b) tan(phi)] / [W (sin b + kh cos b)]  (per satuan luas bidang), u = gw*hw*cos b."""
+    b = np.radians(float(beta_deg))
+    out = []
+    planes = [(j, layers[j]["phi"], layers[j]["c"], f"Dasar lapisan {j + 1}: {layers[j]['material']}")
+              for j in range(len(layers))]
+    if interface:
+        planes.append((len(layers) - 1, interface["phi"], interface["c"], "Kontak dasar cover (interface)"))
+    for j, phi, c, name in planes:
+        T = sum(l["thickness_m"] for l in layers[: j + 1])
+        hw = float(np.clip(m, 0.0, 1.0)) * T
+        # berat kolom: bagian bawah setebal hw jenuh, sisanya lembab (dihitung dari bidang ke atas)
+        w = 0.0
+        rem_sat = hw
+        for l in reversed(layers[: j + 1]):
+            t = l["thickness_m"]
+            ts = min(t, rem_sat)
+            rem_sat -= ts
+            w += l["gamma_sat"] * ts + l["gamma"] * (t - ts)
+        u = gamma_w * hw * np.cos(b)
+        tau = w * (np.sin(b) + kh * np.cos(b))
+        n_eff = max(w * np.cos(b) - u - kh * w * np.sin(b), 0.0)
+        fk = (c + n_eff * np.tan(np.radians(phi))) / max(tau, 1e-9)
+        out.append({"plane": name, "T_m": float(T), "fs": float(fk)})
+    fmin = min(o["fs"] for o in out)
+    crit = min(out, key=lambda o: o["fs"])["plane"]
+    return {"planes": out, "fs_min": float(fmin), "critical_plane": crit}
+
+
+def stab_max_angle(layers, fs_target, m=0.0, kh=0.0, interface=None):
+    """Sudut lereng maksimum (derajat) agar FK minimum >= fs_target (bisection pada 0.5..89 derajat)."""
+    lo, hi = 0.5, 89.0
+    if stab_infinite_slope(layers, lo, m, kh, interface=interface)["fs_min"] < fs_target:
+        return 0.0
+    if stab_infinite_slope(layers, hi, m, kh, interface=interface)["fs_min"] >= fs_target:
+        return hi
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        if stab_infinite_slope(layers, mid, m, kh, interface=interface)["fs_min"] >= fs_target:
+            lo = mid
+        else:
+            hi = mid
+    return float(lo)
+
+
+def stab_verdict(fs, fs_required):
+    """< 1,0 tidak stabil; 1,0 s.d. FK minimum -> tidak memenuhi kriteria; >= FK minimum -> memenuhi."""
+    if fs < 1.0:
+        return "TIDAK STABIL"
+    if fs < fs_required:
+        return "BELUM MEMENUHI KRITERIA"
+    return "MEMENUHI KRITERIA"
+
+
+# ---------- 4. PENAMPANG: cut-fill end-area & ekspor ----------
+def xs_cut_fill_area(dist, elev, design_elev):
+    """Luas potongan (cut: tanah eksisting di atas garis desain) dan timbunan (fill: di bawah) dalam m2,
+    integrasi trapezoid per segmen dgn titik potong garis desain-tanah dihitung eksak."""
+    d = np.asarray(dist, dtype=float)
+    z = np.asarray(elev, dtype=float)
+    g = np.asarray(design_elev, dtype=float)
+    ok = np.isfinite(d) & np.isfinite(z) & np.isfinite(g)
+    d, z, g = d[ok], z[ok], g[ok]
+    cut = fill = 0.0
+    for i in range(len(d) - 1):
+        dd = d[i + 1] - d[i]
+        h0, h1 = z[i] - g[i], z[i + 1] - g[i + 1]
+        if h0 == 0 and h1 == 0:
+            continue
+        if h0 * h1 >= 0:
+            a = 0.5 * (h0 + h1) * dd
+            if a >= 0:
+                cut += a
+            else:
+                fill += -a
+        else:
+            x0 = dd * abs(h0) / (abs(h0) + abs(h1))
+            a1, a2 = 0.5 * h0 * x0, 0.5 * h1 * (dd - x0)
+            for a in (a1, a2):
+                if a >= 0:
+                    cut += a
+                else:
+                    fill += -a
+    return float(cut), float(fill)
+
+
+def xs_end_area_volumes(rows):
+    """rows: list dict {name, cut, fill, spacing_next_m}. Volume antar penampang berurutan = rata-rata luas x jarak
+    (average end area). Mengembalikan list volume per interval + total."""
+    out, tc, tf = [], 0.0, 0.0
+    for i in range(len(rows) - 1):
+        s = float(rows[i].get("spacing_next_m") or 0.0)
+        vc = 0.5 * (rows[i]["cut"] + rows[i + 1]["cut"]) * s
+        vf = 0.5 * (rows[i]["fill"] + rows[i + 1]["fill"]) * s
+        out.append({"from": rows[i]["name"], "to": rows[i + 1]["name"], "spacing_m": s, "cut_m3": vc, "fill_m3": vf})
+        tc += vc
+        tf += vf
+    return out, float(tc), float(tf)
+
+
+def xs_profile_csv(name, r):
+    """CSV profil: jarak, elevasi, dan semua parameter yg tersedia (kolom kosong bila NaN)."""
+    cols = {"jarak_m": np.asarray(r["distance"], dtype=float), "elevasi_m": np.asarray(r["elevation"], dtype=float)}
+    for k in ("erosion", "sediment", "velocity", "flow_density", "slope_pct", "overflow"):
+        v = r.get(k)
+        if v is not None and np.shape(v) == cols["jarak_m"].shape:
+            cols[{"erosion": "indeks_erosi", "sediment": "indeks_sedimentasi", "velocity": "kecepatan_ms",
+                  "flow_density": "kepadatan_aliran", "slope_pct": "kemiringan_persen", "overflow": "indeks_overflow"}[k]] = np.asarray(v, dtype=float)
+    if r.get("inside") is not None and np.shape(r["inside"]) == cols["jarak_m"].shape:
+        cols["di_dalam_batas"] = np.asarray(r["inside"], dtype=bool).astype(int)
+    df = pd.DataFrame(cols)
+    return f"# Penampang {name}\n" + df.to_csv(index=False, float_format="%.4f")
+
+
+# =====================================================================
+# BLOK UI: hujan rencana, estimasi kuantitatif, kestabilan cover, ekspor penampang
+# =====================================================================
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def _rf_fetch_open_meteo_daily(lat, lon, y0, y1):
+    url = ("https://archive-api.open-meteo.com/v1/archive"
+           f"?latitude={lat}&longitude={lon}&start_date={int(y0)}-01-01&end_date={int(y1)}-12-31"
+           "&daily=precipitation_sum&timezone=UTC")
+    r = requests.get(url, timeout=60)
+    r.raise_for_status()
+    d = r.json()
+    return pd.Series(d["daily"]["precipitation_sum"], index=pd.to_datetime(d["daily"]["time"]), dtype="float64")
+
+
+def _rf_read_uploaded_daily(up):
+    name = (getattr(up, "name", "") or "").lower()
+    df = pd.read_excel(up) if name.endswith((".xlsx", ".xls")) else pd.read_csv(up, sep=None, engine="python")
+    idx = pd.to_datetime(df.iloc[:, 0], errors="coerce", dayfirst=True)
+    val = pd.to_numeric(df.iloc[:, 1], errors="coerce")
+    s = pd.Series(val.values, index=idx)
+    s = s[~s.index.isna()]
+    return s.groupby(level=0).first().sort_index()
+
+
+def _render_rainfall_frequency_ui(lat, lon):
+    """Analisis frekuensi hujan harian maksimum tahunan -> hujan rencana (kala ulang), IDF Mononobe, dan
+    erosivitas R (Bols/Lenvain). Hasil bisa dipakai sebagai curah hujan analisis."""
+    _srcs = {"online": _t("Online (Open-Meteo/ERA5, seri panjang)", "Online (Open-Meteo/ERA5, long series)"),
+             "daily": _t("Unggah CSV/XLSX harian (tanggal, hujan mm)", "Upload daily CSV/XLSX (date, rain mm)"),
+             "ams": _t("Unggah CSV hujan maks. tahunan (tahun, mm)", "Upload annual-maximum CSV (year, mm)"),
+             "manual": _t("Ketik manual (mm, dipisah koma/baris)", "Type manually (mm, comma/line separated)")}
+    with st.expander(_t("📈 Hujan Rencana (analisis frekuensi) & Erosivitas — dari data seri panjang",
+                        "📈 Design Rainfall (frequency analysis) & Erosivity — from long records"), expanded=False):
+        st.caption(_t(
+            "Statistik 'hujan maksimum periode 30 hari' di atas BUKAN hujan rencana. Di sini hujan harian maksimum "
+            "TAHUNAN dianalisis frekuensinya (Gumbel, Log-Normal, Log-Pearson III, Normal + uji Smirnov-Kolmogorov) untuk "
+            "memperoleh R24 pada kala ulang T. Data reanalysis (ERA5) cenderung MENGECILKAN ekstrem harian di daerah tropis: "
+            "pakai data stasiun bila ada, atau isi faktor koreksi bias.",
+            "The '30-day maximum' statistic above is NOT a design rainfall. Here the ANNUAL maximum daily rainfall is "
+            "frequency-analysed (Gumbel, Log-Normal, Log-Pearson III, Normal + Smirnov-Kolmogorov test) to get R24 at return "
+            "period T. Reanalysis (ERA5) tends to UNDERESTIMATE tropical daily extremes: use station data if available, or set a "
+            "bias-correction factor."))
+        _src = st.radio(_t("Sumber data", "Data source"), list(_srcs), format_func=lambda k: _srcs[k],
+                        horizontal=True, key="rf_src")
+        _daily, _ams, _meta_src = None, None, ""
+        try:
+            if _src == "online":
+                _cy = date.today().year - 1
+                _c1, _c2 = st.columns(2)
+                _y0 = _c1.number_input(_t("Tahun mulai", "Start year"), 1950, _cy - 9, min(1991, _cy - 9), key="rf_y0")
+                _y1 = _c2.number_input(_t("Tahun akhir", "End year"), int(_y0) + 9, _cy, _cy, key="rf_y1")
+                if st.button(_t("Ambil seri harian", "Fetch daily series"), key="rf_fetch_btn"):
+                    with st.spinner(_t("Mengambil seri hujan harian...", "Fetching daily rainfall series...")):
+                        st.session_state["rf_daily"] = _rf_fetch_open_meteo_daily(round(float(lat), 3), round(float(lon), 3), int(_y0), int(_y1))
+                    st.session_state["rf_daily_meta"] = f"Open-Meteo Archive (ERA5) {int(_y0)}-{int(_y1)} @ ({float(lat):.3f}, {float(lon):.3f})"
+                _daily, _meta_src = st.session_state.get("rf_daily"), st.session_state.get("rf_daily_meta", "")
+            elif _src == "daily":
+                _up = st.file_uploader(_t("File harian (.csv/.xlsx): kolom 1 tanggal, kolom 2 hujan (mm)", "Daily file: col 1 date, col 2 rain (mm)"),
+                                       type=["csv", "xlsx", "xls"], key="rf_up_daily")
+                if _up is not None:
+                    st.session_state["rf_daily"] = _rf_read_uploaded_daily(_up)
+                    st.session_state["rf_daily_meta"] = f"Data unggahan: {_up.name}"
+                _daily, _meta_src = st.session_state.get("rf_daily"), st.session_state.get("rf_daily_meta", "")
+            elif _src == "ams":
+                _up = st.file_uploader(_t("File tahunan (.csv): kolom 1 tahun, kolom 2 hujan harian maks. (mm)", "Annual file: col 1 year, col 2 max daily rain (mm)"),
+                                       type=["csv"], key="rf_up_ams")
+                if _up is not None:
+                    _df = pd.read_csv(_up, sep=None, engine="python")
+                    _ams = pd.Series(pd.to_numeric(_df.iloc[:, 1], errors="coerce").values,
+                                     index=pd.to_numeric(_df.iloc[:, 0], errors="coerce").astype("Int64")).dropna()
+                    _meta_src = f"Data unggahan: {_up.name}"
+            else:
+                _txt = st.text_area(_t("Hujan harian maksimum tiap tahun (mm)", "Annual maximum daily rainfall (mm)"), key="rf_manual_txt",
+                                    placeholder="112, 95.5, 130, 88 ...")
+                _vals = [float(v) for v in re.split(r"[,\s;]+", _txt.strip()) if v] if _txt.strip() else []
+                if _vals:
+                    _ams = pd.Series(_vals, index=range(1, len(_vals) + 1), dtype=float)
+                    _meta_src = "Input manual"
+        except Exception as _e_rf:
+            st.error(_t(f"Gagal membaca/mengambil data: {_e_rf}", f"Failed to read/fetch data: {_e_rf}"))
+            return
+        if _daily is not None and len(_daily):
+            _ams = rf_annual_maxima(_daily)
+        if _ams is None or len(_ams) == 0:
+            st.info(_t("Belum ada data. Pilih sumber lalu ambil/unggah data (minimal 10 tahun).", "No data yet. Choose a source and fetch/upload data (at least 10 years)."))
+            return
+        _ams = pd.Series(_ams).astype(float)
+        st.caption(_t(f"{len(_ams)} tahun data · {_meta_src}", f"{len(_ams)} years of data · {_meta_src}"))
+        try:
+            _res = rf_frequency_analysis(_ams.values)
+        except Exception as _e_fa:
+            st.warning(str(_e_fa))
+            return
+        _ok_d = [d for d in _RF_DISTS if "error" not in _res["dists"][d]]
+        _tbl = pd.DataFrame({d: {f"T={T} th": round(_res["dists"][d]["quantiles"][T], 1) for T in _RF_T_LIST} for d in _ok_d}).T
+        _tbl["D maks"] = [round(_res["dists"][d]["D"], 3) for d in _ok_d]
+        _tbl["D kritis 5%"] = [round(_res["dists"][d]["D_crit"], 3) for d in _ok_d]
+        _tbl["Uji S-K"] = [_t("lolos", "pass") if _res["dists"][d]["pass"] else _t("gagal", "fail") for d in _ok_d]
+        st.table(_tbl)
+        st.caption(_t(
+            f"Statistik data: rata-rata {_res['mean']:.1f} mm · simpangan baku {_res['sd']:.1f} · Cv {_res['cv']:.2f} · Cs {_res['cs']:.2f} · Ck {_res['ck']:.2f}. "
+            f"Distribusi paling cocok (D terkecil di antara yang lolos): **{_res['best']}**. Uji S-K memakai parameter yang diestimasi dari data yang sama "
+            "sehingga cenderung meloloskan; pertimbangkan juga Cs/Ck dan kewajaran ekstrapolasi.",
+            f"Data statistics: mean {_res['mean']:.1f} mm · SD {_res['sd']:.1f} · Cv {_res['cv']:.2f} · Cs {_res['cs']:.2f} · Ck {_res['ck']:.2f}. "
+            f"Best-fitting distribution (smallest D among passing): **{_res['best']}**. The S-K test uses parameters estimated from the same data, so it tends "
+            "to pass; also consider Cs/Ck and the plausibility of extrapolation."))
+        _cA, _cB, _cC = st.columns(3)
+        _di = _ok_d.index(_res["best"]) if _res["best"] in _ok_d else 0
+        _dist = _cA.selectbox(_t("Distribusi dipakai", "Distribution used"), _ok_d, index=_di, key="rf_dist_sel")
+        _T = _cB.selectbox(_t("Kala ulang T (tahun)", "Return period T (years)"), list(_RF_T_LIST), index=3, key="rf_T_sel")
+        _bias = _cC.number_input(_t("Faktor koreksi bias", "Bias-correction factor"), 0.5, 3.0, 1.0, 0.05, key="rf_bias_sel",
+                                 help=_t("Rasio hujan ekstrem stasiun / reanalysis di lokasi ini bila diketahui; 1,0 = tanpa koreksi.",
+                                         "Ratio of station / reanalysis extremes at this site if known; 1.0 = no correction."))
+        _r24 = float(_res["dists"][_dist]["quantiles"][int(_T)]) * float(_bias)
+        _m1, _m2 = st.columns(2)
+        _metric_card(_t(f"R24 rencana T={_T} th", f"Design R24 T={_T} yr"), f"{_r24:.1f} mm", container=_m1)
+        _metric_card(_t("Intensitas Mononobe 1 jam", "Mononobe 1-h intensity"), f"{float(rf_idf_mononobe(_r24, [60])[0]):.1f} mm/jam", container=_m2)
+        if not _res["dists"][_dist]["pass"]:
+            st.warning(_t("Distribusi terpilih TIDAK lolos uji Smirnov-Kolmogorov pada data ini.", "The selected distribution does NOT pass the Smirnov-Kolmogorov test for this data."))
+        # grafik: titik empiris (Weibull) + kurva terpasang
+        _x = np.sort(_ams.values)[::-1]
+        _fig = go.Figure()
+        _fig.add_trace(go.Scatter(x=(len(_x) + 1) / np.arange(1, len(_x) + 1), y=_x, mode="markers", name=_t("Data (Weibull)", "Data (Weibull)")))
+        _Tg = np.array([1.5, 2, 3, 5, 10, 25, 50, 100, 200])
+        for d in _ok_d:
+            _q, _c, _p = rf_fit(_ams.values, d)
+            _fig.add_trace(go.Scatter(x=_Tg, y=_q(_Tg), mode="lines", name=d, line=dict(width=3 if d == _dist else 1)))
+        _fig.update_layout(height=340, xaxis_type="log", xaxis_title=_t("Kala ulang (tahun)", "Return period (years)"),
+                           yaxis_title=_t("Hujan harian maks. (mm)", "Max daily rainfall (mm)"), margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(_fig, width="stretch", key="rf_freq_plot")
+        _dur = [5, 10, 15, 30, 60, 120, 180, 360, 720, 1440]
+        _idf = pd.DataFrame({"Durasi (menit)": _dur, f"I (mm/jam) T={_T} th": np.round(rf_idf_mononobe(_r24, _dur), 1)})
+        with st.expander(_t("Tabel IDF (Mononobe) untuk hujan rencana terpilih", "IDF table (Mononobe) for the selected design rainfall")):
+            st.dataframe(_idf, hide_index=True)
+        if st.button(_t(f"✅ Pakai R24 = {_r24:.1f} mm sebagai curah hujan analisis", f"✅ Use R24 = {_r24:.1f} mm as the analysis rainfall"), key="rf_apply_btn"):
+            st.session_state["online_rainfall"] = _r24
+            st.session_state["online_rainfall_meta"] = {
+                "source": f"Analisis frekuensi {_dist}, T={_T} th, {len(_ams)} th data ({_meta_src}), faktor koreksi {_bias:.2f}",
+                "period": f"{int(_ams.index.min())}-{int(_ams.index.max())}", "n_days": f"{len(_ams)} tahun", "max": float(_r24)}
+            st.rerun()
+        st.caption(_t("Jika kolom 'hujan desain manual' di atas diisi (> 0), nilai manual itu yang menimpa. Kosongkan (0) agar hasil ini terpakai. "
+                      "Kala ulang desain mengikuti ketentuan/desain proyek.",
+                      "If the 'manual design rainfall' field above is > 0 it overrides this. Set it to 0 to use this result. The design return period "
+                      "follows project requirements/design."))
+        # erosivitas
+        if _daily is not None and len(_daily):
+            st.markdown("**" + _t("Erosivitas hujan R (konvensi USLE Indonesia)", "Rainfall erosivity R (Indonesian USLE convention)") + "**")
+            _thr = st.number_input(_t("Batas 'hari hujan' (mm)", "'Rainy day' threshold (mm)"), 0.1, 10.0, 1.0, 0.1, key="rf_rainy_thr")
+            _er = rf_erosivity(rf_monthly_climatology(_daily, _thr))
+            if _er:
+                st.session_state["rf_R_bols"] = float(_er["bols_annual"])
+                st.session_state["rf_R_lenvain"] = float(_er["lenvain_annual"])
+                _e1, _e2, _e3 = st.columns(3)
+                _metric_card("R Bols (1978)", f"{_er['bols_annual']:.0f}", container=_e1)
+                _metric_card("R Lenvain", f"{_er['lenvain_annual']:.0f}", container=_e2)
+                _metric_card(_t("Hujan tahunan", "Annual rainfall"), f"{_er['rain_annual_mm']:.0f} mm", container=_e3)
+                st.caption(_t("Bols: Rm = 6,119·Rain^1,21·Days^-0,47·MaxP^0,53 ; Lenvain: Rm = 2,21·Rain^1,36 (Rain, MaxP dalam cm; dijumlah 12 bulan). "
+                              "'Hari hujan' pada reanalysis cenderung berlebih (gerimis) sehingga R Bols bisa bias; nilai ini indikatif — nilainya otomatis "
+                              "tersedia sebagai tombol impor pada Estimasi Kuantitatif tiap segmen.",
+                              "Bols: Rm = 6.119·Rain^1.21·Days^-0.47·MaxP^0.53 ; Lenvain: Rm = 2.21·Rain^1.36 (Rain, MaxP in cm; summed over 12 months). Reanalysis "
+                              "'rainy days' tend to be inflated (drizzle) so Bols R may be biased; indicative — the values are available as import buttons in each "
+                              "segment's Quantitative Estimate."))
+            else:
+                st.caption(_t("Data belum cukup lengkap (butuh 12 bulan) untuk menghitung erosivitas.", "Not enough complete months to compute erosivity."))
+
+
+def _qt_set_R(sid, value):
+    st.session_state[f"qt_R_{sid}"] = float(value)
+
+
+def _render_quantitative_section(sid, seg_label, grid_x, grid_y, grid_z, inside, slope, flow_acc, dx, dy,
+                                 area_ha, default_p_mm, default_c):
+    """Estimasi kuantitatif per segmen: RUSLE (t/ha/th + kelas), MUSLE event, TSS, dan kolam pengendap.
+    Mengembalikan dict ringkasan utk laporan (atau None kalau belum ada input berarti)."""
+    out = {"seg": seg_label}
+    cell_area = float(abs(dx * dy))
+    with st.expander(_t("📊 Estimasi Kuantitatif — kehilangan tanah (RUSLE), sedimen event (MUSLE), TSS & kolam pengendap",
+                        "📊 Quantitative Estimate — soil loss (RUSLE), event sediment (MUSLE), TSS & settling pond"), expanded=False):
+        st.caption(_t(
+            "Melengkapi indeks relatif dengan BESARAN: ton/ha/tahun, ton/kejadian, mg/L, dan dimensi kolam. Semua faktor (R, K, C, P) harus diisi "
+            "dari data/uji; nilai awal hanya penanda. Konvensi USLE Indonesia (R dari Bols/Lenvain, K nomograf/Hammer, hasil ton/ha/th). "
+            "Model empiris — kalibrasi dengan data lapangan (sedimen kolam/monitoring TSS) sebelum dijadikan dasar desain.",
+            "Complements the relative indices with QUANTITIES: t/ha/yr, t/event, mg/L and pond dimensions. All factors (R, K, C, P) must come from data/tests; "
+            "defaults are placeholders. Indonesian USLE convention (R from Bols/Lenvain, K nomograph/Hammer, result t/ha/yr). Empirical models — calibrate with "
+            "field data (pond sediment/TSS monitoring) before using as a design basis."))
+        _c1, _c2, _c3, _c4 = st.columns(4)
+        _R = _c1.number_input(_t("R erosivitas hujan", "R rainfall erosivity"), 0.0, 1.0e5, float(st.session_state.get("rf_R_bols") or 0.0), 10.0,
+                              key=f"qt_R_{sid}", help=_t("Impor dari analisis hujan (Bols/Lenvain) lewat tombol di bawah, atau isi sendiri.", "Import from the rainfall analysis (Bols/Lenvain) with the buttons below, or enter your own."))
+        _K = _c2.number_input(_t("K erodibilitas tanah", "K soil erodibility"), 0.0, 1.0, 0.30, 0.01, key=f"qt_K_{sid}",
+                              help=_t("Dari nomograf/rumus Hammer atau uji tanah (kisaran umum 0,05-0,6). 0,30 hanya nilai awal.", "From the nomograph/Hammer equation or soil tests (typical 0.05-0.6). 0.30 is only a placeholder."))
+        _Cc = _c3.number_input(_t("C pengelolaan/tutupan", "C cover-management"), 0.0, 1.0, 1.0, 0.01, key=f"qt_C_{sid}",
+                               help=_t("1,0 = tanah terbuka (definisi USLE). Isi dari tabel/pengukuran untuk revegetasi/mulsa.", "1.0 = bare soil (USLE definition). Enter from tables/measurements for revegetation/mulch."))
+        _Pp = _c4.number_input(_t("P tindakan konservasi", "P support practice"), 0.0, 1.0, 1.0, 0.05, key=f"qt_P_pr_{sid}")
+        _d1, _d2, _d3 = st.columns(3)
+        _lam = _d1.number_input(_t("Batas panjang lereng efektif (m)", "Max effective slope length (m)"), 20.0, 500.0, 100.0, 10.0, key=f"qt_lam_{sid}")
+        _sdr = _d2.number_input(_t("Rasio pengiriman sedimen (SDR)", "Sediment delivery ratio (SDR)"), 0.01, 1.0, 1.0, 0.05, key=f"qt_sdr_{sid}",
+                                help=_t("1,0 = seluruh sedimen menuju kolam (konservatif utk area tambang yang disalurkan ke sump).", "1.0 = all sediment reaches the pond (conservative for mine areas drained to a sump)."))
+        _rho = _d3.number_input(_t("Berat isi sedimen (t/m³)", "Sediment bulk density (t/m³)"), 0.5, 2.0, 1.3, 0.05, key=f"qt_rho_{sid}")
+        _b1, _b2 = st.columns(2)
+        if st.session_state.get("rf_R_bols"):
+            _b1.button(_t(f"← R Bols ({st.session_state['rf_R_bols']:.0f})", f"← R Bols ({st.session_state['rf_R_bols']:.0f})"), key=f"qt_impbols_{sid}",
+                       on_click=_qt_set_R, args=(sid, st.session_state["rf_R_bols"]))
+            _b2.button(_t(f"← R Lenvain ({st.session_state['rf_R_lenvain']:.0f})", f"← R Lenvain ({st.session_state['rf_R_lenvain']:.0f})"), key=f"qt_implen_{sid}",
+                       on_click=_qt_set_R, args=(sid, st.session_state["rf_R_lenvain"]))
+        _ls = qt_ls_factor(slope, flow_acc, dx, dy, inside, lam_max=_lam)
+        _ls_mean = float(np.nanmean(_ls[inside])) if np.any(inside) else 0.0
+        out.update({"K": _K, "C": _Cc, "P": _Pp, "ls_mean": _ls_mean, "sdr": _sdr, "rho_b": _rho, "lam_max": _lam})
+        st.markdown("**" + _t("1) Kehilangan tanah tahunan (RUSLE)", "1) Annual soil loss (RUSLE)") + "**")
+        st.caption(_t(f"LS rata-rata segmen = {_ls_mean:.2f} (Desmet & Govers 1996 dari D8 flow accumulation; S McCool dkk. 1987).",
+                      f"Segment mean LS = {_ls_mean:.2f} (Desmet & Govers 1996 from D8 flow accumulation; S of McCool et al. 1987)."))
+        _y_year = 0.0
+        if _R > 0:
+            _A = _R * _K * _ls * _Cc * _Pp
+            _st = qt_rusle_stats(_A, cell_area, inside)
+            if _st:
+                _m1, _m2, _m3, _m4 = st.columns(4)
+                _metric_card(_t("Rata-rata", "Mean"), f"{_st['mean_tha']:.1f} t/ha/th", container=_m1)
+                _metric_card("P95", f"{_st['p95_tha']:.1f} t/ha/th", container=_m2)
+                _metric_card(_t("Total tanah tererosi", "Total soil loss"), f"{_st['total_t_yr']:.0f} t/th", container=_m3)
+                _y_year = _st["total_t_yr"] * _sdr
+                _metric_card(_t("Sedimen ke kolam", "Sediment to pond"), f"{_y_year:.0f} t/th ≈ {_y_year / _rho:.0f} m³/th", container=_m4)
+                _cls_df = pd.DataFrame({_t("Kelas laju erosi", "Erosion-rate class"): list(_QT_TBE_LABELS),
+                                        "Ton/ha/th": ["< 15", "15-60", "60-180", "180-480", "> 480"],
+                                        "Ha": [round(v, 2) for v in _st["class_area_ha"]], "%": [round(v, 1) for v in _st["class_pct"]]})
+                st.table(_cls_df)
+                _stp = max(1, int(max(_A.shape) // 220))
+                _hm = go.Figure(go.Heatmap(x=grid_x[::_stp, 0], y=grid_y[0, ::_stp], z=np.where(inside, _A, np.nan)[::_stp, ::_stp].T,
+                                           colorscale="YlOrRd", zmin=0, zmax=480, colorbar=dict(title="t/ha/th")))
+                _hm.update_layout(height=380, margin=dict(l=10, r=10, t=10, b=10), yaxis=dict(scaleanchor="x", scaleratio=1))
+                st.plotly_chart(_hm, width="stretch", key=f"qt_hm_{sid}")
+                out["rusle"] = dict(_st, R=_R, sed_yield_t_yr=_y_year, sed_vol_m3_yr=_y_year / _rho)
+        else:
+            st.info(_t("Isi R (atau impor dari Analisis Hujan di atas) untuk menghitung t/ha/tahun.", "Enter R (or import from the Rainfall Analysis above) to compute t/ha/yr."))
+        # ---- MUSLE event ----
+        st.markdown("**" + _t("2) Sedimen per kejadian hujan rencana (MUSLE) & TSS", "2) Sediment per design storm (MUSLE) & TSS") + "**")
+        _e1, _e2, _e3 = st.columns(3)
+        _Pev = _e1.number_input(_t("Hujan rencana R24 (mm)", "Design R24 (mm)"), 0.0, 1000.0, float(default_p_mm or 0.0), 5.0, key=f"qt_Pev_{sid}",
+                                help=_t("Bawaan = hujan analisis × faktor hujan ekstrem. Isi dari Analisis Hujan Rencana.", "Default = analysis rainfall × extreme factor. Fill from the Design Rainfall analysis."))
+        _meth = _e2.radio(_t("Limpasan dari", "Runoff from"), ["C", "CN"], horizontal=True, key=f"qt_meth_{sid}",
+                          format_func=lambda k: _t("Koefisien C", "Coefficient C") if k == "C" else "SCS-CN")
+        if _meth == "C":
+            _Cr = _e3.number_input(_t("Koefisien limpasan C", "Runoff coefficient C"), 0.05, 1.0, float(min(max(default_c or 0.7, 0.05), 1.0)), 0.05, key=f"qt_Cr_{sid}")
+            _CN = 90.0
+        else:
+            _CN = _e3.number_input("CN", 30.0, 100.0, 90.0, 1.0, key=f"qt_CN_{sid}", help=_t("Ambil dari tabel NRCS (NEH-4/TR-55) sesuai tutupan & kelompok tanah hidrologi. 90 hanya nilai awal.", "From NRCS tables (NEH-4/TR-55) by cover & hydrologic soil group. 90 is only a placeholder."))
+            _Cr = 0.7
+        try:
+            _zi = grid_z[inside]
+            _xi, _yi = grid_x[inside], grid_y[inside]
+            _Lest = float(np.hypot(np.ptp(_xi), np.ptp(_yi)))
+            _Sest = float(np.ptp(_zi) / max(_Lest, 1.0))
+            _tc_def = float(max(5.0, round(qt_tc_kirpich_min(_Lest, _Sest), 1)))
+        except Exception:
+            _tc_def = 15.0
+        _tc = st.number_input(_t("Waktu konsentrasi tc (menit)", "Time of concentration tc (min)"), 5.0, 1440.0, _tc_def, 1.0, key=f"qt_tc_{sid}",
+                              help=_t("Bawaan: Kirpich (1940) dengan panjang & kemiringan kasar dari ekstensi segmen — ganti dengan panjang alur terpanjang sebenarnya.", "Default: Kirpich (1940) with rough length & slope from the segment extent — replace with the true longest flow path."))
+        if _Pev > 0:
+            _Q = qt_event_runoff_mm(_Pev, _meth, _Cr, _CN)
+            _ev = qt_musle_event(_Q, _Pev, _tc, area_ha, _K, _ls_mean, _Cc, _Pp)
+            _tss = qt_tss_mg_l(_ev["y_ton"], _ev["q_vol_m3"]) if _ev["q_vol_m3"] > 0 else 0.0
+            _x1, _x2, _x3, _x4 = st.columns(4)
+            _metric_card(_t("Limpasan", "Runoff"), f"{_Q:.1f} mm ({_ev['q_vol_m3']:.0f} m³)", container=_x1)
+            _metric_card(_t("Debit puncak", "Peak flow"), f"{_ev['qp_m3s']:.2f} m³/s", container=_x2)
+            _metric_card(_t("Sedimen event", "Event sediment"), f"{_ev['y_ton']:.0f} t", container=_x3)
+            _metric_card("TSS", f"{_tss:,.0f} mg/L", container=_x4)
+            _lim = st.number_input(_t("Baku mutu TSS (mg/L)", "TSS limit (mg/L)"), 1.0, 5000.0, 400.0, 10.0, key=f"qt_lim_{sid}",
+                                   help=_t("Bawaan 400 mg/L = residu tersuspensi pada Kepmen LH 113/2003 (pertambangan batubara). Periksa peraturan/izin yang berlaku, bisa lebih ketat.", "Default 400 mg/L = suspended residue in Kepmen LH 113/2003 (coal mining). Check the applicable regulation/permit; it may be stricter."))
+            _eta_req = max(0.0, 1.0 - _lim / _tss) if _tss > 0 else 0.0
+            if _tss > _lim:
+                st.warning(_t(f"TSS masuk kolam ≈ {_tss:,.0f} mg/L melampaui baku mutu {_lim:,.0f} mg/L — kolam harus menyisihkan ≥ {_eta_req * 100:.1f}% massa tersuspensi.",
+                              f"TSS into the pond ≈ {_tss:,.0f} mg/L exceeds the limit {_lim:,.0f} mg/L — the pond must remove ≥ {_eta_req * 100:.1f}% of suspended mass."))
+            else:
+                st.success(_t(f"TSS event ≈ {_tss:,.0f} mg/L di bawah baku mutu {_lim:,.0f} mg/L (sebelum pengolahan).", f"Event TSS ≈ {_tss:,.0f} mg/L is below the limit {_lim:,.0f} mg/L (before treatment)."))
+            st.caption(_t("MUSLE (Williams 1975) memberi sedimen TOTAL event segmen, bukan hanya fraksi tersuspensi; qp dari metode Rasional (C efektif = limpasan/hujan) dengan intensitas Mononobe pada tc; K diubah ke SI (×0,1317). Umumnya menghasilkan angka tinggi untuk lahan terbuka — wajib dikalibrasi.",
+                          "MUSLE (Williams 1975) gives TOTAL event sediment of the segment, not only the suspended fraction; qp from the Rational method (effective C = runoff/rain) with Mononobe intensity at tc; K converted to SI (×0.1317). It often gives high values for bare land — calibrate."))
+            out["event"] = dict(_ev, p_mm=_Pev, q_mm=_Q, tc_min=_tc, tss_mg_l=_tss, tss_limit=_lim, eta_req=_eta_req, method=_meth)
+            # ---- kolam ----
+            st.markdown("**" + _t("3) Kolam pengendap (Stokes/Hazen)", "3) Settling pond (Stokes/Hazen)") + "**")
+            _p1, _p2, _p3, _p4 = st.columns(4)
+            _dp = _p1.number_input(_t("Partikel target d (mm)", "Target particle d (mm)"), 0.005, 0.5, 0.02, 0.005, format="%.3f", key=f"qt_dp_{sid}")
+            _fd = _p2.number_input(_t("Faktor desain", "Design factor"), 1.0, 4.0, 1.5, 0.1, key=f"qt_fd_{sid}", help=_t("Pengali luas utk turbulensi/short-circuit (praktik desain).", "Area multiplier for turbulence/short-circuiting (design practice)."))
+            _dep = _p3.number_input(_t("Kedalaman pengendapan (m)", "Settling depth (m)"), 0.5, 6.0, 2.0, 0.5, key=f"qt_dep_{sid}")
+            _int = _p4.number_input(_t("Interval pengerukan (th)", "Dredging interval (yr)"), 0.1, 10.0, 1.0, 0.1, key=f"qt_int_{sid}")
+            _sed_vol = max(_ev["y_ton"] * _sdr, _y_year * _int) / _rho
+            _pond = qt_pond_design(_ev["qp_m3s"], _dp, _fd, _dep, 3.0, _sed_vol)
+            _q1, _q2, _q3, _q4 = st.columns(4)
+            _metric_card(_t("Kec. endap Stokes", "Stokes velocity"), f"{_pond['vs_ms'] * 1000:.3f} mm/s", container=_q1)
+            _metric_card(_t("Luas permukaan", "Surface area"), f"{_pond['area_m2']:,.0f} m²", container=_q2)
+            _metric_card(_t("Dimensi (L:W=3:1)", "Size (L:W=3:1)"), f"{_pond['length_m']:.0f} × {_pond['width_m']:.0f} m", container=_q3)
+            _metric_card(_t("Volume total", "Total volume"), f"{_pond['vol_total_m3']:,.0f} m³", container=_q4)
+            st.caption(_t(f"Waktu tinggal ≈ {_pond['retention_min']:.0f} menit pada debit puncak; volume simpanan sedimen {_sed_vol:,.0f} m³ (terbesar antara satu event dan interval pengerukan). "
+                          "Dimensi minimum untuk debit puncak rencana — kolam nyata dirancang dgn hidrograf/PSD & mengikuti kriteria lokasi.",
+                          f"Retention time ≈ {_pond['retention_min']:.0f} min at peak flow; sediment storage {_sed_vol:,.0f} m³ (larger of one event and the dredging interval). "
+                          "Minimum size for the design peak flow — real ponds are designed with hydrographs/PSD and site criteria."))
+            if _pond["re"] > 1.0:
+                st.warning(_t(f"Re partikel = {_pond['re']:.2f} > 1: hukum Stokes tidak lagi sahih untuk d ini.", f"Particle Re = {_pond['re']:.2f} > 1: Stokes law is no longer valid for this d."))
+            out["pond"] = dict(_pond, d_mm=_dp, design_factor=_fd, depth_m=_dep, sed_vol_m3=_sed_vol)
+        else:
+            st.info(_t("Isi hujan rencana R24 untuk menghitung sedimen event, TSS, dan kolam.", "Enter the design R24 to compute event sediment, TSS and the pond."))
+    return out if ("rusle" in out or "event" in out) else None
+
+
+def _cover_strength_table(layers_now):
+    rows = []
+    for i, l in enumerate(layers_now):
+        g, gs, ph, c = COVER_STRENGTH_DEFAULTS.get(l["material"], COVER_STRENGTH_DEFAULTS["Custom"])
+        rows.append({"Lapisan": f"{i + 1}. {l['material']}", "Tebal (m)": float(l["thickness_m"]), "γ lembab (kN/m³)": g,
+                     "γ jenuh (kN/m³)": gs, "φ' (°)": ph, "c' (kPa)": c})
+    return pd.DataFrame(rows)
+
+
+def _render_cover_stability(layers_now, slope_deg):
+    st.markdown("---")
+    st.markdown("**" + _t("🧱 Kestabilan Lapisan Tipis di Lereng (infinite slope)", "🧱 Thin-Layer Slope Stability (infinite slope)") + "**")
+    _ui_caption(_t(
+        "Cek apakah cover ikut LONGSOR sebagai lapisan (gelincir sejajar lereng) — masalah berbeda dari erosi. FK = [c' + (W·cosβ − u − kh·W·sinβ)·tanφ'] / [W·(sinβ + kh·cosβ)], "
+        "bidang gelincir di dasar tiap lapisan (dan opsional di kontak dasar cover), rembesan sejajar lereng. Kuat geser awal INDIKATIF — isi dari uji laboratorium/geosintetik.",
+        "Checks whether the cover slides off as a layer (slope-parallel failure) — a different problem from erosion. FS = [c' + (W·cosβ − u − kh·W·sinβ)·tanφ'] / [W·(sinβ + kh·cosβ)], "
+        "failure plane at the base of each layer (and optionally at the cover base interface), slope-parallel seepage. Default strengths are INDICATIVE — enter lab/geosynthetic values."))
+    if not layers_now:
+        return None
+    _sig = hashlib.md5(repr([(l["material"], round(l["thickness_m"], 3)) for l in layers_now]).encode()).hexdigest()[:8]
+    _df = _cover_strength_table(layers_now)
+    _ed = st.data_editor(_df, hide_index=True, key=f"cover_strength_ed_{_sig}", disabled=["Lapisan", "Tebal (m)"],
+                         column_config={"γ lembab (kN/m³)": st.column_config.NumberColumn(min_value=1.0, max_value=30.0, step=0.5),
+                                        "γ jenuh (kN/m³)": st.column_config.NumberColumn(min_value=1.0, max_value=30.0, step=0.5),
+                                        "φ' (°)": st.column_config.NumberColumn(min_value=0.0, max_value=50.0, step=1.0),
+                                        "c' (kPa)": st.column_config.NumberColumn(min_value=0.0, max_value=100.0, step=0.5)})
+    _layers = [{"material": l["material"], "thickness_m": float(l["thickness_m"]), "gamma": float(r["γ lembab (kN/m³)"]),
+                "gamma_sat": float(r["γ jenuh (kN/m³)"]), "phi": float(r["φ' (°)"]), "c": float(r["c' (kPa)"])}
+               for l, (_, r) in zip(layers_now, _ed.iterrows())]
+    _s1, _s2, _s3 = st.columns(3)
+    _m = _s1.slider(_t("Fraksi tebal jenuh di atas bidang (m)", "Saturated thickness fraction above plane (m)"), 0.0, 1.0, 0.5, 0.05, key="cover_stab_m")
+    _kh = _s2.number_input(_t("Koefisien gempa horizontal kh", "Horizontal seismic coefficient kh"), 0.0, 0.5, 0.0, 0.01, key="cover_stab_kh")
+    _fsr = _s3.number_input(_t("FK minimum yang disyaratkan", "Required minimum FS"), 1.0, 3.0, 1.5, 0.05, key="cover_stab_fsr",
+                            help=_t("Isi menurut kriteria yang berlaku (Kepmen ESDM 1827 K/30/MEM/2018 untuk lereng tambang menurut jenis lereng & keparahan longsor; SNI 8460:2017 untuk lereng galian/timbunan). 1,5 = nilai lazim lereng permanen, BUKAN kutipan tabel.",
+                                    "Enter per the applicable criteria (Kepmen ESDM 1827 K/30/MEM/2018 for mine slopes by slope type & failure consequence; SNI 8460:2017 for cut/fill slopes). 1.5 is a common permanent-slope value, NOT a table quotation."))
+    _use_if = st.checkbox(_t("Ada bidang lemah di dasar cover (kontak dgn substrat/geosintetik)", "Weak plane at cover base (contact with substrate/geosynthetic)"),
+                          value=any(l["material"].startswith("Geomembrane") for l in layers_now), key="cover_stab_if")
+    _iface = None
+    if _use_if:
+        _i1, _i2 = st.columns(2)
+        _iface = {"phi": _i1.number_input(_t("φ' interface (°)", "Interface φ' (°)"), 0.0, 45.0, 18.0, 1.0, key="cover_stab_if_phi"),
+                  "c": _i2.number_input(_t("c' interface (kPa)", "Interface c' (kPa)"), 0.0, 50.0, 0.0, 0.5, key="cover_stab_if_c")}
+    _rows = []
+    for _lab, _mm in ((_t("Kering", "Dry"), 0.0), (_t(f"Jenuh sebagian (m={_m:.2f})", f"Partly saturated (m={_m:.2f})"), _m), (_t("Jenuh penuh (m=1)", "Fully saturated (m=1)"), 1.0)):
+        _r = stab_infinite_slope(_layers, slope_deg, _mm, _kh, interface=_iface)
+        _rows.append([_lab, f"{_r['fs_min']:.2f}", stab_verdict(_r["fs_min"], _fsr), _r["critical_plane"],
+                      f"{stab_max_angle(_layers, _fsr, _mm, _kh, interface=_iface):.1f}°"])
+    st.table(pd.DataFrame(_rows, columns=[_t("Kondisi air", "Water condition"), _t(f"FK min. (lereng {slope_deg:.1f}°)", f"Min FS (slope {slope_deg:.1f}°)"),
+                                          _t("Penilaian", "Assessment"), _t("Bidang kritis", "Critical plane"),
+                                          _t(f"Sudut maks. utk FK ≥ {_fsr:.2f}", f"Max angle for FS ≥ {_fsr:.2f}")]))
+    if _rows[-1][2] != "MEMENUHI KRITERIA" or _rows[1][2] != "MEMENUHI KRITERIA":
+        st.warning(_t("Ada kondisi yang belum memenuhi FK minimum: kurangi sudut lereng/tebal lapisan, tambah drainase (turunkan m), pakai perkuatan (geogrid/geosel) atau interface berfriksi tinggi.",
+                      "Some conditions do not meet the minimum FS: reduce slope angle/layer thickness, add drainage (lower m), use reinforcement (geogrid/geocell) or a high-friction interface."))
+    return {"rows": _rows, "fs_required": _fsr, "slope_deg": slope_deg}
+
+
+def xs_dxf_bytes(name, r, design=None, ve=1.0):
+    """DXF penampang: X = jarak (m), Y = elevasi (m) x eksagerasi vertikal. Layer: TERRAIN, DESIGN, GRID, TEXT."""
+    d = np.asarray(r["distance"], dtype=float)
+    z = np.asarray(r["elevation"], dtype=float)
+    ok = np.isfinite(d) & np.isfinite(z)
+    d, z = d[ok], z[ok]
+    doc = ezdxf.new("R2010")
+    msp = doc.modelspace()
+    for lname, col in (("TERRAIN", 7), ("DESIGN", 1), ("GRID", 8), ("TEXT", 3)):
+        doc.layers.add(lname, color=col)
+    msp.add_lwpolyline([(float(a), float(b) * ve) for a, b in zip(d, z)], dxfattribs={"layer": "TERRAIN"})
+    if design is not None:
+        msp.add_lwpolyline([(float(design[0][0]), float(design[0][1]) * ve), (float(design[1][0]), float(design[1][1]) * ve)], dxfattribs={"layer": "DESIGN"})
+    z0, z1 = float(np.floor(z.min())), float(np.ceil(z.max()))
+    for zz in np.arange(z0, z1 + 1e-9, max(1.0, round((z1 - z0) / 8.0))):
+        msp.add_line((float(d.min()), zz * ve), (float(d.max()), zz * ve), dxfattribs={"layer": "GRID"})
+        msp.add_text(f"{zz:.0f}", dxfattribs={"layer": "TEXT", "height": max((z1 - z0) * ve * 0.03, 0.2), "insert": (float(d.min()), zz * ve)})
+    msp.add_text(f"Penampang {name} (VE={ve:g}x)", dxfattribs={"layer": "TEXT", "height": max((z1 - z0) * ve * 0.05, 0.3), "insert": (float(d.min()), z1 * ve + (z1 - z0) * ve * 0.08)})
+    buf = io.StringIO()
+    doc.write(buf)
+    return buf.getvalue().encode("utf-8")
+
+
+def _render_xs_export_cutfill(section_results):
+    """Ekspor penampang (CSV/PNG/DXF) + volume cut-fill end-area terhadap garis desain per penampang."""
+    if not section_results:
+        return
+    names = sorted(section_results.keys())
+    with st.expander(_t("⬇️ Ekspor penampang & Volume Cut-Fill (end-area)", "⬇️ Section export & Cut-Fill volumes (end-area)"), expanded=False):
+        st.markdown("**" + _t("Ekspor per penampang", "Export per section") + "**")
+        _ve = st.number_input(_t("Eksagerasi vertikal untuk DXF (×)", "Vertical exaggeration for DXF (×)"), 1.0, 20.0, 1.0, 0.5, key="xsx_ve")
+        for _n in names:
+            _r = section_results[_n]
+            _c1, _c2, _c3, _c4 = st.columns([1.2, 1, 1, 1])
+            _c1.markdown(f"**{_n}**")
+            _safe = re.sub(r"[^A-Za-z0-9_\-]+", "_", _n)
+            _c2.download_button("CSV", data=xs_profile_csv(_n, _r).encode("utf-8"), file_name=f"Penampang_{_safe}.csv", mime="text/csv", key=f"xsx_csv_{_safe}")
+            try:
+                _tmp = os.path.join(tempfile.mkdtemp(), f"xs_{_safe}.png")
+                _png = None
+                if _xs_matplotlib_png(_n, _r, _tmp):
+                    with open(_tmp, "rb") as _f:
+                        _png = _f.read()
+                if _png:
+                    _c3.download_button("PNG", data=_png, file_name=f"Penampang_{_safe}.png", mime="image/png", key=f"xsx_png_{_safe}")
+            except Exception as _e_png:
+                _c3.caption(_t("PNG gagal", "PNG failed"))
+            try:
+                _dz = np.asarray(_r["elevation"], dtype=float)
+                _c4.download_button("DXF", data=xs_dxf_bytes(_n, _r, ve=_ve), file_name=f"Penampang_{_safe}.dxf", mime="application/dxf", key=f"xsx_dxf_{_safe}")
+            except Exception as _e_dxf:
+                _c4.caption(_t("DXF gagal", "DXF failed"))
+        st.markdown("---")
+        st.markdown("**" + _t("Volume cut-fill antar penampang (metode luas rata-rata)", "Cut-fill volumes between sections (average end-area method)") + "**")
+        _ui_caption(_t(
+            "Garis desain tiap penampang = garis lurus dari elevasi rencana awal ke akhir (bawaan: ujung-ujung profil eksisting = regrading ke lereng lurus). "
+            "Ubah kolom elevasi rencana sesuai desain. CUT = tanah eksisting di atas garis desain; FILL = di bawahnya. Volume antar penampang = rata-rata luas × jarak; "
+            "jarak bawaan = antar titik tengah garis section (urut nama) — cocok bila penampang kira-kira sejajar; ubah bila perlu.",
+            "The design line of each section = straight line from start to end design elevation (default: existing endpoints = regrade to a straight slope). "
+            "Edit the design elevation columns per your design. CUT = existing ground above the design line; FILL = below it. Volume between sections = mean area × spacing; "
+            "default spacing = between section-line midpoints (by name order) — fine for roughly parallel sections; edit if needed."))
+        _mid = {}
+        for _n in names:
+            _v = section_results[_n].get("vertices") or []
+            _mid[_n] = (0.5 * (_v[0][0] + _v[-1][0]), 0.5 * (_v[0][1] + _v[-1][1])) if len(_v) >= 2 else (0.0, 0.0)
+        _rows = []
+        for _i, _n in enumerate(names):
+            _r = section_results[_n]
+            _ez = np.asarray(_r["elevation"], dtype=float)
+            _ezf = _ez[np.isfinite(_ez)]
+            _sp = float(np.hypot(_mid[names[_i + 1]][0] - _mid[_n][0], _mid[names[_i + 1]][1] - _mid[_n][1])) if _i < len(names) - 1 else 0.0
+            _rows.append({"Penampang": _n, "Elev. rencana awal (m)": round(float(_ezf[0]), 2) if len(_ezf) else 0.0,
+                          "Elev. rencana akhir (m)": round(float(_ezf[-1]), 2) if len(_ezf) else 0.0, "Jarak ke berikutnya (m)": round(_sp, 1)})
+        _sig = hashlib.md5(repr([(r["Penampang"], r["Elev. rencana awal (m)"], r["Elev. rencana akhir (m)"]) for r in _rows]).encode()).hexdigest()[:8]
+        _ed = st.data_editor(pd.DataFrame(_rows), hide_index=True, key=f"xsx_cutfill_ed_{_sig}", disabled=["Penampang"],
+                             column_config={"Elev. rencana awal (m)": st.column_config.NumberColumn(format="%.2f"),
+                                            "Elev. rencana akhir (m)": st.column_config.NumberColumn(format="%.2f"),
+                                            "Jarak ke berikutnya (m)": st.column_config.NumberColumn(min_value=0.0, format="%.1f")})
+        _cf, _calc = [], []
+        for _, _er in _ed.iterrows():
+            _r = section_results[_er["Penampang"]]
+            _d = np.asarray(_r["distance"], dtype=float)
+            _z = np.asarray(_r["elevation"], dtype=float)
+            _dl = _er["Elev. rencana awal (m)"] + (_er["Elev. rencana akhir (m)"] - _er["Elev. rencana awal (m)"]) * (_d - _d.min()) / max(float(_d.max() - _d.min()), 1e-9)
+            _cut, _fill = xs_cut_fill_area(_d, _z, _dl)
+            _calc.append({"name": _er["Penampang"], "cut": _cut, "fill": _fill, "spacing_next_m": float(_er["Jarak ke berikutnya (m)"])})
+            _cf.append([_er["Penampang"], round(_cut, 2), round(_fill, 2), round(_cut - _fill, 2)])
+        st.table(pd.DataFrame(_cf, columns=[_t("Penampang", "Section"), _t("Luas CUT (m²)", "CUT area (m²)"), _t("Luas FILL (m²)", "FILL area (m²)"), _t("Netto (m²)", "Net (m²)")]))
+        if len(_calc) >= 2:
+            _vols, _tc, _tf = xs_end_area_volumes(_calc)
+            _vdf = pd.DataFrame([[f"{v['from']} → {v['to']}", round(v["spacing_m"], 1), round(v["cut_m3"], 1), round(v["fill_m3"], 1)] for v in _vols],
+                                columns=[_t("Interval", "Interval"), _t("Jarak (m)", "Spacing (m)"), "CUT (m³)", "FILL (m³)"])
+            st.table(_vdf)
+            _m1, _m2, _m3 = st.columns(3)
+            _metric_card("Total CUT", f"{_tc:,.0f} m³", container=_m1)
+            _metric_card("Total FILL", f"{_tf:,.0f} m³", container=_m2)
+            _metric_card(_t("Netto (CUT−FILL)", "Net (CUT−FILL)"), f"{_tc - _tf:,.0f} m³", container=_m3)
+            st.download_button(_t("CSV volume cut-fill", "Cut-fill volume CSV"), data=_vdf.to_csv(index=False).encode("utf-8"),
+                               file_name="Volume_CutFill_antar_penampang.csv", mime="text/csv", key="xsx_vol_csv")
+        else:
+            st.caption(_t("Volume antar penampang butuh minimal 2 garis section (buat lebih dari satu garis).", "Volumes between sections need at least 2 section lines (draw more than one)."))
 
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
@@ -4775,6 +5865,9 @@ with tab1:
                     }
                     st.caption(f"Menggunakan nilai manual: {manual_rainfall_override:.2f} mm/hari")
 
+                # analisis frekuensi -> hujan rencana kala ulang T + erosivitas R
+                _render_rainfall_frequency_ui(latitude, longitude)
+
             else:
                 # Faktor hujan ekstrem tidak relevan untuk skenario Satu Titik (Point Source) --
                 # tetap didefinisikan (default 1.0x/netral) supaya kode RUN ANALYSIS di bawah yang
@@ -7356,7 +8449,11 @@ with tab1:
 
                         # ================= SLOPE =================
 
-                        dz_dx, dz_dy = np.gradient(grid_z)
+                        # PERBAIKAN satuan: np.gradient(grid_z) TANPA jarak sel menghasilkan m/SEL (= slope
+                        # sebenarnya x ukuran sel), sehingga tau = rho*g*h*S, kecepatan Manning, dan ambang
+                        # Shields/Partheniades ikut bergantung pada resolusi grid. Sekarang memakai jarak sel
+                        # sebenarnya (dx, dy) -> slope tak berdimensi (m/m) = tan(sudut).
+                        dz_dx, dz_dy = np.gradient(grid_z, dx, dy)
 
                         slope = np.sqrt(
                             dz_dx**2 +
@@ -9472,6 +10569,18 @@ with tab1:
 
                     st.session_state["analysis_method"] = analysis_method
 
+                    # ---- estimasi KUANTITATIF (RUSLE / MUSLE / TSS / kolam) ----
+                    try:
+                        _quant_result = _render_quantitative_section(
+                            sid, seg_label, grid_x, grid_y, grid_z, inside, slope, flow_acc_grid, dx, dy,
+                            float(boundary.area) / 10000.0,
+                            (st.session_state.get("online_rainfall") or 0.0) * rain_factor,
+                            runoff_c,
+                        )
+                    except Exception as _e_quant:
+                        _quant_result = None
+                        st.warning(f"Estimasi kuantitatif tidak dapat dihitung: {_e_quant}")
+
                     overflow_count = int(len(df_overflow))
                     convergence_count = int(np.sum(convergence_zone & inside))
                     boundary_area_ha = float(boundary.area) / 10000.0
@@ -9749,6 +10858,7 @@ with tab1:
                         "inside": inside,
                         "contour_diag": contour_diag,
                         "grain_size_mm": float(grain_size),
+                        "quant": _quant_result,
                         "cover_info": cover_info,
                         "tau_critical_base": float(tau_critical_base),
                         "erodibility_M_base": float(erodibility_M_base),
@@ -11744,6 +12854,16 @@ with tab1:
                                 ["Hujan desain terpakai", f"{seg['online_rainfall']:.2f} mm/hari" if seg.get("online_rainfall") else "tidak tersedia"],
                                 ["Sumber hujan", (seg.get('online_rainfall_meta') or {}).get('source', '-')],
                             ]
+                            _qr = seg.get("quant") or {}
+                            if _qr.get("rusle"):
+                                param_rows.append(["Erosivitas hujan R / K / C / P", f"{_qr['rusle']['R']:.0f} / {_qr['K']:.2f} / {_qr['C']:.2f} / {_qr['P']:.2f}"])
+                                param_rows.append(["Kehilangan tanah rata-rata (RUSLE)", f"{_qr['rusle']['mean_tha']:.1f} ton/ha/th (P95 {_qr['rusle']['p95_tha']:.1f})"])
+                                param_rows.append(["Sedimen ke kolam (RUSLE x SDR)", f"{_qr['rusle']['sed_yield_t_yr']:.0f} ton/th (~{_qr['rusle']['sed_vol_m3_yr']:.0f} m3/th)"])
+                            if _qr.get("event"):
+                                param_rows.append(["Hujan rencana R24 / limpasan", f"{_qr['event']['p_mm']:.0f} mm / {_qr['event']['q_mm']:.1f} mm"])
+                                param_rows.append(["Sedimen event (MUSLE) / TSS", f"{_qr['event']['y_ton']:.0f} ton / {_qr['event']['tss_mg_l']:,.0f} mg/L"])
+                            if _qr.get("pond"):
+                                param_rows.append(["Kolam pengendap minimum", f"{_qr['pond']['length_m']:.0f} x {_qr['pond']['width_m']:.0f} m; V total {_qr['pond']['vol_total_m3']:,.0f} m3 (d target {_qr['pond']['d_mm']:.3f} mm)"])
                             cd = seg.get("contour_diag") or {}
                             if cd:
                                 param_rows.append(["Titik kontur DXF terbaca", f"{cd.get('n_raw_points', '-')}"])
@@ -12596,6 +13716,16 @@ with tab1:
                                 ["Ukuran butir (grain size)", f"{seg['grain_size_mm']:.3f} mm"],
                                 ["Kecepatan aliran representatif", f"{seg['velocity_hulu']:.3f} m/s"],
                             ]
+                            _qd = seg.get("quant") or {}
+                            if _qd.get("rusle"):
+                                _param_rows_docx.append(["Erosivitas hujan R / K / C / P", f"{_qd['rusle']['R']:.0f} / {_qd['K']:.2f} / {_qd['C']:.2f} / {_qd['P']:.2f}"])
+                                _param_rows_docx.append(["Kehilangan tanah rata-rata (RUSLE)", f"{_qd['rusle']['mean_tha']:.1f} ton/ha/th (P95 {_qd['rusle']['p95_tha']:.1f})"])
+                                _param_rows_docx.append(["Sedimen ke kolam (RUSLE x SDR)", f"{_qd['rusle']['sed_yield_t_yr']:.0f} ton/th (~{_qd['rusle']['sed_vol_m3_yr']:.0f} m3/th)"])
+                            if _qd.get("event"):
+                                _param_rows_docx.append(["Hujan rencana R24 / limpasan", f"{_qd['event']['p_mm']:.0f} mm / {_qd['event']['q_mm']:.1f} mm"])
+                                _param_rows_docx.append(["Sedimen event (MUSLE) / TSS", f"{_qd['event']['y_ton']:.0f} ton / {_qd['event']['tss_mg_l']:,.0f} mg/L"])
+                            if _qd.get("pond"):
+                                _param_rows_docx.append(["Kolam pengendap minimum", f"{_qd['pond']['length_m']:.0f} x {_qd['pond']['width_m']:.0f} m; V total {_qd['pond']['vol_total_m3']:,.0f} m3 (d target {_qd['pond']['d_mm']:.3f} mm)"])
                             _docx_table(docx_doc, _param_rows_docx)
 
                             _hydro_docx = seg.get("hydraulics_result")
@@ -17331,6 +18461,12 @@ with tab7:
                                 st.session_state.pop(_k_del2, None)
                             st.rerun()
 
+                # ---------- KESTABILAN LAPISAN TIPIS (infinite slope) ----------
+                try:
+                    _render_cover_stability(_layers_now, float(_slope_deg))
+                except Exception as _e_stab:
+                    st.warning(f"Cek kestabilan lapisan tidak dapat ditampilkan: {_e_stab}")
+
                 # ---------- TERAPKAN COVER KE EROSION MAPPING (link balik) ----------
                 st.markdown("---")
                 st.markdown("**" + _t("🔗 Terapkan cover ini ke Erosion Mapping", "🔗 Apply this cover to Erosion Mapping") + "**")
@@ -17434,11 +18570,9 @@ with tab7:
                                 _t("Indeks erosi maks.", "Max erosion index")]))
                             _ui_caption(_t(
                                 "Pembanding = hasil terakhir TANPA cover pada segmen yang sama (dihitung otomatis saat cover dimatikan). "
-                                "Catatan: array slope di analisis erosi berupa m/sel (belum dibagi jarak sel), jadi τ absolutnya bukan "
-                                "Pa sebenarnya -- efek cover paling tepat dibaca sebagai perbandingan relatif.",
+                                "Pemetaan cover → parameter analisis bersifat indikatif; baca efeknya sebagai perbandingan relatif.",
                                 "Baseline = the last result WITHOUT the cover for the same segment (computed automatically when the cover is off). "
-                                "Note: the slope array in the erosion analysis is in m/cell (not divided by cell size), so absolute τ is not "
-                                "true Pa -- read the cover effect as a relative comparison."))
+                                "The cover → analysis-parameter mapping is indicative; read the effect as a relative comparison."))
 
                 # FITUR BARU: download penampang cover sebagai DXF (skematik 2D -- jarak
                 # horizontal vs elevasi relatif, satu polyline tertutup per lapisan, sama
@@ -18071,3 +19205,9 @@ with tab8:
                         f"Failed to generate/display Cross Section ({_e_xs_result}). Try generating again, "
                         "or double-check the selected section lines.",
                     ))
+
+                # ---- ekspor (CSV/PNG/DXF) + volume cut-fill antar penampang ----
+                try:
+                    _render_xs_export_cutfill(st.session_state.get("section_results"))
+                except Exception as _e_xsx:
+                    st.warning(f"Panel ekspor penampang tidak dapat ditampilkan: {_e_xsx}")
