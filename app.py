@@ -1739,9 +1739,9 @@ def _cover_recommend(m):
     ))
     if not _met:
         _b.append(_t(
-            f"⚠️ Tidak ada preset yang mencapai {_tau_need:.0f} Pa -- pertimbangkan erosion control blanket, "
+            f"⚠ Tidak ada preset yang mencapai {_tau_need:.0f} Pa -- pertimbangkan erosion control blanket, "
             "geocell, atau riprap ringan pada lapisan terekspos, lalu isi τc-nya lewat 'Properti (bisa ditimpa)'.",
-            f"⚠️ No preset reaches {_tau_need:.0f} Pa -- consider an erosion control blanket, geocell or light "
+            f"⚠ No preset reaches {_tau_need:.0f} Pa -- consider an erosion control blanket, geocell or light "
             "riprap on the exposed layer, then enter its τc under 'Properties (overridable)'."))
     if _k is not None:
         _sid, _sen = m.get("soil_id"), m.get("soil_en")
@@ -1979,13 +1979,13 @@ REFERENCE_LIBRARY = {
                   "in filtration. 24th Annual Report, Massachusetts State Board of Health, 539-556.", False),
 }
 
-_REF_KIND_ICON = {"regulasi": "🏛", "standar": "📐", "literatur": "📖"}
+_REF_KIND_ICON = {"regulasi": "", "standar": "", "literatur": ""}
 
 _BASIS_LABEL = {
-    "regulasi": ("🏛 Regulasi", "🏛 Regulation"),
-    "literatur": ("📖 Literatur / standar teknis", "📖 Literature / technical standard"),
-    "campuran": ("📖 Literatur (bentuk) + ⚙️ ambang internal", "📖 Literature (form) + ⚙️ internal thresholds"),
-    "internal": ("⚙️ Ambang internal (indikatif) — bukan regulasi", "⚙️ Internal threshold (indicative) — not a regulation"),
+    "regulasi": ("Regulasi", "Regulation"),
+    "literatur": ("Literatur / standar teknis", "Literature / technical standard"),
+    "campuran": ("Literatur (bentuk) + ⚙ ambang internal", "Literature (form) + ⚙ internal thresholds"),
+    "internal": ("⚙ Ambang internal (indikatif) — bukan regulasi", "⚙ Internal threshold (indicative) — not a regulation"),
 }
 
 CLASSIFICATION_REGISTRY = {
@@ -2158,7 +2158,7 @@ CLASSIFICATION_REGISTRY = {
     },
     "cover_reco": {
         "title": ("Rekomendasi susunan cover", "Cover stack recommendation"),
-        "where": ("Tab Surface/Cover Slope — 💡 Rekomendasi cover", "Surface/Cover Slope tab — 💡 Cover recommendation"),
+        "where": ("Tab Surface/Cover Slope — Rekomendasi cover", "Surface/Cover Slope tab — Cover recommendation"),
         "rule": "τc minimum indikatif = (3 + 30·tan slope-P95) × faktor keparahan (1,0 / 1,2 / 1,5 / 2,0 dari indeks maks) × faktor tanah (0,9-1,3 dari D50) "
                 "× faktor kecepatan (1,2 bila V > 1,5 m/s). Saran permeabilitas menurut kelas k tanah eksisting.",
         "basis": "internal", "refs": ["hec15"],
@@ -2256,7 +2256,7 @@ CLASSIFICATION_REGISTRY = {
     },
     "slope_lem": {
         "title": ("FK lereng 2-D: Bishop, Janbu, Morgenstern-Price (bidang gelincir lingkaran)", "2-D slope FS: Bishop, Janbu, Morgenstern-Price (circular slip surfaces)"),
-        "where": ("Tab Stabilitas Lereng (FK)", "Slope Stability (FS) tab"),
+        "where": ("Tab Stabilitas Channel/Drainage", "Channel/Drainage Stability tab"),
         "rule": "Kesetimbangan batas metode irisan. Bishop: kesetimbangan momen, tanpa gaya geser antar-irisan. Janbu: kesetimbangan gaya horizontal, tanpa gaya geser antar-irisan; terkoreksi "
                 "f0 = 1 + b1[d/L − 1,4(d/L)²] (b1 = 0,31 c=0; 0,69 φ=0; 0,50 c-φ). Morgenstern-Price: gaya geser antar-irisan X = λ·f(x)·E, f half-sine (atau konstan = Spencer), "
                 "memenuhi kesetimbangan gaya DAN momen. Pencarian: grid pusat × jari-jari (Bishop) lalu optimasi Nelder-Mead per metode. Pseudo-statik: gaya horizontal kh·W.",
@@ -2296,8 +2296,8 @@ def _class_refs_short(keys):
     return ", ".join(REFERENCE_LIBRARY[k][1] for k in keys if k in REFERENCE_LIBRARY)
 
 
-# Keterangan "📚 Dasar klasifikasi" di bawah hasil klasifikasi DIMATIKAN (terlalu ramai di layar).
-# Isi registri tetap tersedia lewat tombol 📚 di sidebar dan tabel di laporan. Ubah ke True bila ingin
+# Keterangan "Dasar klasifikasi" di bawah hasil klasifikasi DIMATIKAN (terlalu ramai di layar).
+# Isi registri tetap tersedia lewat tombol di sidebar dan tabel di laporan. Ubah ke True bila ingin
 # menampilkan keterangan inline lagi.
 SHOW_CLASSIFICATION_BASIS = False
 
@@ -2309,10 +2309,10 @@ def _class_basis_caption(key, detail=False):
     _e = CLASSIFICATION_REGISTRY.get(key)
     if not _e:
         return
-    _txt = f"📚 {_t('Dasar klasifikasi', 'Classification basis')}: **{_basis_label(_e['basis'])}**"
+    _txt = f"{_t('Dasar klasifikasi', 'Classification basis')}: **{_basis_label(_e['basis'])}**"
     if _e["refs"]:
         _txt += f" — {_class_refs_short(_e['refs'])}"
-    _txt += _t("  ·  rincian: tombol 📚 di sidebar", "  ·  details: 📚 button in the sidebar")
+    _txt += _t("  ·  rincian: tombol di sidebar", "  ·  details: button in the sidebar")
     if detail:
         _txt += "  \n" + _t(*_e["caveat"])
     st.caption(_txt)
@@ -2358,7 +2358,7 @@ def _classification_registry_dialog():
 
 
 _PDF_GLYPH_MAP = {"τ": "tau", "θ": "theta", "ρ": "rho", "κ": "kappa", "Σ": "Sum", "≥": ">=", "≤": "<=", "≈": "~",
-                  "→": "->", "−": "-", "√": "sqrt", "·": "*", "×": "x", "²": "^2", "μ": "mu", "β": "beta", "γ": "gamma", "φ": "phi", "≠": "!=", "½": "1/2", "α": "alpha", "🏛": "", "📖": "", "⚙️": "", "📐": ""}
+                  "→": "->", "−": "-", "√": "sqrt", "·": "*", "×": "x", "²": "^2", "μ": "mu", "β": "beta", "γ": "gamma", "φ": "phi", "≠": "!=", "½": "1/2", "α": "alpha", "": "", "": "", "⚙": "", "": ""}
 
 
 def _ascii_glyphs(txt):
@@ -2791,8 +2791,8 @@ def _render_rainfall_frequency_ui(lat, lon):
              "daily": _t("Unggah CSV/XLSX harian (tanggal, hujan mm)", "Upload daily CSV/XLSX (date, rain mm)"),
              "ams": _t("Unggah CSV hujan maks. tahunan (tahun, mm)", "Upload annual-maximum CSV (year, mm)"),
              "manual": _t("Ketik manual (mm, dipisah koma/baris)", "Type manually (mm, comma/line separated)")}
-    with st.expander(_t("📈 Hujan Rencana (analisis frekuensi) & Erosivitas — dari data seri panjang",
-                        "📈 Design Rainfall (frequency analysis) & Erosivity — from long records"), expanded=False):
+    with st.expander(_t("Hujan Rencana (analisis frekuensi) & Erosivitas — dari data seri panjang",
+                        "Design Rainfall (frequency analysis) & Erosivity — from long records"), expanded=False):
         st.caption(_t(
             "Statistik 'hujan maksimum periode 30 hari' di atas BUKAN hujan rencana. Di sini hujan harian maksimum "
             "TAHUNAN dianalisis frekuensinya (Gumbel, Log-Normal, Log-Pearson III, Normal + uji Smirnov-Kolmogorov) untuk "
@@ -2936,8 +2936,8 @@ def _render_quantitative_section(sid, seg_label, grid_x, grid_y, grid_z, inside,
     Mengembalikan dict ringkasan utk laporan (atau None kalau belum ada input berarti)."""
     out = {"seg": seg_label}
     cell_area = float(abs(dx * dy))
-    with st.expander(_t("📊 Estimasi Kuantitatif — kehilangan tanah (RUSLE), sedimen event (MUSLE), TSS & kolam pengendap",
-                        "📊 Quantitative Estimate — soil loss (RUSLE), event sediment (MUSLE), TSS & settling pond"), expanded=False):
+    with st.expander(_t("Estimasi Kuantitatif — kehilangan tanah (RUSLE), sedimen event (MUSLE), TSS & kolam pengendap",
+                        "Quantitative Estimate — soil loss (RUSLE), event sediment (MUSLE), TSS & settling pond"), expanded=False):
         st.caption(_t(
             "Melengkapi indeks relatif dengan BESARAN: ton/ha/tahun, ton/kejadian, mg/L, dan dimensi kolam. Semua faktor (R, K, C, P) harus diisi "
             "dari data/uji; nilai awal hanya penanda. Konvensi USLE Indonesia (R dari Bols/Lenvain, K nomograf/Hammer, hasil ton/ha/th). "
@@ -3073,7 +3073,7 @@ def _cover_strength_table(layers_now):
 
 def _render_cover_stability(layers_now, slope_deg):
     st.markdown("---")
-    st.markdown("**" + _t("🧱 Kestabilan Lapisan Tipis di Lereng (infinite slope)", "🧱 Thin-Layer Slope Stability (infinite slope)") + "**")
+    st.markdown("**" + _t("Kestabilan Lapisan Tipis di Lereng (infinite slope)", "Thin-Layer Slope Stability (infinite slope)") + "**")
     _ui_caption(_t(
         "Cek apakah cover ikut LONGSOR sebagai lapisan (gelincir sejajar lereng) — masalah berbeda dari erosi. FK = [c' + (W·cosβ − u − kh·W·sinβ)·tanφ'] / [W·(sinβ + kh·cosβ)], "
         "bidang gelincir di dasar tiap lapisan (dan opsional di kontak dasar cover), rembesan sejajar lereng. Kuat geser awal INDIKATIF — isi dari uji laboratorium/geosintetik.",
@@ -3146,7 +3146,7 @@ def _render_xs_export_cutfill(section_results):
     if not section_results:
         return
     names = sorted(section_results.keys())
-    with st.expander(_t("⬇️ Ekspor penampang & Volume Cut-Fill (end-area)", "⬇️ Section export & Cut-Fill volumes (end-area)"), expanded=False):
+    with st.expander(_t("⬇ Ekspor penampang & Volume Cut-Fill (end-area)", "⬇ Section export & Cut-Fill volumes (end-area)"), expanded=False):
         st.markdown("**" + _t("Ekspor per penampang", "Export per section") + "**")
         _ve = st.number_input(_t("Eksagerasi vertikal untuk DXF (×)", "Vertical exaggeration for DXF (×)"), 1.0, 20.0, 1.0, 0.5, key="xsx_ve")
         for _n in names:
@@ -3537,7 +3537,7 @@ def fk_search(prof, mat, water, kh=0.0, methods=("bishop", "janbu", "mp"), n_sea
 
 
 # =====================================================================
-# TAB "STABILITAS LERENG (FK)" -- UI + grafik bidang gelincir
+# TAB "STABILITAS CHANNEL/DRAINAGE" -- UI + grafik bidang gelincir
 # =====================================================================
 _FK_METHOD_LABEL = {"bishop": "Bishop (simplified)", "janbu": "Janbu (simplified, terkoreksi f0)",
                     "janbu_simple": "Janbu (simplified, tanpa koreksi)", "mp": "Morgenstern-Price"}
@@ -3699,7 +3699,7 @@ def _fk_reset_mats_cb(kind):
 
 
 def _render_fk_tab():
-    st.markdown("### " + _t("🛡️ Stabilitas Lereng (FK) — Bishop · Janbu · Morgenstern-Price", "🛡️ Slope Stability (FS) — Bishop · Janbu · Morgenstern-Price"))
+    st.markdown("### " + _t("Stabilitas Channel/Drainage — Bishop · Janbu · Morgenstern-Price", "Channel/Drainage Stability — Bishop · Janbu · Morgenstern-Price"))
     _ui_caption(_t(
         "Analisis kesetimbangan batas 2-D (metode irisan) dengan pencarian bidang gelincir LINGKARAN kritis. Lapisan tanah didefinisikan sebagai offset vertikal dari muka tanah "
         "(lapisan terakhir tak hingga). Diuji terhadap benchmark ACADS EX1(a), solusi Taylor (φ=0), solusi analitik infinite slope, dan pustaka pembanding independen (pyslope) — "
@@ -3949,8 +3949,8 @@ def _hub_module_specs():
                        (_t("Ekspor", "Export"), _t("CSV, PNG, dan DXF per penampang.", "CSV, PNG and DXF per section.")),
                        (_t("Cut-Fill Antar Penampang", "Cut-Fill Between Sections"), _t("Luas & volume terhadap garis desain (average end-area).", "Areas & volumes versus a design line (average end-area)."))],
              tags=[_t("Jarak (m)", "Distance (m)"), _t("Elevasi (m)", "Elevation (m)"), "Cut / Fill"]),
-        dict(common, header_gradient="linear-gradient(135deg, #034561 0%, #4FB783 100%)", badge_text=_t("MODUL 08: STABILITAS LERENG", "MODULE 08: SLOPE STABILITY"),
-             badge_color="amber", fmt_text=_t("Penampang / Manual", "Section / Manual"), title=_t("Stabilitas Lereng (FK)", "Slope Stability (FS)"),
+        dict(common, header_gradient="linear-gradient(135deg, #034561 0%, #4FB783 100%)", badge_text=_t("MODUL 08: STABILITAS CHANNEL/DRAINAGE", "MODULE 08: CHANNEL/DRAINAGE STABILITY"),
+             badge_color="amber", fmt_text=_t("Penampang / Manual", "Section / Manual"), title=_t("Stabilitas Channel/Drainage", "Channel/Drainage Stability"),
              subtitle=_t("Faktor Keamanan lereng 2-D dengan metode Bishop, Janbu, dan Morgenstern-Price, pencarian bidang gelincir kritis, dan animasi simulasi bidang gelincir.",
                          "2-D slope Factor of Safety with the Bishop, Janbu and Morgenstern-Price methods, critical slip-surface search, and a slip-surface animation."),
              intro_text=_t("Analisis kesetimbangan batas (irisan) dengan bidang gelincir lingkaran: geometri dari Cross Section atau tabel titik, lapisan tanah (bisa diambil dari desain cover), muka air/Ru, dan gempa pseudo-statik. Penilaian dibandingkan dengan FK minimum yang Anda isi sesuai kriteria (Kepmen 1827/2018, SNI 8460:2017).",
@@ -3977,12 +3977,12 @@ def _render_module_workflow():
             "1. Make sure Erosion Mapping for the relevant segment has been run.\n2. Select the segment where the event occurred.\n3. Mark the location: click a point on the risk map OR upload a DXF boundary of the eroded area.\n4. Review the ranking of the most deviating factors (Mode A).\n"
             "5. If measured data exist (scour/sediment volume), fill Mode B to back-calculate the effective parameter.\n6. Compare with the original design assumption to identify the most likely cause.")),
         (_t("Modul 03 — Machine Learning (Rapid Drawdown)", "Module 03 — Machine Learning (Rapid Drawdown)"), False, _t(
-            "1. Siapkan dataset: FK (dari simulasi kesetimbangan batas/numerik, mis. modul Stabilitas Lereng, atau back analysis) beserta fitur drawdown (muka air WL, laju drawdown, ΔWL, k, c', φ', geometri). Unduh template CSV di tab.\n"
+            "1. Siapkan dataset: FK (dari simulasi kesetimbangan batas/numerik, mis. modul Stabilitas Channel/Drainage, atau back analysis) beserta fitur drawdown (muka air WL, laju drawdown, ΔWL, k, c', φ', geometri). Unduh template CSV di tab.\n"
             "2. Upload data training, pilih target (FK) dan fitur, atur cleaning (opsional outlier IQR).\n3. Tinjau korelasi & scatter, jalankan Cek Model Terbaik, lalu Train Model.\n4. Baca evaluasi (R², MAE, RMSE / accuracy) — hanya berlaku pada rentang data training.\n"
-            "5. Upload data skenario/monitoring baru → FK prediksi + status FAIL/CRITICAL/STABLE.\n6. Tinjau time series FK vs muka air dan verifikasi skenario kritis dengan modul Stabilitas Lereng (FK).",
-            "1. Prepare the dataset: FS (from limit-equilibrium/numerical simulation, e.g. the Slope Stability module, or back analysis) with drawdown features (water level WL, drawdown rate, ΔWL, k, c', φ', geometry). Download the CSV template in the tab.\n"
+            "5. Upload data skenario/monitoring baru → FK prediksi + status FAIL/CRITICAL/STABLE.\n6. Tinjau time series FK vs muka air dan verifikasi skenario kritis dengan modul Stabilitas Channel/Drainage.",
+            "1. Prepare the dataset: FS (from limit-equilibrium/numerical simulation, e.g. the Channel/Drainage Stability module, or back analysis) with drawdown features (water level WL, drawdown rate, ΔWL, k, c', φ', geometry). Download the CSV template in the tab.\n"
             "2. Upload training data, choose the target (FS) and features, set cleaning (optional IQR outliers).\n3. Review correlation & scatter, run Check Best Model, then Train Model.\n4. Read the evaluation (R², MAE, RMSE / accuracy) — valid only within the training range.\n"
-            "5. Upload new scenario/monitoring data → predicted FS + FAIL/CRITICAL/STABLE status.\n6. Review the FS vs water-level time series and verify critical scenarios with the Slope Stability (FS) module.")),
+            "5. Upload new scenario/monitoring data → predicted FS + FAIL/CRITICAL/STABLE status.\n6. Review the FS vs water-level time series and verify critical scenarios with the Channel/Drainage Stability module.")),
         (_t("Modul 04 — Simulasi Aliran 3D", "Module 04 — 3D Flow Simulation"), False, _t(
             "1. Pastikan Erosion Mapping segmen terkait sudah dijalankan (sumber DEM).\n2. Pilih segmen & jenis simulasi (Debris/Longsoran atau Genangan Banjir).\n3. Tandai titik sumber: klik di peta DEM atau input koordinat.\n4. Isi parameter (radius sumber, Manning's n, frame, eksagerasi vertikal).\n5. Jalankan Simulasi.\n6. Putar animasi dan tinjau kedalaman maksimum, volume, titik limpasan.",
             "1. Make sure Erosion Mapping for the relevant segment has been run (DEM source).\n2. Select the segment & simulation type (Debris/Landslide or Flood Inundation).\n3. Mark the source point: click on the DEM map or enter coordinates.\n4. Fill the parameters (source radius, Manning's n, frames, vertical exaggeration).\n5. Run the simulation.\n6. Play the animation and review max depth, volume, overflow points.")),
@@ -3999,7 +3999,7 @@ def _render_module_workflow():
             "5. Buka **Ekspor & Volume Cut-Fill**: unduh CSV/PNG/DXF dan isi elevasi rencana untuk volume antar penampang.",
             "1. Make sure Erosion Mapping has been run; select the segment.\n2. Choose the section type: Straight Line, Polyline DXF, or Draw on Map (click points, save the line).\n3. Generate Cross Section.\n4. Choose the colour parameter (erosion risk, sedimentation, velocity, etc.), mesh, water level.\n"
             "5. Open **Export & Cut-Fill Volume**: download CSV/PNG/DXF and enter design elevations for volumes between sections.")),
-        (_t("Modul 08 — Stabilitas Lereng (FK)", "Module 08 — Slope Stability (FS)"), False, _t(
+        (_t("Modul 08 — Stabilitas Channel/Drainage", "Module 08 — Channel/Drainage Stability"), False, _t(
             "1. Pilih geometri: contoh ACADS EX1(a) (uji), dari Cross Section, atau tabel titik manual.\n2. Isi material (lapisan offset vertikal; bisa ambil dari desain Surface/Cover): γ, γ jenuh, c', φ'.\n3. Atur muka air (piezometrik/Ru), kh, dan FK minimum sesuai kriteria (Kepmen ESDM 1827 K/30/MEM/2018, SNI 8460:2017).\n"
             "4. Pilih metode (Bishop, Janbu, Morgenstern-Price) lalu Jalankan analisis FK.\n5. Tinjau tabel FK, penampang dengan bidang gelincir kritis, simulasi bidang gelincir (animasi), dan peta FK pusat lingkaran.\n6. Untuk laporan formal, verifikasi dengan perangkat lunak khusus (mis. Slide2).",
             "1. Choose the geometry: ACADS EX1(a) test example, from Cross Section, or a manual point table.\n2. Fill the materials (vertical-offset layers; can be taken from the Surface/Cover design): γ, γ sat, c', φ'.\n3. Set the water table (piezometric/Ru), kh and the minimum FS per the criteria (Kepmen ESDM 1827 K/30/MEM/2018, SNI 8460:2017).\n"
@@ -4861,7 +4861,7 @@ with st.sidebar:
     """, unsafe_allow_html=True)
     _lang_now = st.session_state.get("app_lang", "id")
     _lang_next = "en" if _lang_now == "id" else "id"
-    _lang_label = "🌐 " + _lang_next.upper()
+    _lang_label = "" + _lang_next.upper()
     _lang_help = "Switch to English" if _lang_next == "en" else "Ganti ke Bahasa Indonesia"
     if st.button(_lang_label, key="lang_toggle_btn", help=_lang_help):
         st.session_state["app_lang"] = _lang_next
@@ -4892,7 +4892,7 @@ with st.sidebar:
     else:
         st.caption(_t("Belum ada project tersimpan untuk sesi ini.", "No saved project for this session yet."))
 
-    with st.expander(_t("💾 Simpan Project", "💾 Save Project"), expanded=False):
+    with st.expander(_t("Simpan Project", "Save Project"), expanded=False):
         st.text_input(
             _t("Nama project", "Project name"),
             value=_active_proj_name or "",
@@ -4951,7 +4951,7 @@ with st.sidebar:
     # server (save_project/load_project) supaya tidak ada logika baru yang belum
     # teruji -- cuma jalur I/O-nya yang beda (file yang diunduh/diunggah user sendiri,
     # bukan disimpan ke folder per-username di server).
-    with st.expander(_t("📁 Download / Buka Project sebagai File", "📁 Download / Open Project as File")):
+    with st.expander(_t("Download / Buka Project sebagai File", "Download / Open Project as File")):
         _ui_caption(_t(
             "Simpan seluruh project (semua DXF yang diupload, hasil analisis, parameter) "
             "sebagai satu file .eroproj yang bisa Anda simpan sendiri (laptop/drive) dan buka "
@@ -4972,7 +4972,7 @@ with st.sidebar:
                "Save inputs only (parameters/properties + DXF, no analysis results) -- much smaller file"),
             value=True, key="dl_project_inputs_only",
         )
-        if st.button(_t("🔄 Siapkan File Project untuk Diunduh", "🔄 Prepare Project File for Download"),
+        if st.button(_t("Siapkan File Project untuk Diunduh", "Prepare Project File for Download"),
                      key="prepare_project_download_btn", width="stretch"):
             with st.spinner(_t("Mengumpulkan data project...", "Collecting project data...")):
                 try:
@@ -5048,7 +5048,7 @@ with st.sidebar:
             # Pola persis sama dgn download DXF di tab Rekonstruksi: data=bytes dari session_state,
             # tanpa key/on_click khusus.
             st.download_button(
-                _t("⬇️ Download Project (.eroproj)", "⬇️ Download Project (.eroproj)"),
+                _t("⬇ Download Project (.eroproj)", "⬇ Download Project (.eroproj)"),
                 data=_dl_bytes,
                 file_name=_dl_fname,
                 mime="application/octet-stream",
@@ -5088,7 +5088,7 @@ with st.sidebar:
                         <button id="dlb" style="width:100%%;padding:8px 12px;border-radius:6px;
                             border:1px solid #888;background:#2E5C31;color:#fff;font-weight:600;
                             cursor:pointer;font-family:sans-serif;">
-                            ⬇️ Download Project (cara alternatif)
+                            ⬇ Download Project (cara alternatif)
                         </button>
                         <div id="dlm" style="font:12px sans-serif;margin-top:4px;color:#ccc;"></div>
                         <script>
@@ -5121,7 +5121,7 @@ with st.sidebar:
             if _dl_ready_path:
                 st.caption(_t("Salinan file di komputer server/lokal: ", "File copy on the server/local machine: ")
                            + os.path.abspath(_dl_ready_path))
-                if os.name == "nt" and st.button(_t("📂 Buka folder file ini", "📂 Open this file's folder"),
+                if os.name == "nt" and st.button(_t("Buka folder file ini", "Open this file's folder"),
                                                  key="open_export_folder_btn"):
                     try:
                         os.startfile(os.path.dirname(os.path.abspath(_dl_ready_path)))
@@ -5140,7 +5140,7 @@ with st.sidebar:
             type=["eroproj"], key="upload_project_file_input",
         )
         if _uploaded_proj_file is not None:
-            if st.button(_t("📂 Muat Project dari File Ini", "📂 Load Project from This File"),
+            if st.button(_t("Muat Project dari File Ini", "Load Project from This File"),
                          key="load_project_from_file_btn", width="stretch"):
                 try:
                     _uploaded_proj_file.seek(0)
@@ -5167,7 +5167,7 @@ with st.sidebar:
                     st.error(_t(f"Gagal memuat file project: {_e_up_proj}",
                                  f"Failed to load project file: {_e_up_proj}"))
 
-    if st.button(_t("🏠 Kembali ke Menu Project", "🏠 Back to Project Menu"), key="back_to_hub_btn", width="stretch"):
+    if st.button(_t("Kembali ke Menu Project", "Back to Project Menu"), key="back_to_hub_btn", width="stretch"):
         st.session_state["home_page"] = True
         st.rerun()
 
@@ -5201,7 +5201,7 @@ with st.sidebar:
     else:
         st.caption("Belum ada analisis dijalankan pada sesi ini.")
 
-    if st.button(_t("📚 Dasar Klasifikasi & Referensi", "📚 Classification Basis & References"),
+    if st.button(_t("Dasar Klasifikasi & Referensi", "Classification Basis & References"),
                  key="open_class_registry_btn", width="stretch"):
         _classification_registry_dialog()
 
@@ -5234,7 +5234,7 @@ with st.sidebar:
 
     # ---- Info & alur kerja (hanya muncul setelah masuk ke layar analisis/tab) ----
     if not st.session_state.get("home_page", True):
-        st.markdown('<div class="mwm-side-heading">ℹ️ Info &amp; Alur Kerja</div>', unsafe_allow_html=True)
+        st.markdown('<div class="mwm-side-heading">ℹ Info &amp; Alur Kerja</div>', unsafe_allow_html=True)
         with st.expander(_t("Cara pakai tiap modul", "How to use each module")):
 
             st.markdown(f"""
@@ -5470,7 +5470,7 @@ if st.session_state.home_page:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    with st.expander(_t("📖 Lihat detail 8 modul & alur kerja penggunaan", "📖 View details of 8 modules & usage workflow"), expanded=False):
+    with st.expander(_t("Lihat detail 8 modul & alur kerja penggunaan", "View details of 8 modules & usage workflow"), expanded=False):
 
         st.markdown(f"""
         <div style="margin-bottom:22px;">
@@ -5569,7 +5569,7 @@ if st.session_state.home_page:
                 st.rerun()
 
         with c2:
-            if st.button(_t("📂 Open Project", "📂 Open Project"), width="stretch", key="hub_open_project_btn"):
+            if st.button(_t("Open Project", "Open Project"), width="stretch", key="hub_open_project_btn"):
                 st.session_state["show_project_browser"] = True
                 st.rerun()
 
@@ -5588,7 +5588,7 @@ if st.session_state.home_page:
     else:
 
         # ================= PROJECT BROWSER =================
-        st.markdown("### " + _t("📂 Buka Project", "📂 Open Project"))
+        st.markdown("### " + _t("Buka Project", "Open Project"))
         _proj_index = _load_project_index(st.session_state["auth_username"])
         st.caption(_t("Folder penyimpanan: ", "Storage folder: ")
                    + os.path.abspath(_project_user_dir(st.session_state["auth_username"])))
@@ -5596,9 +5596,9 @@ if st.session_state.home_page:
         if not _proj_index:
             st.info(_t(
                 "Belum ada project tersimpan untuk akun ini. Simpan project lewat panel "
-                "'💾 Simpan Project' di sidebar setelah menjalankan analisis.",
+                "'Simpan Project' di sidebar setelah menjalankan analisis.",
                 "No saved projects for this account yet. Save a project via the "
-                "'💾 Save Project' panel in the sidebar after running an analysis.",
+                "'Save Project' panel in the sidebar after running an analysis.",
             ))
         else:
             for _p in _proj_index:
@@ -5615,7 +5615,7 @@ if st.session_state.home_page:
                             + ("analysis run" if _p.get("analysis_done") else "not yet analyzed"),
                         ))
                         if _p.get("note"):
-                            st.caption(f"📝 {_p['note']}")
+                            st.caption(f"{_p['note']}")
                     with _pc2:
                         if st.button(_t("Buka", "Open"), key=f"open_proj_{_p['slug']}", width="stretch"):
                             try:
@@ -5646,7 +5646,7 @@ if st.session_state.home_page:
                             delete_project(st.session_state["auth_username"], _p["slug"])
                             st.rerun()
 
-        if st.button(_t("🔙 Kembali", "🔙 Back"), key="close_project_browser_btn"):
+        if st.button(_t("Kembali", "Back"), key="close_project_browser_btn"):
             st.session_state["show_project_browser"] = False
             st.rerun()
 
@@ -6070,7 +6070,7 @@ _tab_labels.append(_t("Simulasi Aliran 3D", "3D Flow Simulation"))
 _tab_labels.append(_t("Rekonstruksi Desain", "Design Reconstruction"))
 _tab_labels.append(_t("Surface/Cover Slope", "Surface/Cover Slope"))
 _tab_labels.append(_t("Cross Section", "Cross Section"))
-_tab_labels.append(_t("Stabilitas Lereng (FK)", "Slope Stability (FS)"))
+_tab_labels.append(_t("Stabilitas Channel/Drainage", "Channel/Drainage Stability"))
 
 if _is_admin:
     tab1, tab4, tab2, tab3, tab5, tab6, tab7, tab8, tab9 = st.tabs(_tab_labels)
@@ -6374,7 +6374,7 @@ with tab1:
                     if _cov_snap_ui:
                         st.session_state.setdefault(f"cover_toggle_{sid}", sid in _cov_snap_ui.get("sids", []))
                         st.checkbox(
-                            _t("🧱 Sertakan cover dari tab Surface/Cover", "🧱 Include cover from the Surface/Cover tab"),
+                            _t("Sertakan cover dari tab Surface/Cover", "Include cover from the Surface/Cover tab"),
                             key=f"cover_toggle_{sid}", on_change=_cover_toggle_cb, args=(sid,),
                             help=_t("Parameter efektif analisis (τc/erodibilitas/kecepatan kritis, koefisien runoff) "
                                     "mengikuti cover yang dirancang di tab Surface/Cover, sehingga hasil analisis berubah.",
@@ -9037,11 +9037,11 @@ with tab1:
                     st.caption(f"Jenis kondisi: **{design_type}**  |  Metode: **{analysis_method}**")
                     if cover_info:
                         st.info(_t(
-                            f"🧱 Cover dari tab Surface/Cover diterapkan pada segmen ini "
+                            f"Cover dari tab Surface/Cover diterapkan pada segmen ini "
                             f"({cover_info['material']}, τc {(cover_info['tau_c_top'] or 0):.0f} Pa, "
                             f"k efektif {(cover_info['k_eff'] or 0):.1e} cm/s) — parameter analisis efektif berubah, "
                             f"hasil di bawah sudah memperhitungkan cover. Ringkasan dampak ada di tab Surface/Cover.",
-                            f"🧱 Cover from the Surface/Cover tab is applied to this segment "
+                            f"Cover from the Surface/Cover tab is applied to this segment "
                             f"({cover_info['material']}, τc {(cover_info['tau_c_top'] or 0):.0f} Pa, "
                             f"effective k {(cover_info['k_eff'] or 0):.1e} cm/s) — effective analysis parameters changed; "
                             f"the results below already include the cover. Impact summary is in the Surface/Cover tab."))
@@ -15222,8 +15222,8 @@ with tab1:
 # =========================================================
 with tab2:
 
-    st.markdown("### " + _t("🤖 Machine Learning — Prediksi FK Lereng akibat Rapid Drawdown",
-                           "🤖 Machine Learning — Slope FS Prediction under Rapid Drawdown"))
+    st.markdown("### " + _t("Machine Learning — Prediksi FK Lereng akibat Rapid Drawdown",
+                           "Machine Learning — Slope FS Prediction under Rapid Drawdown"))
     _ui_caption(_t(
         "Rapid drawdown = penurunan muka air (kolam/pit lake, sump, atau muka air tanah) yang lebih cepat daripada tekanan air pori di dalam lereng bisa terdisipasi. "
         "Tekanan air yang tadinya menyangga lereng hilang sementara tekanan pori di dalam lereng masih tinggi, sehingga tegangan efektif dan FK turun. "
@@ -15231,10 +15231,10 @@ with tab2:
         "Rapid drawdown = a water-level fall (pit lake, sump or groundwater level) faster than pore pressure inside the slope can dissipate. "
         "The water pressure that supported the slope is lost while the internal pore pressure is still high, so effective stress and FS drop. "
         "This module trains ML models on simulation or monitoring data to predict the FS of new drawdown scenarios quickly."))
-    with st.expander(_t("ℹ️ Cara kerja, data yang dibutuhkan, dan batasan", "ℹ️ How it works, required data and limitations"), expanded=False):
+    with st.expander(_t("ℹ Cara kerja, data yang dibutuhkan, dan batasan", "ℹ How it works, required data and limitations"), expanded=False):
         st.markdown(_t(
             "**Alur:** (1) siapkan dataset FK vs kondisi drawdown → (2) upload & pilih target/fitur → (3) cleaning & eksplorasi → (4) cek model terbaik & train → "
-            "(5) evaluasi → (6) upload data skenario/monitoring baru → (7) baca FK prediksi & status, lalu verifikasi kasus kritis dengan modul **Stabilitas Lereng (FK)**.\n\n"
+            "(5) evaluasi → (6) upload data skenario/monitoring baru → (7) baca FK prediksi & status, lalu verifikasi kasus kritis dengan modul **Stabilitas Channel/Drainage**.\n\n"
             "**Kolom yang disarankan** (nama bebas, sesuaikan dengan data Anda):\n"
             "- `Date` — tanggal (agar time series dapat ditampilkan)\n"
             "- `WL` — elevasi/tinggi muka air di kolam/pit/sump (m)\n"
@@ -15247,7 +15247,7 @@ with tab2:
             "Kualitas prediksi bergantung pada kualitas FK yang dipakai untuk melatih. Hasilnya adalah alat skrining/peringatan dini, bukan pengganti analisis geoteknik formal; "
             "ambang FK mengikuti kriteria proyek (mis. Kepmen ESDM 1827 K/30/MEM/2018 untuk lereng tambang).",
             "**Workflow:** (1) prepare a dataset of FS vs drawdown conditions → (2) upload & choose target/features → (3) cleaning & exploration → (4) check best model & train → "
-            "(5) evaluate → (6) upload new scenario/monitoring data → (7) read the predicted FS & status, then verify critical cases with the **Slope Stability (FS)** module.\n\n"
+            "(5) evaluate → (6) upload new scenario/monitoring data → (7) read the predicted FS & status, then verify critical cases with the **Channel/Drainage Stability** module.\n\n"
             "**Suggested columns** (free names, adapt to your data):\n"
             "- `Date` — date (so the time series can be shown)\n"
             "- `WL` — water level/elevation in the pit lake/sump (m)\n"
@@ -15266,7 +15266,7 @@ with tab2:
     _ml_fk_limit = _mlc2.number_input(_t("Garis FK minimum (grafik)", "Minimum FS line (chart)"), 1.0, 3.0, 1.5, 0.05, key="ml_fk_limit",
                                       help=_t("Garis putus-putus pada grafik time series. Isi sesuai FK minimum yang disyaratkan.", "Dashed line on the time-series chart. Set to the required minimum FS."))
     _mlc3.download_button(
-        _t("⬇️ Template CSV (contoh format rapid drawdown)", "⬇️ CSV template (rapid-drawdown format example)"),
+        _t("⬇ Template CSV (contoh format rapid drawdown)", "⬇ CSV template (rapid-drawdown format example)"),
         data=("Date,WL,delta_WL,drawdown_rate,WL_awal,k_ms,c_kpa,phi_deg,slope_deg,H_m,FS\n"
               "2026-01-01,120.0,0.0,0.0,120.0,1e-7,10,28,35,40,1.62\n"
               "2026-01-02,118.5,1.5,1.5,120.0,1e-7,10,28,35,40,1.48\n"
@@ -15560,9 +15560,9 @@ with tab2:
                 st.dataframe(confusion_matrix(y_test, y_pred))
             st.caption(_t(
                 "Skor evaluasi berlaku pada rentang data training/test ini saja. Skenario drawdown di luar rentang laju penurunan, muka air, atau parameter material yang dilatih akan diekstrapolasi tanpa dasar fisika — "
-                "verifikasi kasus kritis dengan modul Stabilitas Lereng (FK).",
+                "verifikasi kasus kritis dengan modul Stabilitas Channel/Drainage.",
                 "Evaluation scores hold only within this training/test range. Drawdown scenarios outside the trained drawdown-rate, water-level or material-parameter ranges are extrapolated without physical basis — "
-                "verify critical cases with the Slope Stability (FS) module."))
+                "verify critical cases with the Channel/Drainage Stability module."))
 
     # ================= PREDIKSI =================
     _sub_header(_t("2. Prediksi FK skenario / monitoring drawdown", "2. FS prediction for drawdown scenario / monitoring"))
@@ -18566,10 +18566,10 @@ with tab6:
             _recon_seg = _seg_results_for_recon[_recon_sid]
 
             _mz = _recon_seg.get("max_zone", 0)
-            _sev = (_t("🔴 Kritis", "🔴 Critical") if _mz >= 2.0 else
-                    _t("🟠 Siaga", "🟠 Alert") if _mz >= 1.0 else
-                    _t("🟡 Waspada", "🟡 Watch") if _mz >= 0.5 else
-                    _t("🟢 Stabil", "🟢 Stable"))
+            _sev = (_t("Kritis", "Critical") if _mz >= 2.0 else
+                    _t("Siaga", "Alert") if _mz >= 1.0 else
+                    _t("Waspada", "Watch") if _mz >= 0.5 else
+                    _t("Stabil", "Stable"))
             st.info(_t(
                 f"{_sev} — luas erosi ≈{_recon_seg.get('erosion_area', 0):.2f} ha, "
                 f"luas sedimentasi ≈{_recon_seg.get('sedimentation_area', 0):.2f} ha dari total "
@@ -18646,7 +18646,7 @@ with tab6:
             # (titik-titik dengan FlowDensity/RiskScore tertinggi = jalur air yang
             # dianalisis). Tiap kandidat centerline diukur jarak terdekatnya ke titik-titik
             # itu -- yang paling dekat berarti paling besar kemungkinan itu jalur airnya,
-            # jadi ditandai 🌊 dan otomatis ditaruh paling atas/terpilih duluan.
+            # jadi ditandai dan otomatis ditaruh paling atas/terpilih duluan.
             _flow_xy = None
             _src_sid_cl = st.session_state.get("design_recon_source_sid")
             if _src_sid_cl and _src_sid_cl in _seg_results_for_recon:
@@ -18680,7 +18680,7 @@ with tab6:
             for i, L, p, _dflow in _cand_info:
                 _flag = ""
                 if _dflow is not None and _dflow <= _FLOW_HIT_RADIUS:
-                    _flag = _t(" · 🌊 dilalui jalur air (±", " · 🌊 on flow path (±") + f"{_dflow:.1f}m)"
+                    _flag = _t(" · dilalui jalur air (±", " · on flow path (±") + f"{_dflow:.1f}m)"
                 _lbl = f"#{i} · {p['layer']} · {p['type']} · {L:,.1f} m · {len(p['points'])} titik{_flag}"
                 _cand_labels[_lbl] = i
                 if _default_cl_label is None and _flag:
@@ -18690,10 +18690,10 @@ with tab6:
             _default_idx_cl = _label_list_cl.index(_default_cl_label) if _default_cl_label else 0
             if _flow_xy is not None and _default_cl_label:
                 st.caption(_t(
-                    "🌊 Polyline yang ditandai dilalui jalur air (berdasarkan titik-titik "
+                    "Polyline yang ditandai dilalui jalur air (berdasarkan titik-titik "
                     "FlowDensity/RiskScore tertinggi dari hasil Erosion Mapping) sudah "
                     "ditaruh di atas & dipilih otomatis.",
-                    "🌊 Polylines flagged as on the flow path (based on the highest "
+                    "Polylines flagged as on the flow path (based on the highest "
                     "FlowDensity/RiskScore points from the Erosion Mapping result) are "
                     "already sorted to the top & auto-selected.",
                 ))
@@ -18781,8 +18781,8 @@ with tab6:
                         _sugg_depth = round(_cur_depth + 0.5, 2)
 
                     with st.expander(_t(
-                        "💡 Saran parameter awal dari hasil Erosion Mapping (opsional)",
-                        "💡 Suggested starting parameters from Erosion Mapping result (optional)",
+                        "Saran parameter awal dari hasil Erosion Mapping (opsional)",
+                        "Suggested starting parameters from Erosion Mapping result (optional)",
                     ), expanded=not st.session_state.get("design_recon_suggestion_applied")):
                         _sugg_table_rows = [
                             (_t("Lebar dasar (m)", "Bottom width (m)"), f"{_cur_bw:.2f}", f"{_sugg_bw:.2f}"),
@@ -18950,7 +18950,7 @@ with tab6:
                     )
                     _invert_z = _start_z - (_grade_pct / 100.0) * _cl_dsn["station"]
 
-                if st.button(_t("🔧 Bangun Ulang Desain", "🔧 Rebuild Design"),
+                if st.button(_t("Bangun Ulang Desain", "Rebuild Design"),
                              key="design_recon_run", width="stretch"):
                     _tmpl = _channel_template_offsets(
                         _bw, _depth, _slope_l, _slope_r,
@@ -19175,7 +19175,7 @@ with tab6:
                 ))
 
             # ---------- ringkasan parameter untuk catatan revisi ----------
-            with st.expander(_t("📋 Ringkasan Parameter Revisi", "📋 Revised Parameter Summary")):
+            with st.expander(_t("Ringkasan Parameter Revisi", "Revised Parameter Summary")):
                 _summary_rows = [
                     (_t("Lebar dasar", "Bottom width"), f"{_params_out['bottom_width']:.2f} m"),
                     (_t("Kedalaman total", "Total depth"), f"{_params_out['depth']:.2f} m"),
@@ -19206,7 +19206,7 @@ with tab6:
                 )
                 with open(_dl_dxf_path, "rb") as _f_dl:
                     st.download_button(
-                        _t("⬇️ Download DXF Desain Revisi", "⬇️ Download Revised Design DXF"),
+                        _t("⬇ Download DXF Desain Revisi", "⬇ Download Revised Design DXF"),
                         data=_f_dl.read(),
                         file_name=f"Desain_Revisi_{(st.session_state.get('design_recon_send_name') or 'segmen').strip().replace(' ', '_')}.dxf",
                         mime="application/dxf",
@@ -19220,8 +19220,8 @@ with tab6:
             # ---------- kirim balik ke Erosion Mapping sebagai segmen uji ----------
             st.markdown("---")
             st.markdown("**" + _t(
-                "🔁 Uji Desain Revisi di Erosion Mapping",
-                "🔁 Test the Revised Design in Erosion Mapping",
+                "Uji Desain Revisi di Erosion Mapping",
+                "Test the Revised Design in Erosion Mapping",
             ) + "**")
             _ui_caption(_t(
                 "Kirim geometri desain revisi ini sebagai SEGMEN BARU di tab Erosion Mapping -- "
@@ -19248,8 +19248,8 @@ with tab6:
                 "so RUN ANALYSIS in Erosion Mapping stays fast and doesn't freeze -- the design "
                 "shape is still represented. For a full-precision file, use the Download DXF button above.",
             ))
-            if st.button(_t("📤 Kirim ke Erosion Mapping sebagai Segmen Baru",
-                             "📤 Send to Erosion Mapping as New Segment"),
+            if st.button(_t("Kirim ke Erosion Mapping sebagai Segmen Baru",
+                             "Send to Erosion Mapping as New Segment"),
                          key="design_recon_send_btn", width="stretch"):
                 try:
                     # PERBAIKAN "RUN ANALYSIS lama/freeze/error setelah kirim dari Rekonstruksi":
@@ -19352,8 +19352,8 @@ with tab7:
         _seg_results_for_cover = st.session_state.get("segment_results", {})
         if _seg_results_for_cover:
             with st.expander(_t(
-                "🔗 Ambil data dari Hasil Erosion Mapping (opsional)",
-                "🔗 Use data from Erosion Mapping result (optional)",
+                "Ambil data dari Hasil Erosion Mapping (opsional)",
+                "Use data from Erosion Mapping result (optional)",
             )):
                 _cov_seg_sorted = sorted(
                     _seg_results_for_cover.items(),
@@ -19371,10 +19371,10 @@ with tab7:
                 _cov_src_sid = _cov_seg_labels[_cov_pick_label]
                 _cov_src_seg = _seg_results_for_cover[_cov_src_sid]
                 _cov_mz = _cov_src_seg.get("max_zone", 0)
-                _cov_sev = (_t("🔴 Kritis", "🔴 Critical") if _cov_mz >= 1.8 else
-                            _t("🟠 Siaga", "🟠 Alert") if _cov_mz >= 1.0 else
-                            _t("🟡 Waspada", "🟡 Watch") if _cov_mz >= 0.5 else
-                            _t("🟢 Stabil", "🟢 Stable"))
+                _cov_sev = (_t("Kritis", "Critical") if _cov_mz >= 1.8 else
+                            _t("Siaga", "Alert") if _cov_mz >= 1.0 else
+                            _t("Waspada", "Watch") if _cov_mz >= 0.5 else
+                            _t("Stabil", "Stable"))
                 st.info(_t(
                     f"{_cov_sev} — indeks risiko maksimum {_cov_mz:.2f}, erosion ratio "
                     f"{_cov_src_seg.get('erosion_ratio', 0)*100:.1f}%.",
@@ -19421,7 +19421,7 @@ with tab7:
                                                                 _t("Nilai", "Value")]))
 
                 _cov_rec = _cover_recommend(_cov_m)
-                st.markdown("**" + _t("💡 Rekomendasi cover", "💡 Cover recommendation") + "**")
+                st.markdown("**" + _t("Rekomendasi cover", "Cover recommendation") + "**")
                 for _cb in _cov_rec["bullets"]:
                     st.markdown("- " + _cb)
                 _class_basis_caption("cover_reco", detail=True)
@@ -19554,7 +19554,7 @@ with tab7:
                     "color": _preset["color"],
                 }
                 if len(st.session_state["cover_layers"]) > 1:
-                    if st.button(_t("🗑 Hapus lapisan ini", "🗑 Remove this layer"), key=f"cover_del_{_cli}"):
+                    if st.button(_t("Hapus lapisan ini", "Remove this layer"), key=f"cover_del_{_cli}"):
                         _layers_to_delete.append(_cli)
 
         if _layers_to_delete:
@@ -19564,7 +19564,7 @@ with tab7:
 
         _cov_bc1, _cov_bc2 = st.columns(2)
         with _cov_bc1:
-            if st.button(_t("➕ Tambah Lapisan", "➕ Add Layer"), key="cover_add_layer", width="stretch"):
+            if st.button(_t("Tambah Lapisan", "Add Layer"), key="cover_add_layer", width="stretch"):
                 st.session_state["cover_layers"].append(
                     {"material": "Custom", "thickness_m": 0.3})
                 st.rerun()
@@ -19634,7 +19634,7 @@ with tab7:
                 _mc1, _mc2, _mc3 = st.columns(3)
                 _mc1.metric(_t("Total tebal cover", "Total cover thickness"), f"{_total_t:.2f} m")
                 _mc2.metric(_t("Permeabilitas efektif", "Effective permeability"), f"{_k_eff:.2e} cm/s")
-                _verdict_color = {"AMAN": "🟢", "MARGINAL": "🟡", "PERLU PERKUATAN": "🔴", "N/A": "⚪"}
+                _verdict_color = {"AMAN": "", "MARGINAL": "", "PERLU PERKUATAN": "", "N/A": ""}
                 _mc3.metric(_t("Ketahanan erosi (lapisan atas)", "Erosion resistance (top layer)"),
                             f"{_verdict_color.get(_verdict, '')} {_verdict}")
                 st.caption(_verdict_note)
@@ -19654,7 +19654,7 @@ with tab7:
                     "alternatives, NOT a replacement for formal erosion/slope-stability studies.",
                 ))
 
-                with st.expander(_t("📋 Tabel Lapisan", "📋 Layer Table")):
+                with st.expander(_t("Tabel Lapisan", "Layer Table")):
                     _cov_rows = [
                         [
                             f"{_i + 1}. {_l['material']}",
@@ -19705,7 +19705,7 @@ with tab7:
 
                 # ---------- TERAPKAN COVER KE EROSION MAPPING (link balik) ----------
                 st.markdown("---")
-                st.markdown("**" + _t("🔗 Terapkan cover ini ke Erosion Mapping", "🔗 Apply this cover to Erosion Mapping") + "**")
+                st.markdown("**" + _t("Terapkan cover ini ke Erosion Mapping", "Apply this cover to Erosion Mapping") + "**")
                 _ui_caption(_t(
                     "Cover yang dirancang di atas dikirim ke segmen terpilih: parameter efektif analisis erosi "
                     "(τc/erodibilitas atau kecepatan kritis, dan koefisien runoff C bila hidrolika aktif) mengikuti "
@@ -19770,7 +19770,7 @@ with tab7:
 
                     _ab1, _ab2 = st.columns(2)
                     with _ab1:
-                        st.button(_t("📤 Terapkan ke Erosion Mapping", "📤 Apply to Erosion Mapping"),
+                        st.button(_t("Terapkan ke Erosion Mapping", "Apply to Erosion Mapping"),
                                   key="cover_apply_to_erosion_btn", on_click=_cover_apply_to_erosion_cb,
                                   type="primary", width="stretch")
                     with _ab2:
@@ -19836,7 +19836,7 @@ with tab7:
                     _cov_doc.saveas(_cov_dxf_path)
                     with open(_cov_dxf_path, "rb") as _f_cov_dl:
                         st.download_button(
-                            _t("⬇️ Download DXF Penampang Cover", "⬇️ Download Cover Cross-Section DXF"),
+                            _t("⬇ Download DXF Penampang Cover", "⬇ Download Cover Cross-Section DXF"),
                             data=_f_cov_dl.read(),
                             file_name="Cover_Slope_Design.dxf",
                             mime="application/dxf",
@@ -20142,7 +20142,7 @@ with tab8:
                         with _lc1:
                             st.write(f"• {_lname} ({len(st.session_state['xs_draw_lines'][_lname])} titik)")
                         with _lc2:
-                            if st.button("🗑", key=f"xs_draw_del_{_lname}"):
+                            if st.button("", key=f"xs_draw_del_{_lname}"):
                                 del st.session_state["xs_draw_lines"][_lname]
                                 st.rerun()
                     st.multiselect(
@@ -20273,7 +20273,7 @@ with tab8:
                         # DIAGNOSTIK SEMENTARA: supaya kalau penampang masih belum tampil,
                         # kita tahu PERSIS di langkah mana macetnya (bukan tebak-tebakan lagi).
                         # Aman dihapus/di-nonaktifkan nanti setelah bug ketemu.
-                        with st.expander("🔍 Debug info (Cross Section)", expanded=False):
+                        with st.expander("Debug info (Cross Section)", expanded=False):
                             st.write("section_mode:", section_mode)
                             st.write("xs_draw_lines tersimpan:",
                                      {k: len(v) for k, v in st.session_state.get("xs_draw_lines", {}).items()})
@@ -20453,4 +20453,4 @@ with tab9:
     try:
         _render_fk_tab()
     except Exception as _e_fk_tab:
-        st.error(f"Tab Stabilitas Lereng tidak dapat ditampilkan: {_e_fk_tab}")
+        st.error(f"Tab Stabilitas Channel/Drainage tidak dapat ditampilkan: {_e_fk_tab}")
