@@ -14605,13 +14605,18 @@ with tab1:
 
                         doc.build(story)
 
+                        # PERBAIKAN: sebelumnya st.download_button dipanggil LANGSUNG di sini,
+                        # di dalam blok "if gen_report_run" yang sekali-pakai (di-pop dari
+                        # session_state). Begitu ada rerun berikutnya -- termasuk rerun yang
+                        # dipicu oleh KLIK tombol download itu sendiri -- flag-nya sudah hilang,
+                        # blok ini tidak jalan lagi, dan tombol download pun ikut hilang/gagal
+                        # tampil. Sekarang byte PDF-nya disimpan ke session_state, dan tombol
+                        # download-nya dirender terpisah di luar blok ini (lihat di bawah) supaya
+                        # tetap muncul selama byte-nya ada -- pola yang sama dengan tombol
+                        # "Download Project (.eroproj)" yang sudah terbukti bisa diunduh.
                         with open(pdf_file, "rb") as f:
-                            st.download_button(
-                                label="Download Laporan Teknis Lengkap (PDF)",
-                                data=f,
-                                file_name="Laporan_Teknis_Erosi_Sedimentasi.pdf",
-                                mime="application/pdf"
-                            )
+                            st.session_state["report_pdf_bytes"] = f.read()
+                        st.session_state["report_pdf_name"] = "Laporan_Teknis_Erosi_Sedimentasi.pdf"
 
                         # ============================================================
                         # ================= EXPORT WORD (.docx) =====================
@@ -15208,11 +15213,43 @@ with tab1:
                         docx_buffer = io.BytesIO()
                         docx_doc.save(docx_buffer)
                         docx_buffer.seek(0)
-                        st.download_button(
-                            label="Download Laporan Teknis Lengkap (Word)",
-                            data=docx_buffer,
-                            file_name="Laporan_Teknis_Erosi_Sedimentasi.docx",
-                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                        # Sama seperti PDF di atas: simpan byte-nya ke session_state, jangan
+                        # panggil st.download_button langsung di sini (lihat catatan di bagian PDF).
+                        st.session_state["report_docx_bytes"] = docx_buffer.getvalue()
+                        st.session_state["report_docx_name"] = "Laporan_Teknis_Erosi_Sedimentasi.docx"
+
+                        st.success(_t(
+                            "Laporan berhasil dibuat. Tombol download PDF & Word ada di bawah.",
+                            "Report generated successfully. PDF & Word download buttons are below."
+                        ))
+
+                # ================= TOMBOL DOWNLOAD LAPORAN (PERSISTEN) =================
+                # Dirender di LUAR blok "if gen_report_run" di atas supaya tombolnya tetap
+                # tampil selama byte laporan masih ada di session_state -- tidak hilang lagi
+                # setelah rerun apa pun (klik tombol lain, klik download itu sendiri, dst).
+                _rep_pdf_bytes = st.session_state.get("report_pdf_bytes")
+                _rep_docx_bytes = st.session_state.get("report_docx_bytes")
+                if _rep_pdf_bytes or _rep_docx_bytes:
+                    st.markdown("---")
+                    _sub_header(_t("Download Laporan Teknis", "Download Technical Report"))
+                    _repc1, _repc2 = st.columns(2)
+                    if _rep_pdf_bytes:
+                        _repc1.download_button(
+                            _t("⬇ Download Laporan (PDF)", "⬇ Download Report (PDF)"),
+                            data=_rep_pdf_bytes,
+                            file_name=st.session_state.get("report_pdf_name", "Laporan_Teknis_Erosi_Sedimentasi.pdf"),
+                            mime="application/pdf",
+                            key="dl_report_pdf_persist",
+                            width="stretch",
+                        )
+                    if _rep_docx_bytes:
+                        _repc2.download_button(
+                            _t("⬇ Download Laporan (Word)", "⬇ Download Report (Word)"),
+                            data=_rep_docx_bytes,
+                            file_name=st.session_state.get("report_docx_name", "Laporan_Teknis_Erosi_Sedimentasi.docx"),
+                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            key="dl_report_docx_persist",
+                            width="stretch",
                         )
 
 
