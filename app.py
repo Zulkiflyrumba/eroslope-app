@@ -13190,2085 +13190,2033 @@ with tab1:
                     if not seg_results_all:
                         st.error(_t("Belum ada hasil analisis segmen yang tersimpan. Jalankan analisis dulu.", "No saved segment analysis results yet. Please run the analysis first."))
                     else:
-                        try:
-                            _ui_info(f"Menyusun laporan teknis untuk {len(seg_results_all)} segmen...")
+                        _ui_info(f"Menyusun laporan teknis untuk {len(seg_results_all)} segmen...")
 
-                            # ================= PAGE / STYLE SETUP (format artikel jurnal, A4; peta = landscape) =================
-                            PAGE_W, PAGE_H = A4
-                            LAND_W, LAND_H = landscape(A4)
-                            MARGIN = 2.1 * cm
-                            CONTENT_W = PAGE_W - 2 * MARGIN
-                            LAND_CONTENT_W = LAND_W - 2 * MARGIN
+                        # ================= PAGE / STYLE SETUP (format artikel jurnal, A4; peta = landscape) =================
+                        PAGE_W, PAGE_H = A4
+                        LAND_W, LAND_H = landscape(A4)
+                        MARGIN = 2.1 * cm
+                        CONTENT_W = PAGE_W - 2 * MARGIN
+                        LAND_CONTENT_W = LAND_W - 2 * MARGIN
 
-                            pdf_file = "Executive_Report.pdf"
+                        pdf_file = "Executive_Report.pdf"
 
-                            frame_portrait = Frame(
-                                MARGIN, MARGIN, PAGE_W - 2 * MARGIN, PAGE_H - 2 * MARGIN - 0.4 * cm,
-                                id="portrait_frame", topPadding=0.4 * cm
+                        frame_portrait = Frame(
+                            MARGIN, MARGIN, PAGE_W - 2 * MARGIN, PAGE_H - 2 * MARGIN - 0.4 * cm,
+                            id="portrait_frame", topPadding=0.4 * cm
+                        )
+                        frame_landscape = Frame(
+                            MARGIN, MARGIN, LAND_W - 2 * MARGIN, LAND_H - 2 * MARGIN - 0.4 * cm,
+                            id="landscape_frame", topPadding=0.4 * cm
+                        )
+
+                        def _header_footer_portrait(canvas, doc_):
+                            _draw_header_footer(canvas, doc_, PAGE_W, PAGE_H)
+
+                        def _header_footer_landscape(canvas, doc_):
+                            _draw_header_footer(canvas, doc_, LAND_W, LAND_H)
+
+                        doc = BaseDocTemplate(
+                            pdf_file,
+                            pagesize=A4,
+                            leftMargin=MARGIN, rightMargin=MARGIN,
+                            topMargin=2.3 * cm, bottomMargin=2.2 * cm,
+                            title="Laporan Teknis Analisis Erosi & Sedimentasi",
+                            author="Geotechnical Intelligence Platform"
+                        )
+                        doc.addPageTemplates([
+                            PageTemplate(id="Portrait", frames=[frame_portrait], pagesize=A4, onPage=_header_footer_portrait),
+                            PageTemplate(id="Landscape", frames=[frame_landscape], pagesize=landscape(A4), onPage=_header_footer_landscape),
+                        ])
+
+                        base = getSampleStyleSheet()
+                        styles = {
+                            "Title": ParagraphStyle(
+                                "ArtTitle", parent=base["Title"], fontName="Helvetica-Bold",
+                                fontSize=18, leading=22, alignment=TA_CENTER, spaceAfter=4,
+                                textColor=colors.HexColor("#0B3D2E")
+                            ),
+                            "Subtitle": ParagraphStyle(
+                                "ArtSubtitle", parent=base["Normal"], fontName="Helvetica",
+                                fontSize=9.5, leading=13, alignment=TA_CENTER,
+                                textColor=colors.HexColor("#555555")
+                            ),
+                            "H1": ParagraphStyle(
+                                "ArtH1", parent=base["Heading1"], fontName="Helvetica-Bold",
+                                fontSize=13.5, leading=17, spaceBefore=16, spaceAfter=6,
+                                textColor=colors.HexColor("#0B3D2E"), keepWithNext=1
+                            ),
+                            "H2": ParagraphStyle(
+                                "ArtH2", parent=base["Heading2"], fontName="Helvetica-Bold",
+                                fontSize=10.5, leading=14, spaceBefore=10, spaceAfter=5,
+                                textColor=colors.HexColor("#12523D"), keepWithNext=1
+                            ),
+                            "Body": ParagraphStyle(
+                                "ArtBody", parent=base["BodyText"], fontName="Helvetica",
+                                fontSize=9.3, leading=13.5, alignment=TA_JUSTIFY, spaceAfter=6
+                            ),
+                            "BodyItalic": ParagraphStyle(
+                                "ArtBodyItalic", parent=base["BodyText"], fontName="Helvetica-Oblique",
+                                fontSize=8.8, leading=12.5, alignment=TA_JUSTIFY,
+                                textColor=colors.HexColor("#444444"), spaceAfter=6
+                            ),
+                            "Caption": ParagraphStyle(
+                                "ArtCaption", parent=base["Normal"], fontName="Helvetica-Oblique",
+                                fontSize=8, leading=11, alignment=TA_CENTER,
+                                textColor=colors.HexColor("#666666"), spaceBefore=3, spaceAfter=10
+                            ),
+                            "Bullet": ParagraphStyle(
+                                "ArtBullet", parent=base["BodyText"], fontName="Helvetica",
+                                fontSize=9.1, leading=13, leftIndent=10, spaceAfter=3
+                            ),
+                            "TblHeader": ParagraphStyle(
+                                "TblHeader", parent=base["Normal"], fontName="Helvetica-Bold",
+                                fontSize=7.6, leading=9.5, textColor=colors.white, alignment=TA_LEFT
+                            ),
+                            "TblCell": ParagraphStyle(
+                                "TblCell", parent=base["Normal"], fontName="Helvetica",
+                                fontSize=7.4, leading=9.6, alignment=TA_LEFT
+                            ),
+                            "TblCellBold": ParagraphStyle(
+                                "TblCellBold", parent=base["Normal"], fontName="Helvetica-Bold",
+                                fontSize=7.4, leading=9.6, alignment=TA_LEFT
+                            ),
+                            "StatusBox": ParagraphStyle(
+                                "StatusBox", parent=base["BodyText"], fontName="Helvetica-Bold",
+                                fontSize=11, leading=15, alignment=TA_CENTER, textColor=colors.white
+                            ),
+                            "MetaLabel": ParagraphStyle(
+                                "MetaLabel", parent=base["Normal"], fontName="Helvetica-Bold",
+                                fontSize=8.6, leading=12, textColor=colors.HexColor("#333333")
+                            ),
+                            "MetaVal": ParagraphStyle(
+                                "MetaVal", parent=base["Normal"], fontName="Helvetica",
+                                fontSize=8.6, leading=12, textColor=colors.HexColor("#111111")
+                            ),
+                        }
+
+                        def _p(text, style="Body"):
+                            return Paragraph(text, styles[style])
+
+                        def _divider():
+                            return HRFlowable(
+                                width="100%", thickness=0.8, color=colors.HexColor("#0B3D2E"),
+                                spaceBefore=2, spaceAfter=10
                             )
-                            frame_landscape = Frame(
-                                MARGIN, MARGIN, LAND_W - 2 * MARGIN, LAND_H - 2 * MARGIN - 0.4 * cm,
-                                id="landscape_frame", topPadding=0.4 * cm
+
+                        def _fit_image(path, max_width=CONTENT_W, max_height=None):
+                            """Skala gambar proporsional (tanpa distorsi & tanpa sisa ruang kosong
+                            dari rasio yang dipaksakan) berdasarkan dimensi asli file."""
+                            try:
+                                with PILImage.open(path) as im:
+                                    iw, ih = im.size
+                            except Exception:
+                                return Image(path, width=max_width, height=max_width * 0.6)
+
+                            ratio = ih / iw if iw else 0.6
+                            w = max_width
+                            h = w * ratio
+                            if max_height and h > max_height:
+                                h = max_height
+                                w = h / ratio if ratio else max_width
+                            return Image(path, width=w, height=h)
+
+                        def _img_block(path, caption_text, max_width=CONTENT_W, max_height=None, heading=None):
+                            """Gambar + judul (opsional) + keterangan DIREKATKAN jadi satu unit
+                            (KeepTogether) -- PERBAIKAN untuk keluhan 'ada lembar kosong karena
+                            keterangan gambarnya terpisah': sebelumnya Image dan Paragraph
+                            caption adalah 2 flowable TERPISAH, jadi kalau gambarnya pas-pasan
+                            muat di sisa halaman tapi captionnya tidak, ReportLab taruh gambar
+                            di halaman ini dan caption sendirian di halaman berikutnya (nyaris
+                            kosong). KeepTogether memaksa keduanya (+ judul, kalau ada) selalu
+                            pindah halaman BERSAMA-SAMA, tidak pernah tercerai.
+                            """
+                            parts = []
+                            if heading:
+                                parts.append(Paragraph(heading, styles["H2"]))
+                            parts.append(_fit_image(path, max_width=max_width, max_height=max_height))
+                            if caption_text:
+                                parts.append(Paragraph(caption_text, styles["Caption"]))
+                            return KeepTogether(parts)
+
+                        def _status_box(text, color_hex):
+                            t = Table([[Paragraph(text, styles["StatusBox"])]], colWidths=[CONTENT_W])
+                            t.setStyle(TableStyle([
+                                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(color_hex)),
+                                ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                                ("LEFTPADDING", (0, 0), (-1, -1), 10), ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+                            ]))
+                            return t
+
+                        def _cell_markup(cell):
+                            """Siapkan teks sel tabel untuk ReportLab Paragraph.
+
+                            PERBAIKAN kerapian: di ReportLab, Paragraph memperlakukan isinya
+                            sebagai mini-HTML, sehingga '\\n' TIDAK jadi ganti baris melainkan
+                            luruh jadi spasi -- itulah sebabnya header seperti "Erosi\\n(Ha)"
+                            selama ini menempel jadi satu baris panjang dan kolom jadi melebar
+                            tak beraturan. Di sini '\\n' diterjemahkan ke <br/> yang benar,
+                            sekaligus meng-escape karakter '&', '<', '>' supaya teks rekomendasi
+                            yang memuat karakter tersebut tidak merusak parsing markup.
+                            """
+                            txt = str(cell)
+                            txt = _re_cell_amp.sub("&amp;", txt)
+                            txt = txt.replace("<", "&lt;").replace(">", "&gt;")
+                            return txt.replace("\n", "<br/>")
+
+                        def _wrap_row(row, header=False, bold_cols=None):
+                            bold_cols = bold_cols or []
+                            out = []
+                            for ci, cell in enumerate(row):
+                                txt = _cell_markup(cell)
+                                if header:
+                                    out.append(Paragraph(txt, styles["TblHeader"]))
+                                elif ci in bold_cols:
+                                    out.append(Paragraph(txt, styles["TblCellBold"]))
+                                else:
+                                    out.append(Paragraph(txt, styles["TblCell"]))
+                            return out
+
+                        def _build_table(rows, col_widths, bold_cols=None, highlight_row=None):
+                            """Tabel standar artikel: header hijau tua, isi ter-wrap rapi (tidak overflow),
+                            baris selang-seling, opsional highlight 1 baris (mis. status TARP aktif)."""
+                            wrapped = [_wrap_row(rows[0], header=True)]
+                            for r in rows[1:]:
+                                wrapped.append(_wrap_row(r, bold_cols=bold_cols))
+
+                            t = Table(wrapped, colWidths=col_widths, hAlign="CENTER", repeatRows=1)
+                            cmds = [
+                                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0B3D2E")),
+                                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#BBBBBB")),
+                                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                                ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                                ("TOPPADDING", (0, 0), (-1, -1), 3.5),
+                                ("BOTTOMPADDING", (0, 0), (-1, -1), 3.5),
+                                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F2F6F4")]),
+                            ]
+                            if highlight_row is not None:
+                                cmds.append(("BACKGROUND", (0, highlight_row), (-1, highlight_row), colors.HexColor("#FFE3B0")))
+                            t.setStyle(TableStyle(cmds))
+                            return t
+
+                        def _draw_header_footer(canvas, doc_, page_w, page_h):
+                            canvas.saveState()
+                            canvas.setStrokeColor(colors.HexColor("#0B3D2E"))
+                            canvas.setLineWidth(0.6)
+                            canvas.line(MARGIN, page_h - 1.5 * cm, page_w - MARGIN, page_h - 1.5 * cm)
+                            canvas.setFont("Helvetica", 7.5)
+                            canvas.setFillColor(colors.HexColor("#666666"))
+                            canvas.drawString(MARGIN, page_h - 1.3 * cm, "Laporan Teknis Analisis Erosi & Sedimentasi")
+                            canvas.drawRightString(
+                                page_w - MARGIN, page_h - 1.3 * cm,
+                                pd.Timestamp.now().strftime("%d %B %Y")
                             )
+                            canvas.line(MARGIN, 1.5 * cm, page_w - MARGIN, 1.5 * cm)
+                            canvas.drawString(MARGIN, 1.15 * cm, "Geotechnical Intelligence Platform — Dokumen Hasil Analisis Otomatis")
+                            canvas.drawRightString(page_w - MARGIN, 1.15 * cm, f"Halaman {doc_.page}")
+                            canvas.restoreState()
 
-                            def _header_footer_portrait(canvas, doc_):
-                                _draw_header_footer(canvas, doc_, PAGE_W, PAGE_H)
+                        story = []
 
-                            def _header_footer_landscape(canvas, doc_):
-                                _draw_header_footer(canvas, doc_, LAND_W, LAND_H)
+                        # Mode laporan ringkas: bab metodologi, turunan formula, dan daftar
+                        # referensi dilewati agar laporan langsung ke temuan & rekomendasi.
+                        # Visual (peta, 3D, penampang, tabel temuan) TIDAK dipangkas.
+                        _report_concise = str(st.session_state.get("report_style", "")).startswith(
+                            ("Ringkas", "Concise")
+                        )
 
-                            doc = BaseDocTemplate(
-                                pdf_file,
-                                pagesize=A4,
-                                leftMargin=MARGIN, rightMargin=MARGIN,
-                                topMargin=2.3 * cm, bottomMargin=2.2 * cm,
-                                title="Laporan Teknis Analisis Erosi & Sedimentasi",
-                                author="Geotechnical Intelligence Platform"
+                        rain_meta_global = st.session_state.get("online_rainfall_meta")
+                        rain_val_global = st.session_state.get("online_rainfall")
+
+                        # ===================== COVER / RINGKASAN EKSEKUTIF =====================
+                        story.append(Paragraph("LAPORAN TEKNIS ANALISIS EROSI, SEDIMENTASI &amp; LIMPASAN", styles["Title"]))
+                        story.append(Paragraph("Evaluasi Geoteknik Sekat/Channel Berbasis Model Numerik DXF (DEM, D8, Hidrologi-Hidrolika)", styles["Subtitle"]))
+                        story.append(Spacer(1, 6))
+                        _rp = st.session_state.get("rep_project") or (st.session_state.get("active_project_name") or "-")
+                        _rl = st.session_state.get("rep_location") or "-"
+                        _ra = st.session_state.get("rep_author") or "-"
+                        _rw = st.session_state.get("rep_worktype") or "-"
+                        _meta_rows = [
+                            [Paragraph("Nama proyek/pekerjaan", styles["MetaLabel"]), Paragraph(f": {_rp}", styles["MetaVal"])],
+                            [Paragraph("Lokasi / IUP", styles["MetaLabel"]), Paragraph(f": {_rl}", styles["MetaVal"])],
+                            [Paragraph("Jenis pekerjaan", styles["MetaLabel"]), Paragraph(f": {_rw}", styles["MetaVal"])],
+                            [Paragraph("Penyusun", styles["MetaLabel"]), Paragraph(f": {_ra}", styles["MetaVal"])],
+                            [Paragraph("Tanggal", styles["MetaLabel"]), Paragraph(f": {pd.Timestamp.now().strftime('%d %B %Y, %H:%M')} WIB", styles["MetaVal"])],
+                            [Paragraph("Jumlah segmen dianalisis", styles["MetaLabel"]), Paragraph(f": {len(seg_results_all)}", styles["MetaVal"])],
+                            [Paragraph("Sumber hujan", styles["MetaLabel"]), Paragraph(f": {(rain_meta_global or {}).get('source', 'tidak tersedia')}", styles["MetaVal"])],
+                        ]
+                        _meta_tbl = Table(_meta_rows, colWidths=[CONTENT_W * 0.28, CONTENT_W * 0.72])
+                        _meta_tbl.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("TOPPADDING", (0, 0), (-1, -1), 1.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5)]))
+                        story.append(_meta_tbl)
+                        story.append(Spacer(1, 10))
+                        story.append(_divider())
+
+                        # ===================== PETA LOKASI (DEM, boundary, garis section, titik kritis) =====================
+                        _rep_map_path = os.path.join(tempfile.mkdtemp(), "peta_lokasi.png")
+                        if _rep_location_map(seg_results_all, st.session_state.get("section_results"), _rep_map_path):
+                            story.append(_img_block(
+                                _rep_map_path,
+                                "Gambar 1. Peta lokasi (DEM & hillshade) seluruh segmen yang dianalisis — garis berwarna = boundary segmen, "
+                                "garis kuning = garis Cross Section, segitiga merah = titik risiko terparah per segmen.",
+                                max_width=CONTENT_W, max_height=11 * cm, heading="PETA LOKASI &amp; SEGMEN"
+                            ))
+                            story.append(Spacer(1, 6))
+
+                        # --- ringkasan eksekutif naratif (abstrak) ---
+                        n_seg = len(seg_results_all)
+                        worst_sid, worst_seg = max(seg_results_all.items(), key=lambda kv: kv[1]["max_zone"])
+                        avg_erosion_ratio = np.mean([s["erosion_ratio"] for s in seg_results_all.values()]) * 100
+                        n_reject = sum(
+                            1 for s in seg_results_all.values()
+                            if "REJECT" in (s.get("recommendation") or {}).get("status", "")
+                            or "KRITIS" in (s.get("recommendation") or {}).get("status", "")
+                        )
+
+                        # ============================================================
+                        # ===== DETEKSI SEGMEN OVERLAP (digabung, tidak dobel) ======
+                        # ============================================================
+                        # BARU: kalau boundary sebuah segmen tumpang tindih SIGNIFIKAN (>30%
+                        # dari luasnya sendiri) dengan boundary segmen yang dibuat SETELAHNYA,
+                        # anggap area itu "digantikan" oleh segmen yang lebih baru (asumsi:
+                        # segmen belakangan = revisi/perbaikan desain di area yang sama).
+                        # Segmen yang tergantikan TIDAK ditampilkan sebagai section detail
+                        # penuh terpisah lagi -- supaya laporan tidak dobel/kepanjangan untuk
+                        # area fisik yang sama.
+                        # CATATAN JUJUR: ini bukan penggabungan grid/perhitungan ulang secara
+                        # numerik (2 grid beda resolusi/extent tidak digabung jadi 1 raster
+                        # baru) -- yang digabung adalah PENYAJIAN LAPORANNYA saja. Hasil
+                        # angka yang dipakai untuk area overlap tetap hasil hitungan segmen
+                        # yang menggantikan (lebih baru), sesuai asumsi Anda.
+                        _seg_ids_ordered = list(seg_results_all.keys())
+                        _overridden_by = {}
+                        for _i_a, _sid_a in enumerate(_seg_ids_ordered):
+                            _bnd_a = seg_results_all[_sid_a].get("boundary")
+                            if _bnd_a is None:
+                                continue
+                            if not _bnd_a.is_valid:
+                                _bnd_a = _bnd_a.buffer(0)
+                            if _bnd_a.is_empty or _bnd_a.area <= 0:
+                                continue
+                            for _sid_b in _seg_ids_ordered[_i_a + 1:]:
+                                _bnd_b = seg_results_all[_sid_b].get("boundary")
+                                if _bnd_b is None:
+                                    continue
+                                _bnd_b = _bnd_b if _bnd_b.is_valid else _bnd_b.buffer(0)
+                                try:
+                                    _inter_area = _bnd_a.intersection(_bnd_b).area
+                                except Exception:
+                                    continue
+                                if (_inter_area / _bnd_a.area) > 0.3:
+                                    _overridden_by[_sid_a] = _sid_b
+                                    break
+
+                        # ============================================================
+                        # ===== FILTER: hanya segmen kritis/berpotensi yang detail ===
+                        # ============================================================
+                        # BARU: kalau segmen >= 2, laporan detail penuh cukup untuk segmen
+                        # yang PALING KRITIS + segmen mana pun yang punya status KRITIS/REJECT
+                        # atau area erosi/sedimentasi > 0 (potensi nyata) -- bukan otomatis
+                        # semua segmen. Kalau cuma 1 segmen yang dianalisis, TETAP tampil detail
+                        # penuh apa pun statusnya (tidak ada yang dibandingkan).
+                        _low_priority_skip = set()
+                        if n_seg >= 2:
+                            for _sid_lp, _seg_lp in seg_results_all.items():
+                                if _sid_lp == worst_sid or _sid_lp in _overridden_by:
+                                    continue  # segmen paling kritis & segmen overlap sudah ada aturan sendiri
+                                _status_lp = (_seg_lp.get("recommendation") or {}).get("status", "")
+                                _is_critical_lp = "REJECT" in _status_lp or "KRITIS" in _status_lp
+                                _has_potential_lp = _seg_lp["erosion_area"] > 0 or _seg_lp["sedimentation_area"] > 0
+                                if not _is_critical_lp and not _has_potential_lp:
+                                    _low_priority_skip.add(_sid_lp)
+
+                        story.append(Paragraph("RINGKASAN &amp; KESIMPULAN", styles["H1"]))
+                        _F = _rep_facts(seg_results_all, st.session_state.get("section_results"), rain_meta_global, rain_val_global)
+                        for _p_txt in _rep_summary_paragraphs(_F):
+                            story.append(Paragraph(_p_txt, styles["Body"]))
+                        story.append(Paragraph(
+                            (
+                                f" {len(_overridden_by)} segmen area-nya tumpang tindih dengan segmen lain yang dibuat "
+                                f"belakangan sehingga hasilnya digabung (tidak ditampilkan dobel) — lihat catatan pada "
+                                f"Tabel 1."
+                                if _overridden_by else ""
                             )
-                            doc.addPageTemplates([
-                                PageTemplate(id="Portrait", frames=[frame_portrait], pagesize=A4, onPage=_header_footer_portrait),
-                                PageTemplate(id="Landscape", frames=[frame_landscape], pagesize=landscape(A4), onPage=_header_footer_landscape),
+                            + (
+                                f" {len(_low_priority_skip)} segmen risikonya rendah & tidak menunjukkan potensi erosi/"
+                                f"sedimentasi dibanding segmen lain, jadi ditampilkan ringkas saja (bukan detail penuh) "
+                                f"— lihat catatan pada Tabel 1."
+                                if _low_priority_skip else ""
+                            ) or "Detail metodologi, kalkulasi titik kritis, dan rekomendasi rekayasa disajikan penuh pada bagian berikut.",
+                            styles["Body"]
+                        )) if (_overridden_by or _low_priority_skip) else None
+                        story.append(Spacer(1, 6))
+                        _kes_key, _kes_txt, _kes_col = _F["conclusion"]
+                        story.append(Paragraph("<b>Kesimpulan:</b>", styles["Body"]))
+                        story.append(_status_box(_kes_txt, _kes_col))
+                        story.append(Spacer(1, 10))
+
+                        # tabel ringkasan seluruh segmen (perbandingan)
+                        summary_header = ["Segmen", "Metode", "Erosi\n(Ha)", "Sedimentasi\n(Ha)", "Indeks\nRisiko Maks", "Level TARP"]
+                        summary_rows = [summary_header]
+                        for sid, seg in seg_results_all.items():
+                            tarp_rows_tmp, active_idx_tmp = _tarp_rows(seg["max_zone"])
+                            level_name = tarp_rows_tmp[active_idx_tmp + 1][0].split("  ←")[0] if active_idx_tmp is not None else "-"
+                            _label_disp = seg["label"]
+                            if sid in _overridden_by:
+                                _label_disp += f" (digabung ke {seg_results_all[_overridden_by[sid]]['label']})"
+                            elif sid in _low_priority_skip:
+                                _label_disp += " (ringkas — risiko rendah, lihat catatan)"
+                            summary_rows.append([
+                                _label_disp, seg["analysis_method"],
+                                f"{seg['erosion_area']:.2f}", f"{seg['sedimentation_area']:.2f}",
+                                f"{seg['max_zone']:.2f}", level_name
                             ])
 
-                            base = getSampleStyleSheet()
-                            styles = {
-                                "Title": ParagraphStyle(
-                                    "ArtTitle", parent=base["Title"], fontName="Helvetica-Bold",
-                                    fontSize=18, leading=22, alignment=TA_CENTER, spaceAfter=4,
-                                    textColor=colors.HexColor("#0B3D2E")
-                                ),
-                                "Subtitle": ParagraphStyle(
-                                    "ArtSubtitle", parent=base["Normal"], fontName="Helvetica",
-                                    fontSize=9.5, leading=13, alignment=TA_CENTER,
-                                    textColor=colors.HexColor("#555555")
-                                ),
-                                "H1": ParagraphStyle(
-                                    "ArtH1", parent=base["Heading1"], fontName="Helvetica-Bold",
-                                    fontSize=13.5, leading=17, spaceBefore=16, spaceAfter=6,
-                                    textColor=colors.HexColor("#0B3D2E"), keepWithNext=1
-                                ),
-                                "H2": ParagraphStyle(
-                                    "ArtH2", parent=base["Heading2"], fontName="Helvetica-Bold",
-                                    fontSize=10.5, leading=14, spaceBefore=10, spaceAfter=5,
-                                    textColor=colors.HexColor("#12523D"), keepWithNext=1
-                                ),
-                                "Body": ParagraphStyle(
-                                    "ArtBody", parent=base["BodyText"], fontName="Helvetica",
-                                    fontSize=9.3, leading=13.5, alignment=TA_JUSTIFY, spaceAfter=6
-                                ),
-                                "BodyItalic": ParagraphStyle(
-                                    "ArtBodyItalic", parent=base["BodyText"], fontName="Helvetica-Oblique",
-                                    fontSize=8.8, leading=12.5, alignment=TA_JUSTIFY,
-                                    textColor=colors.HexColor("#444444"), spaceAfter=6
-                                ),
-                                "Caption": ParagraphStyle(
-                                    "ArtCaption", parent=base["Normal"], fontName="Helvetica-Oblique",
-                                    fontSize=8, leading=11, alignment=TA_CENTER,
-                                    textColor=colors.HexColor("#666666"), spaceBefore=3, spaceAfter=10
-                                ),
-                                "Bullet": ParagraphStyle(
-                                    "ArtBullet", parent=base["BodyText"], fontName="Helvetica",
-                                    fontSize=9.1, leading=13, leftIndent=10, spaceAfter=3
-                                ),
-                                "TblHeader": ParagraphStyle(
-                                    "TblHeader", parent=base["Normal"], fontName="Helvetica-Bold",
-                                    fontSize=7.6, leading=9.5, textColor=colors.white, alignment=TA_LEFT
-                                ),
-                                "TblCell": ParagraphStyle(
-                                    "TblCell", parent=base["Normal"], fontName="Helvetica",
-                                    fontSize=7.4, leading=9.6, alignment=TA_LEFT
-                                ),
-                                "TblCellBold": ParagraphStyle(
-                                    "TblCellBold", parent=base["Normal"], fontName="Helvetica-Bold",
-                                    fontSize=7.4, leading=9.6, alignment=TA_LEFT
-                                ),
-                                "StatusBox": ParagraphStyle(
-                                    "StatusBox", parent=base["BodyText"], fontName="Helvetica-Bold",
-                                    fontSize=11, leading=15, alignment=TA_CENTER, textColor=colors.white
-                                ),
-                                "MetaLabel": ParagraphStyle(
-                                    "MetaLabel", parent=base["Normal"], fontName="Helvetica-Bold",
-                                    fontSize=8.6, leading=12, textColor=colors.HexColor("#333333")
-                                ),
-                                "MetaVal": ParagraphStyle(
-                                    "MetaVal", parent=base["Normal"], fontName="Helvetica",
-                                    fontSize=8.6, leading=12, textColor=colors.HexColor("#111111")
-                                ),
+                        story.append(Paragraph("KRITERIA ACUAN", styles["H1"]))
+                        story.append(Paragraph(
+                            "Setiap klasifikasi/ambang pada laporan ini dicatat dasarnya: regulasi, literatur, atau ambang internal (indikatif). "
+                            "Kriteria regulasi yang relevan pada aplikasi ini (Kepmen ESDM 1827 K/30/MEM/2018) mengatur FK/PK kestabilan lereng, "
+                            "BUKAN indeks erosi permukaan -- ambang indeks erosi di bawah ini adalah ambang internal aplikasi dan perlu diselaraskan "
+                            "dengan standar/TARP perusahaan serta validasi lapangan sebelum dipakai untuk keputusan.",
+                            styles["Body"]
+                        ))
+                        # BUG PERBAIKAN: _build_table SUDAH membungkus tiap sel ke Paragraph sendiri (lewat _wrap_row/
+                        # _cell_markup). Mengirim Paragraph yang sudah jadi di sini menyebabkan _cell_markup memanggil
+                        # str(Paragraph) -> menghasilkan repr Python raksasa ("Paragraph('caseSensitive': 1..."), lalu
+                        # dibungkus Paragraph LAGI di kolom sempit -> baris tabel meledak jadi ratusan poin tinggi dan
+                        # reportlab gagal ("... too large on page ... frame 'portrait_frame' ..."). Kirim teks polos saja.
+                        story.append(_build_table(
+                            _rep_criteria_rows(_F, pdf_safe=True),
+                            col_widths=[CONTENT_W * 0.20, CONTENT_W * 0.32, CONTENT_W * 0.14, CONTENT_W * 0.34],
+                        ))
+                        story.append(Spacer(1, 10))
+
+                        story.append(Paragraph("METODOLOGI", styles["H1"]))
+                        for _mh, _mt in _rep_method_paragraphs(_F):
+                            story.append(Paragraph(f"<b>{_mh}.</b> {_mt}", styles["Body"]))
+                        story.append(Spacer(1, 10))
+
+                        story.append(Paragraph("DATA MASUKAN PER SEGMEN", styles["H1"]))
+                        # sama seperti tabel KRITERIA ACUAN di atas -- kirim baris teks polos, jangan pre-wrap Paragraph.
+                        story.append(_build_table(
+                            _rep_input_rows(seg_results_all),
+                            col_widths=[CONTENT_W * 0.16, CONTENT_W * 0.16, CONTENT_W * 0.09, CONTENT_W * 0.10, CONTENT_W * 0.10,
+                                       CONTENT_W * 0.09, CONTENT_W * 0.10, CONTENT_W * 0.09, CONTENT_W * 0.11],
+                        ))
+                        story.append(Spacer(1, 10))
+
+                        story.append(Paragraph("Tabel 1. Ringkasan Perbandingan Antar Segmen", styles["H2"]))
+                        story.append(_build_table(
+                            summary_rows,
+                            col_widths=[CONTENT_W*0.22, CONTENT_W*0.26, CONTENT_W*0.13, CONTENT_W*0.15, CONTENT_W*0.13, CONTENT_W*0.11]
+                        ))
+                        story.append(Paragraph(
+                            "Sumber: hasil RUN ANALYSIS pada platform, tanggal sebagaimana tercantum pada header laporan.",
+                            styles["Caption"]
+                        ))
+                        story.append(Spacer(1, 10))
+
+                        # ===================== TEMUAN UTAMA & TINDAK LANJUT =====================
+                        # Halaman "langsung ke inti": satu tabel padat yang menjawab 4 pertanyaan
+                        # utama pembaca laporan tanpa harus membuka bab detail tiap segmen --
+                        # (1) di mana area berpotensi erosi, (2) di mana potensi sedimentasi,
+                        # (3) di mana titik limpasan/overflow-nya, (4) apa tindakan mitigasinya.
+                        story.append(Paragraph("TEMUAN UTAMA & TINDAK LANJUT", styles["H1"]))
+                        story.append(Paragraph(
+                            "Tabel berikut merangkum lokasi temuan dan tindakan yang perlu diambil per segmen. "
+                            "Koordinat yang dicantumkan adalah titik terparah pada masing-masing kategori "
+                            "(berdasarkan indeks risiko dan kerapatan aliran hasil pemodelan), sehingga bisa "
+                            "langsung dipakai sebagai acuan penentuan lokasi inspeksi dan penanganan lapangan. "
+                            "Uraian metodologi, kalkulasi, dan visual pendukung ada pada bab per segmen.",
+                            styles["Body"]
+                        ))
+                        story.append(Spacer(1, 4))
+
+                        _find_header = [
+                            "Segmen", "Potensi Erosi", "Potensi Sedimentasi",
+                            "Titik Limpasan (Overflow)", "Mitigasi Prioritas"
+                        ]
+                        _find_rows = [_find_header]
+
+                        for _fsid, _fseg in seg_results_all.items():
+                            if _fsid in _overridden_by:
+                                continue  # areanya sudah diwakili segmen lain, jangan dihitung dobel
+
+                            _ftop = _fseg.get("top10_overflow")
+                            _f_has_pts = _ftop is not None and len(_ftop) > 0
+
+                            # --- lokasi titik erosi terparah (risk score tertinggi) ---
+                            if _f_has_pts:
+                                _f_ero_pt = _ftop.sort_values("RiskScore", ascending=False).iloc[0]
+                                _f_ero_loc = f"\nTitik terparah: X {_f_ero_pt['X']:,.0f} / Y {_f_ero_pt['Y']:,.0f}"
+                            else:
+                                _f_ero_loc = ""
+                            _f_ero_txt = (
+                                f"{_fseg['erosion_area']:.2f} Ha "
+                                f"({_fseg['erosion_ratio']*100:.1f}% luas segmen)\n"
+                                f"Indeks risiko maks {_fseg['max_zone']:.2f} / 2.00"
+                                + _f_ero_loc
+                            ) if _fseg["erosion_area"] > 0 else (
+                                f"Tidak signifikan\n"
+                                f"Indeks risiko maks {_fseg['max_zone']:.2f} / 2.00"
+                            )
+
+                            # --- sedimentasi ---
+                            if _fseg["sedimentation_area"] > 0 and _f_has_pts:
+                                _f_sed_sorted = _ftop.sort_values("SedimentProb", ascending=False)
+                                _f_sed_pt = _f_sed_sorted.iloc[0]
+                                _f_sed_loc = f"\nTitik terparah: X {_f_sed_pt['X']:,.0f} / Y {_f_sed_pt['Y']:,.0f}"
+                            else:
+                                _f_sed_loc = ""
+                            _f_sed_txt = (
+                                (f"{_fseg['sedimentation_area']:.2f} Ha" + _f_sed_loc)
+                                if _fseg["sedimentation_area"] > 0
+                                else "Tidak signifikan"
+                            )
+
+                            # --- titik limpasan / overflow ---
+                            if _fseg["overflow_count"] > 0 and _f_has_pts:
+                                _f_ov_pt = _ftop.iloc[0]  # sudah terurut FlowDensity tertinggi
+                                _f_ov_txt = (
+                                    f"{_fseg['overflow_count']} titik terdeteksi\n"
+                                    f"Terparah: X {_f_ov_pt['X']:,.0f} / Y {_f_ov_pt['Y']:,.0f}\n"
+                                    f"v = {_f_ov_pt['Velocity_ms']:.2f} m/s · {_f_ov_pt['JenisRisikoDominan']}"
+                                )
+                            else:
+                                _f_ov_txt = "Tidak ada titik overflow signifikan"
+
+                            # --- mitigasi prioritas: 2 butir teratas dari rekomendasi segmen ---
+                            _f_reco_src = (_fseg.get("ai_recommendation") or {}).get("recommendations") \
+                                or (_fseg.get("recommendation") or {}).get("recommendations") or []
+                            _f_reco_list = [str(_r).strip() for _r in _f_reco_src if str(_r).strip()][:2]
+                            if _f_has_pts and "Rekomendasi" in _ftop.columns:
+                                _f_pt_reco = str(_ftop.iloc[0]["Rekomendasi"]).strip()
+                                if _f_pt_reco and _f_pt_reco not in _f_reco_list:
+                                    _f_reco_list.append(f"Di titik terparah: {_f_pt_reco}")
+                            _f_reco_txt = "\n".join(f"• {_r}" for _r in _f_reco_list) or "—"
+
+                            _f_status = (_fseg.get("recommendation") or {}).get("status", "")
+                            _f_label = _fseg["label"] + (f"\n[{_f_status}]" if _f_status else "")
+
+                            _find_rows.append([
+                                _f_label, _f_ero_txt, _f_sed_txt, _f_ov_txt, _f_reco_txt
+                            ])
+
+                        story.append(Paragraph(
+                            "Tabel 2. Temuan Utama per Segmen — Lokasi & Tindak Lanjut", styles["H2"]
+                        ))
+                        story.append(_build_table(
+                            _find_rows,
+                            col_widths=[CONTENT_W*0.14, CONTENT_W*0.21, CONTENT_W*0.18,
+                                        CONTENT_W*0.21, CONTENT_W*0.26]
+                        ))
+                        story.append(Paragraph(
+                            "Koordinat mengikuti sistem koordinat DXF yang diunggah. Titik terparah ditentukan dari "
+                            "hasil pemodelan, bukan pengukuran lapangan — verifikasi lapangan tetap diperlukan "
+                            "sebelum pelaksanaan pekerjaan.",
+                            styles["Caption"]
+                        ))
+                        story.append(PageBreak())
+
+                        # ===================== CROSS SECTION (jika ada) =====================
+                        # Mendukung banyak garis section sekaligus (hasil fitur "Gambar di
+                        # Peta"), masing-masing dirender bergaya penampang geologi -- badan
+                        # tanah terisi earth-tone, garis elevasi diwarnai rainbow (RdYlGn_r)
+                        # mengikuti indeks risiko erosi di sepanjang sayatan (LineCollection),
+                        # bukan lagi grafik garis polos satu warna.
+                        _report_sections = st.session_state.get("section_results", {})
+                        if not _report_sections and "section_distance" in st.session_state:
+                            # fallback kompatibilitas mundur (sebelum upgrade multi-garis)
+                            _report_sections = {
+                                "Section A-A'": {
+                                    "distance": st.session_state["section_distance"],
+                                    "elevation": st.session_state["section_elevation"],
+                                    "erosion": st.session_state.get("section_erosion"),
+                                }
                             }
 
-                            def _p(text, style="Body"):
-                                return Paragraph(text, styles[style])
+                        if _report_sections:
+                            from matplotlib.collections import LineCollection
+                            import matplotlib.colors as _mcolors_rep
 
-                            def _divider():
-                                return HRFlowable(
-                                    width="100%", thickness=0.8, color=colors.HexColor("#0B3D2E"),
-                                    spaceBefore=2, spaceAfter=10
-                                )
+                            for _sec_i, (_sec_name, _sec_data) in enumerate(_report_sections.items()):
+                                _d = np.asarray(_sec_data["distance"], dtype=float)
+                                _e = np.asarray(_sec_data["elevation"], dtype=float)
+                                _v_raw = _sec_data.get("erosion")
+                                _v = np.asarray(_v_raw, dtype=float) if _v_raw is not None else np.zeros_like(_d)
 
-                            def _fit_image(path, max_width=CONTENT_W, max_height=None):
-                                """Skala gambar proporsional (tanpa distorsi & tanpa sisa ruang kosong
-                                dari rasio yang dipaksakan) berdasarkan dimensi asli file."""
+                                _sec_png = f"CrossSection_{_sec_i}.png"
+                                # Penampang 2-D baru (mesh + kontur rainbow + muka air + strip parameter);
+                                # kalau gagal (data tidak lengkap) jatuh ke gambar garis lama di bawah.
                                 try:
-                                    with PILImage.open(path) as im:
-                                        iw, ih = im.size
+                                    _ok_xs_png = _xs_matplotlib_png(_sec_name, _sec_data, _sec_png)
                                 except Exception:
-                                    return Image(path, width=max_width, height=max_width * 0.6)
+                                    plt.close("all")
+                                    _ok_xs_png = False
+                                if not _ok_xs_png:
+                                    fig_sec, ax_sec = plt.subplots(figsize=(9, 3.6))
+                                    _yspan_r = max(float(np.nanmax(_e) - np.nanmin(_e)), 0.5)
+                                    _floor_r = float(np.nanmin(_e)) - _yspan_r * 0.12
+                                    ax_sec.fill_between(_d, _e, _floor_r, color="#7a5a3b", alpha=0.25, zorder=1)
 
-                                ratio = ih / iw if iw else 0.6
-                                w = max_width
-                                h = w * ratio
-                                if max_height and h > max_height:
-                                    h = max_height
-                                    w = h / ratio if ratio else max_width
-                                return Image(path, width=w, height=h)
+                                    _pts_r = np.array([_d, _e]).T.reshape(-1, 1, 2)
+                                    _segs_r = np.concatenate([_pts_r[:-1], _pts_r[1:]], axis=1)
+                                    _vmin_r, _vmax_r = float(np.nanmin(_v)), float(np.nanmax(_v))
+                                    if _vmax_r <= _vmin_r:
+                                        _vmax_r = _vmin_r + 1e-6
+                                    _norm_r = _mcolors_rep.Normalize(vmin=_vmin_r, vmax=_vmax_r)
+                                    _lc_r = LineCollection(_segs_r, cmap="RdYlGn_r", norm=_norm_r, linewidth=3.2, zorder=3)
+                                    _lc_r.set_array(_v[:-1])
+                                    ax_sec.add_collection(_lc_r)
+                                    ax_sec.plot(_d, _e, color="#2b2016", linewidth=0.5, alpha=0.5, zorder=2)
+                                    _cbar_r = fig_sec.colorbar(_lc_r, ax=ax_sec, pad=0.01)
+                                    _cbar_r.set_label("Indeks Risiko Erosi", fontsize=8)
+                                    _cbar_r.ax.tick_params(labelsize=7)
 
-                            def _img_block(path, caption_text, max_width=CONTENT_W, max_height=None, heading=None):
-                                """Gambar + judul (opsional) + keterangan DIREKATKAN jadi satu unit
-                                (KeepTogether) -- PERBAIKAN untuk keluhan 'ada lembar kosong karena
-                                keterangan gambarnya terpisah': sebelumnya Image dan Paragraph
-                                caption adalah 2 flowable TERPISAH, jadi kalau gambarnya pas-pasan
-                                muat di sisa halaman tapi captionnya tidak, ReportLab taruh gambar
-                                di halaman ini dan caption sendirian di halaman berikutnya (nyaris
-                                kosong). KeepTogether memaksa keduanya (+ judul, kalau ada) selalu
-                                pindah halaman BERSAMA-SAMA, tidak pernah tercerai.
-                                """
-                                parts = []
-                                if heading:
-                                    parts.append(Paragraph(heading, styles["H2"]))
-                                parts.append(_fit_image(path, max_width=max_width, max_height=max_height))
-                                if caption_text:
-                                    parts.append(Paragraph(caption_text, styles["Caption"]))
-                                return KeepTogether(parts)
+                                    ax_sec.set_xlim(float(np.nanmin(_d)), float(np.nanmax(_d)))
+                                    ax_sec.set_ylim(_floor_r, float(np.nanmax(_e)) + _yspan_r * 0.12)
+                                    ax_sec.set_title(f"Cross Section — {_sec_name}", fontsize=11, fontweight="bold")
+                                    ax_sec.set_xlabel("Jarak (m)", fontsize=9)
+                                    ax_sec.set_ylabel("Elevasi (m)", fontsize=9)
+                                    ax_sec.grid(alpha=0.25, linestyle="--", linewidth=0.5)
+                                    ax_sec.tick_params(labelsize=8)
+                                    plt.tight_layout()
+                                    _sec_png = f"CrossSection_{_sec_i}.png"
+                                    plt.savefig(_sec_png, dpi=220)
+                                    plt.close(fig_sec)
 
-                            def _status_box(text, color_hex):
-                                t = Table([[Paragraph(text, styles["StatusBox"])]], colWidths=[CONTENT_W])
-                                t.setStyle(TableStyle([
-                                    ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(color_hex)),
-                                    ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-                                    ("LEFTPADDING", (0, 0), (-1, -1), 10), ("RIGHTPADDING", (0, 0), (-1, -1), 10),
-                                ]))
-                                return t
-
-                            def _cell_markup(cell):
-                                """Siapkan teks sel tabel untuk ReportLab Paragraph.
-
-                                PERBAIKAN kerapian: di ReportLab, Paragraph memperlakukan isinya
-                                sebagai mini-HTML, sehingga '\\n' TIDAK jadi ganti baris melainkan
-                                luruh jadi spasi -- itulah sebabnya header seperti "Erosi\\n(Ha)"
-                                selama ini menempel jadi satu baris panjang dan kolom jadi melebar
-                                tak beraturan. Di sini '\\n' diterjemahkan ke <br/> yang benar,
-                                sekaligus meng-escape karakter '&', '<', '>' supaya teks rekomendasi
-                                yang memuat karakter tersebut tidak merusak parsing markup.
-                                """
-                                txt = str(cell)
-                                txt = _re_cell_amp.sub("&amp;", txt)
-                                txt = txt.replace("<", "&lt;").replace(">", "&gt;")
-                                return txt.replace("\n", "<br/>")
-
-                            def _wrap_row(row, header=False, bold_cols=None):
-                                bold_cols = bold_cols or []
-                                out = []
-                                for ci, cell in enumerate(row):
-                                    txt = _cell_markup(cell)
-                                    if header:
-                                        out.append(Paragraph(txt, styles["TblHeader"]))
-                                    elif ci in bold_cols:
-                                        out.append(Paragraph(txt, styles["TblCellBold"]))
-                                    else:
-                                        out.append(Paragraph(txt, styles["TblCell"]))
-                                return out
-
-                            def _build_table(rows, col_widths, bold_cols=None, highlight_row=None):
-                                """Tabel standar artikel: header hijau tua, isi ter-wrap rapi (tidak overflow),
-                                baris selang-seling, opsional highlight 1 baris (mis. status TARP aktif)."""
-                                wrapped = [_wrap_row(rows[0], header=True)]
-                                for r in rows[1:]:
-                                    wrapped.append(_wrap_row(r, bold_cols=bold_cols))
-
-                                t = Table(wrapped, colWidths=col_widths, hAlign="CENTER", repeatRows=1)
-                                cmds = [
-                                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0B3D2E")),
-                                    ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#BBBBBB")),
-                                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                                    ("LEFTPADDING", (0, 0), (-1, -1), 4),
-                                    ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-                                    ("TOPPADDING", (0, 0), (-1, -1), 3.5),
-                                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3.5),
-                                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F2F6F4")]),
-                                ]
-                                if highlight_row is not None:
-                                    cmds.append(("BACKGROUND", (0, highlight_row), (-1, highlight_row), colors.HexColor("#FFE3B0")))
-                                t.setStyle(TableStyle(cmds))
-                                return t
-
-                            def _draw_header_footer(canvas, doc_, page_w, page_h):
-                                canvas.saveState()
-                                canvas.setStrokeColor(colors.HexColor("#0B3D2E"))
-                                canvas.setLineWidth(0.6)
-                                canvas.line(MARGIN, page_h - 1.5 * cm, page_w - MARGIN, page_h - 1.5 * cm)
-                                canvas.setFont("Helvetica", 7.5)
-                                canvas.setFillColor(colors.HexColor("#666666"))
-                                canvas.drawString(MARGIN, page_h - 1.3 * cm, "Laporan Teknis Analisis Erosi & Sedimentasi")
-                                canvas.drawRightString(
-                                    page_w - MARGIN, page_h - 1.3 * cm,
-                                    pd.Timestamp.now().strftime("%d %B %Y")
-                                )
-                                canvas.line(MARGIN, 1.5 * cm, page_w - MARGIN, 1.5 * cm)
-                                canvas.drawString(MARGIN, 1.15 * cm, "Geotechnical Intelligence Platform — Dokumen Hasil Analisis Otomatis")
-                                canvas.drawRightString(page_w - MARGIN, 1.15 * cm, f"Halaman {doc_.page}")
-                                canvas.restoreState()
-
-                            story = []
-
-                            # Mode laporan ringkas: bab metodologi, turunan formula, dan daftar
-                            # referensi dilewati agar laporan langsung ke temuan & rekomendasi.
-                            # Visual (peta, 3D, penampang, tabel temuan) TIDAK dipangkas.
-                            _report_concise = str(st.session_state.get("report_style", "")).startswith(
-                                ("Ringkas", "Concise")
-                            )
-
-                            rain_meta_global = st.session_state.get("online_rainfall_meta")
-                            rain_val_global = st.session_state.get("online_rainfall")
-
-                            # ===================== COVER / RINGKASAN EKSEKUTIF =====================
-                            story.append(Paragraph("LAPORAN TEKNIS ANALISIS EROSI, SEDIMENTASI &amp; LIMPASAN", styles["Title"]))
-                            story.append(Paragraph("Evaluasi Geoteknik Sekat/Channel Berbasis Model Numerik DXF (DEM, D8, Hidrologi-Hidrolika)", styles["Subtitle"]))
-                            story.append(Spacer(1, 6))
-                            _rp = st.session_state.get("rep_project") or (st.session_state.get("active_project_name") or "-")
-                            _rl = st.session_state.get("rep_location") or "-"
-                            _ra = st.session_state.get("rep_author") or "-"
-                            _rw = st.session_state.get("rep_worktype") or "-"
-                            _meta_rows = [
-                                [Paragraph("Nama proyek/pekerjaan", styles["MetaLabel"]), Paragraph(f": {_rp}", styles["MetaVal"])],
-                                [Paragraph("Lokasi / IUP", styles["MetaLabel"]), Paragraph(f": {_rl}", styles["MetaVal"])],
-                                [Paragraph("Jenis pekerjaan", styles["MetaLabel"]), Paragraph(f": {_rw}", styles["MetaVal"])],
-                                [Paragraph("Penyusun", styles["MetaLabel"]), Paragraph(f": {_ra}", styles["MetaVal"])],
-                                [Paragraph("Tanggal", styles["MetaLabel"]), Paragraph(f": {pd.Timestamp.now().strftime('%d %B %Y, %H:%M')} WIB", styles["MetaVal"])],
-                                [Paragraph("Jumlah segmen dianalisis", styles["MetaLabel"]), Paragraph(f": {len(seg_results_all)}", styles["MetaVal"])],
-                                [Paragraph("Sumber hujan", styles["MetaLabel"]), Paragraph(f": {(rain_meta_global or {}).get('source', 'tidak tersedia')}", styles["MetaVal"])],
-                            ]
-                            _meta_tbl = Table(_meta_rows, colWidths=[CONTENT_W * 0.28, CONTENT_W * 0.72])
-                            _meta_tbl.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("TOPPADDING", (0, 0), (-1, -1), 1.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5)]))
-                            story.append(_meta_tbl)
-                            story.append(Spacer(1, 10))
-                            story.append(_divider())
-
-                            # ===================== PETA LOKASI (DEM, boundary, garis section, titik kritis) =====================
-                            _rep_map_path = os.path.join(tempfile.mkdtemp(), "peta_lokasi.png")
-                            if _rep_location_map(seg_results_all, st.session_state.get("section_results"), _rep_map_path):
                                 story.append(_img_block(
-                                    _rep_map_path,
-                                    "Gambar 1. Peta lokasi (DEM & hillshade) seluruh segmen yang dianalisis — garis berwarna = boundary segmen, "
-                                    "garis kuning = garis Cross Section, segitiga merah = titik risiko terparah per segmen.",
-                                    max_width=CONTENT_W, max_height=11 * cm, heading="PETA LOKASI &amp; SEGMEN"
+                                    _sec_png,
+                                    f"Gambar {_sec_i + 1}. Penampang melintang {_sec_name} — mesh berlapis mengikuti "
+                                    f"topografi dengan kontur warna (biru=rendah, merah=tinggi) dari parameter hasil "
+                                    f"analisis; warna di bawah permukaan adalah ilustrasi zona pengaruh (bukan data "
+                                    f"terukur), biru muda = muka air, abu-abu = di luar batas analisis, bintang = nilai maksimum. "
+                                    f"Strip di bawah menampilkan parameter lain sepanjang sayatan.",
+                                    max_width=CONTENT_W, max_height=12 * cm,
+                                    heading="PENAMPANG MELINTANG (CROSS SECTION)" if _sec_i == 0 else None,
                                 ))
-                                story.append(Spacer(1, 6))
-
-                            # --- ringkasan eksekutif naratif (abstrak) ---
-                            n_seg = len(seg_results_all)
-                            worst_sid, worst_seg = max(seg_results_all.items(), key=lambda kv: kv[1]["max_zone"])
-                            avg_erosion_ratio = np.mean([s["erosion_ratio"] for s in seg_results_all.values()]) * 100
-                            n_reject = sum(
-                                1 for s in seg_results_all.values()
-                                if "REJECT" in (s.get("recommendation") or {}).get("status", "")
-                                or "KRITIS" in (s.get("recommendation") or {}).get("status", "")
-                            )
-
-                            # ============================================================
-                            # ===== DETEKSI SEGMEN OVERLAP (digabung, tidak dobel) ======
-                            # ============================================================
-                            # BARU: kalau boundary sebuah segmen tumpang tindih SIGNIFIKAN (>30%
-                            # dari luasnya sendiri) dengan boundary segmen yang dibuat SETELAHNYA,
-                            # anggap area itu "digantikan" oleh segmen yang lebih baru (asumsi:
-                            # segmen belakangan = revisi/perbaikan desain di area yang sama).
-                            # Segmen yang tergantikan TIDAK ditampilkan sebagai section detail
-                            # penuh terpisah lagi -- supaya laporan tidak dobel/kepanjangan untuk
-                            # area fisik yang sama.
-                            # CATATAN JUJUR: ini bukan penggabungan grid/perhitungan ulang secara
-                            # numerik (2 grid beda resolusi/extent tidak digabung jadi 1 raster
-                            # baru) -- yang digabung adalah PENYAJIAN LAPORANNYA saja. Hasil
-                            # angka yang dipakai untuk area overlap tetap hasil hitungan segmen
-                            # yang menggantikan (lebih baru), sesuai asumsi Anda.
-                            _seg_ids_ordered = list(seg_results_all.keys())
-                            _overridden_by = {}
-                            for _i_a, _sid_a in enumerate(_seg_ids_ordered):
-                                _bnd_a = seg_results_all[_sid_a].get("boundary")
-                                if _bnd_a is None:
-                                    continue
-                                if not _bnd_a.is_valid:
-                                    _bnd_a = _bnd_a.buffer(0)
-                                if _bnd_a.is_empty or _bnd_a.area <= 0:
-                                    continue
-                                for _sid_b in _seg_ids_ordered[_i_a + 1:]:
-                                    _bnd_b = seg_results_all[_sid_b].get("boundary")
-                                    if _bnd_b is None:
-                                        continue
-                                    _bnd_b = _bnd_b if _bnd_b.is_valid else _bnd_b.buffer(0)
-                                    try:
-                                        _inter_area = _bnd_a.intersection(_bnd_b).area
-                                    except Exception:
-                                        continue
-                                    if (_inter_area / _bnd_a.area) > 0.3:
-                                        _overridden_by[_sid_a] = _sid_b
-                                        break
-
-                            # ============================================================
-                            # ===== FILTER: hanya segmen kritis/berpotensi yang detail ===
-                            # ============================================================
-                            # BARU: kalau segmen >= 2, laporan detail penuh cukup untuk segmen
-                            # yang PALING KRITIS + segmen mana pun yang punya status KRITIS/REJECT
-                            # atau area erosi/sedimentasi > 0 (potensi nyata) -- bukan otomatis
-                            # semua segmen. Kalau cuma 1 segmen yang dianalisis, TETAP tampil detail
-                            # penuh apa pun statusnya (tidak ada yang dibandingkan).
-                            _low_priority_skip = set()
-                            if n_seg >= 2:
-                                for _sid_lp, _seg_lp in seg_results_all.items():
-                                    if _sid_lp == worst_sid or _sid_lp in _overridden_by:
-                                        continue  # segmen paling kritis & segmen overlap sudah ada aturan sendiri
-                                    _status_lp = (_seg_lp.get("recommendation") or {}).get("status", "")
-                                    _is_critical_lp = "REJECT" in _status_lp or "KRITIS" in _status_lp
-                                    _has_potential_lp = _seg_lp["erosion_area"] > 0 or _seg_lp["sedimentation_area"] > 0
-                                    if not _is_critical_lp and not _has_potential_lp:
-                                        _low_priority_skip.add(_sid_lp)
-
-                            story.append(Paragraph("RINGKASAN &amp; KESIMPULAN", styles["H1"]))
-                            _F = _rep_facts(seg_results_all, st.session_state.get("section_results"), rain_meta_global, rain_val_global)
-                            for _p_txt in _rep_summary_paragraphs(_F):
-                                story.append(Paragraph(_p_txt, styles["Body"]))
-                            story.append(Paragraph(
-                                (
-                                    f" {len(_overridden_by)} segmen area-nya tumpang tindih dengan segmen lain yang dibuat "
-                                    f"belakangan sehingga hasilnya digabung (tidak ditampilkan dobel) — lihat catatan pada "
-                                    f"Tabel 1."
-                                    if _overridden_by else ""
-                                )
-                                + (
-                                    f" {len(_low_priority_skip)} segmen risikonya rendah & tidak menunjukkan potensi erosi/"
-                                    f"sedimentasi dibanding segmen lain, jadi ditampilkan ringkas saja (bukan detail penuh) "
-                                    f"— lihat catatan pada Tabel 1."
-                                    if _low_priority_skip else ""
-                                ) or "Detail metodologi, kalkulasi titik kritis, dan rekomendasi rekayasa disajikan penuh pada bagian berikut.",
-                                styles["Body"]
-                            )) if (_overridden_by or _low_priority_skip) else None
-                            story.append(Spacer(1, 6))
-                            _kes_key, _kes_txt, _kes_col = _F["conclusion"]
-                            story.append(Paragraph("<b>Kesimpulan:</b>", styles["Body"]))
-                            story.append(_status_box(_kes_txt, _kes_col))
-                            story.append(Spacer(1, 10))
-
-                            # tabel ringkasan seluruh segmen (perbandingan)
-                            summary_header = ["Segmen", "Metode", "Erosi\n(Ha)", "Sedimentasi\n(Ha)", "Indeks\nRisiko Maks", "Level TARP"]
-                            summary_rows = [summary_header]
-                            for sid, seg in seg_results_all.items():
-                                tarp_rows_tmp, active_idx_tmp = _tarp_rows(seg["max_zone"])
-                                level_name = tarp_rows_tmp[active_idx_tmp + 1][0].split("  ←")[0] if active_idx_tmp is not None else "-"
-                                _label_disp = seg["label"]
-                                if sid in _overridden_by:
-                                    _label_disp += f" (digabung ke {seg_results_all[_overridden_by[sid]]['label']})"
-                                elif sid in _low_priority_skip:
-                                    _label_disp += " (ringkas — risiko rendah, lihat catatan)"
-                                summary_rows.append([
-                                    _label_disp, seg["analysis_method"],
-                                    f"{seg['erosion_area']:.2f}", f"{seg['sedimentation_area']:.2f}",
-                                    f"{seg['max_zone']:.2f}", level_name
-                                ])
-
-                            story.append(Paragraph("KRITERIA ACUAN", styles["H1"]))
-                            story.append(Paragraph(
-                                "Setiap klasifikasi/ambang pada laporan ini dicatat dasarnya: regulasi, literatur, atau ambang internal (indikatif). "
-                                "Kriteria regulasi yang relevan pada aplikasi ini (Kepmen ESDM 1827 K/30/MEM/2018) mengatur FK/PK kestabilan lereng, "
-                                "BUKAN indeks erosi permukaan -- ambang indeks erosi di bawah ini adalah ambang internal aplikasi dan perlu diselaraskan "
-                                "dengan standar/TARP perusahaan serta validasi lapangan sebelum dipakai untuk keputusan.",
-                                styles["Body"]
-                            ))
-                            story.append(_build_table(
-                                [[Paragraph(c, styles["TblHeader"]) for c in _rep_criteria_rows(_F, pdf_safe=True)[0]]]
-                                + [[Paragraph(_ascii_glyphs(c) if isinstance(c, str) else c, styles["TblCell"]) for c in r] for r in _rep_criteria_rows(_F, pdf_safe=True)[1:]],
-                                col_widths=[CONTENT_W * 0.20, CONTENT_W * 0.32, CONTENT_W * 0.14, CONTENT_W * 0.34],
-                            ))
-                            story.append(Spacer(1, 10))
-
-                            story.append(Paragraph("METODOLOGI", styles["H1"]))
-                            for _mh, _mt in _rep_method_paragraphs(_F):
-                                story.append(Paragraph(f"<b>{_mh}.</b> {_mt}", styles["Body"]))
-                            story.append(Spacer(1, 10))
-
-                            story.append(Paragraph("DATA MASUKAN PER SEGMEN", styles["H1"]))
-                            story.append(_build_table(
-                                [[Paragraph(c, styles["TblHeader"]) for c in _rep_input_rows(seg_results_all)[0]]]
-                                + [[Paragraph(str(c), styles["TblCell"]) for c in r] for r in _rep_input_rows(seg_results_all)[1:]],
-                                col_widths=[CONTENT_W * 0.16, CONTENT_W * 0.16, CONTENT_W * 0.09, CONTENT_W * 0.10, CONTENT_W * 0.10,
-                                           CONTENT_W * 0.09, CONTENT_W * 0.10, CONTENT_W * 0.09, CONTENT_W * 0.11],
-                            ))
-                            story.append(Spacer(1, 10))
-
-                            story.append(Paragraph("Tabel 1. Ringkasan Perbandingan Antar Segmen", styles["H2"]))
-                            story.append(_build_table(
-                                summary_rows,
-                                col_widths=[CONTENT_W*0.22, CONTENT_W*0.26, CONTENT_W*0.13, CONTENT_W*0.15, CONTENT_W*0.13, CONTENT_W*0.11]
-                            ))
-                            story.append(Paragraph(
-                                "Sumber: hasil RUN ANALYSIS pada platform, tanggal sebagaimana tercantum pada header laporan.",
-                                styles["Caption"]
-                            ))
-                            story.append(Spacer(1, 10))
-
-                            # ===================== TEMUAN UTAMA & TINDAK LANJUT =====================
-                            # Halaman "langsung ke inti": satu tabel padat yang menjawab 4 pertanyaan
-                            # utama pembaca laporan tanpa harus membuka bab detail tiap segmen --
-                            # (1) di mana area berpotensi erosi, (2) di mana potensi sedimentasi,
-                            # (3) di mana titik limpasan/overflow-nya, (4) apa tindakan mitigasinya.
-                            story.append(Paragraph("TEMUAN UTAMA & TINDAK LANJUT", styles["H1"]))
-                            story.append(Paragraph(
-                                "Tabel berikut merangkum lokasi temuan dan tindakan yang perlu diambil per segmen. "
-                                "Koordinat yang dicantumkan adalah titik terparah pada masing-masing kategori "
-                                "(berdasarkan indeks risiko dan kerapatan aliran hasil pemodelan), sehingga bisa "
-                                "langsung dipakai sebagai acuan penentuan lokasi inspeksi dan penanganan lapangan. "
-                                "Uraian metodologi, kalkulasi, dan visual pendukung ada pada bab per segmen.",
-                                styles["Body"]
-                            ))
-                            story.append(Spacer(1, 4))
-
-                            _find_header = [
-                                "Segmen", "Potensi Erosi", "Potensi Sedimentasi",
-                                "Titik Limpasan (Overflow)", "Mitigasi Prioritas"
-                            ]
-                            _find_rows = [_find_header]
-
-                            for _fsid, _fseg in seg_results_all.items():
-                                if _fsid in _overridden_by:
-                                    continue  # areanya sudah diwakili segmen lain, jangan dihitung dobel
-
-                                _ftop = _fseg.get("top10_overflow")
-                                _f_has_pts = _ftop is not None and len(_ftop) > 0
-
-                                # --- lokasi titik erosi terparah (risk score tertinggi) ---
-                                if _f_has_pts:
-                                    _f_ero_pt = _ftop.sort_values("RiskScore", ascending=False).iloc[0]
-                                    _f_ero_loc = f"\nTitik terparah: X {_f_ero_pt['X']:,.0f} / Y {_f_ero_pt['Y']:,.0f}"
-                                else:
-                                    _f_ero_loc = ""
-                                _f_ero_txt = (
-                                    f"{_fseg['erosion_area']:.2f} Ha "
-                                    f"({_fseg['erosion_ratio']*100:.1f}% luas segmen)\n"
-                                    f"Indeks risiko maks {_fseg['max_zone']:.2f} / 2.00"
-                                    + _f_ero_loc
-                                ) if _fseg["erosion_area"] > 0 else (
-                                    f"Tidak signifikan\n"
-                                    f"Indeks risiko maks {_fseg['max_zone']:.2f} / 2.00"
-                                )
-
-                                # --- sedimentasi ---
-                                if _fseg["sedimentation_area"] > 0 and _f_has_pts:
-                                    _f_sed_sorted = _ftop.sort_values("SedimentProb", ascending=False)
-                                    _f_sed_pt = _f_sed_sorted.iloc[0]
-                                    _f_sed_loc = f"\nTitik terparah: X {_f_sed_pt['X']:,.0f} / Y {_f_sed_pt['Y']:,.0f}"
-                                else:
-                                    _f_sed_loc = ""
-                                _f_sed_txt = (
-                                    (f"{_fseg['sedimentation_area']:.2f} Ha" + _f_sed_loc)
-                                    if _fseg["sedimentation_area"] > 0
-                                    else "Tidak signifikan"
-                                )
-
-                                # --- titik limpasan / overflow ---
-                                if _fseg["overflow_count"] > 0 and _f_has_pts:
-                                    _f_ov_pt = _ftop.iloc[0]  # sudah terurut FlowDensity tertinggi
-                                    _f_ov_txt = (
-                                        f"{_fseg['overflow_count']} titik terdeteksi\n"
-                                        f"Terparah: X {_f_ov_pt['X']:,.0f} / Y {_f_ov_pt['Y']:,.0f}\n"
-                                        f"v = {_f_ov_pt['Velocity_ms']:.2f} m/s · {_f_ov_pt['JenisRisikoDominan']}"
-                                    )
-                                else:
-                                    _f_ov_txt = "Tidak ada titik overflow signifikan"
-
-                                # --- mitigasi prioritas: 2 butir teratas dari rekomendasi segmen ---
-                                _f_reco_src = (_fseg.get("ai_recommendation") or {}).get("recommendations") \
-                                    or (_fseg.get("recommendation") or {}).get("recommendations") or []
-                                _f_reco_list = [str(_r).strip() for _r in _f_reco_src if str(_r).strip()][:2]
-                                if _f_has_pts and "Rekomendasi" in _ftop.columns:
-                                    _f_pt_reco = str(_ftop.iloc[0]["Rekomendasi"]).strip()
-                                    if _f_pt_reco and _f_pt_reco not in _f_reco_list:
-                                        _f_reco_list.append(f"Di titik terparah: {_f_pt_reco}")
-                                _f_reco_txt = "\n".join(f"• {_r}" for _r in _f_reco_list) or "—"
-
-                                _f_status = (_fseg.get("recommendation") or {}).get("status", "")
-                                _f_label = _fseg["label"] + (f"\n[{_f_status}]" if _f_status else "")
-
-                                _find_rows.append([
-                                    _f_label, _f_ero_txt, _f_sed_txt, _f_ov_txt, _f_reco_txt
-                                ])
-
-                            story.append(Paragraph(
-                                "Tabel 2. Temuan Utama per Segmen — Lokasi & Tindak Lanjut", styles["H2"]
-                            ))
-                            story.append(_build_table(
-                                _find_rows,
-                                col_widths=[CONTENT_W*0.14, CONTENT_W*0.21, CONTENT_W*0.18,
-                                            CONTENT_W*0.21, CONTENT_W*0.26]
-                            ))
-                            story.append(Paragraph(
-                                "Koordinat mengikuti sistem koordinat DXF yang diunggah. Titik terparah ditentukan dari "
-                                "hasil pemodelan, bukan pengukuran lapangan — verifikasi lapangan tetap diperlukan "
-                                "sebelum pelaksanaan pekerjaan.",
-                                styles["Caption"]
-                            ))
                             story.append(PageBreak())
 
-                            # ===================== CROSS SECTION (jika ada) =====================
-                            # Mendukung banyak garis section sekaligus (hasil fitur "Gambar di
-                            # Peta"), masing-masing dirender bergaya penampang geologi -- badan
-                            # tanah terisi earth-tone, garis elevasi diwarnai rainbow (RdYlGn_r)
-                            # mengikuti indeks risiko erosi di sepanjang sayatan (LineCollection),
-                            # bukan lagi grafik garis polos satu warna.
-                            _report_sections = st.session_state.get("section_results", {})
-                            if not _report_sections and "section_distance" in st.session_state:
-                                # fallback kompatibilitas mundur (sebelum upgrade multi-garis)
-                                _report_sections = {
-                                    "Section A-A'": {
-                                        "distance": st.session_state["section_distance"],
-                                        "elevation": st.session_state["section_elevation"],
-                                        "erosion": st.session_state.get("section_erosion"),
-                                    }
-                                }
-
-                            if _report_sections:
-                                from matplotlib.collections import LineCollection
-                                import matplotlib.colors as _mcolors_rep
-
-                                for _sec_i, (_sec_name, _sec_data) in enumerate(_report_sections.items()):
-                                    _d = np.asarray(_sec_data["distance"], dtype=float)
-                                    _e = np.asarray(_sec_data["elevation"], dtype=float)
-                                    _v_raw = _sec_data.get("erosion")
-                                    _v = np.asarray(_v_raw, dtype=float) if _v_raw is not None else np.zeros_like(_d)
-
-                                    _sec_png = f"CrossSection_{_sec_i}.png"
-                                    # Penampang 2-D baru (mesh + kontur rainbow + muka air + strip parameter);
-                                    # kalau gagal (data tidak lengkap) jatuh ke gambar garis lama di bawah.
-                                    try:
-                                        _ok_xs_png = _xs_matplotlib_png(_sec_name, _sec_data, _sec_png)
-                                    except Exception:
-                                        plt.close("all")
-                                        _ok_xs_png = False
-                                    if not _ok_xs_png:
-                                        fig_sec, ax_sec = plt.subplots(figsize=(9, 3.6))
-                                        _yspan_r = max(float(np.nanmax(_e) - np.nanmin(_e)), 0.5)
-                                        _floor_r = float(np.nanmin(_e)) - _yspan_r * 0.12
-                                        ax_sec.fill_between(_d, _e, _floor_r, color="#7a5a3b", alpha=0.25, zorder=1)
-
-                                        _pts_r = np.array([_d, _e]).T.reshape(-1, 1, 2)
-                                        _segs_r = np.concatenate([_pts_r[:-1], _pts_r[1:]], axis=1)
-                                        _vmin_r, _vmax_r = float(np.nanmin(_v)), float(np.nanmax(_v))
-                                        if _vmax_r <= _vmin_r:
-                                            _vmax_r = _vmin_r + 1e-6
-                                        _norm_r = _mcolors_rep.Normalize(vmin=_vmin_r, vmax=_vmax_r)
-                                        _lc_r = LineCollection(_segs_r, cmap="RdYlGn_r", norm=_norm_r, linewidth=3.2, zorder=3)
-                                        _lc_r.set_array(_v[:-1])
-                                        ax_sec.add_collection(_lc_r)
-                                        ax_sec.plot(_d, _e, color="#2b2016", linewidth=0.5, alpha=0.5, zorder=2)
-                                        _cbar_r = fig_sec.colorbar(_lc_r, ax=ax_sec, pad=0.01)
-                                        _cbar_r.set_label("Indeks Risiko Erosi", fontsize=8)
-                                        _cbar_r.ax.tick_params(labelsize=7)
-
-                                        ax_sec.set_xlim(float(np.nanmin(_d)), float(np.nanmax(_d)))
-                                        ax_sec.set_ylim(_floor_r, float(np.nanmax(_e)) + _yspan_r * 0.12)
-                                        ax_sec.set_title(f"Cross Section — {_sec_name}", fontsize=11, fontweight="bold")
-                                        ax_sec.set_xlabel("Jarak (m)", fontsize=9)
-                                        ax_sec.set_ylabel("Elevasi (m)", fontsize=9)
-                                        ax_sec.grid(alpha=0.25, linestyle="--", linewidth=0.5)
-                                        ax_sec.tick_params(labelsize=8)
-                                        plt.tight_layout()
-                                        _sec_png = f"CrossSection_{_sec_i}.png"
-                                        plt.savefig(_sec_png, dpi=220)
-                                        plt.close(fig_sec)
-
-                                    story.append(_img_block(
-                                        _sec_png,
-                                        f"Gambar {_sec_i + 1}. Penampang melintang {_sec_name} — mesh berlapis mengikuti "
-                                        f"topografi dengan kontur warna (biru=rendah, merah=tinggi) dari parameter hasil "
-                                        f"analisis; warna di bawah permukaan adalah ilustrasi zona pengaruh (bukan data "
-                                        f"terukur), biru muda = muka air, abu-abu = di luar batas analisis, bintang = nilai maksimum. "
-                                        f"Strip di bawah menampilkan parameter lain sepanjang sayatan.",
-                                        max_width=CONTENT_W, max_height=12 * cm,
-                                        heading="PENAMPANG MELINTANG (CROSS SECTION)" if _sec_i == 0 else None,
-                                    ))
-                                story.append(PageBreak())
-
-                            # ============================================================
-                            # ===== NUMERICAL MODELLING (3D) -- HASIL GABUNGAN (SEKALI) =====
-                            # ============================================================
-                            # PERBAIKAN: dulu ditampilkan per-segmen (Main + tiap sub-boundary
-                            # sendiri-sendiri, 3 sudut pandang setiap kali) -- untuk proyek multi-
-                            # segmen ini bikin laporan sangat panjang & terpecah, padahal Scene 3D
-                            # Gabungan (semua segmen sudah menyatu jadi satu model, sub-boundary
-                            # menimpa area overlap Main) jauh lebih relevan dan representatif.
-                            # Kalau cuma ada 1 segmen (tidak ada sub-boundary), fallback ke 3
-                            # sudut pandang chart individual segmen itu seperti sebelumnya.
-                            _combo_3d_path = st.session_state.get("combined_3d_scene_path")
-                            if _combo_3d_path and os.path.exists(_combo_3d_path):
-                                story.append(Paragraph("NUMERICAL MODELLING (3D) — HASIL GABUNGAN SEMUA SEGMEN", styles["H1"]))
+                        # ============================================================
+                        # ===== NUMERICAL MODELLING (3D) -- HASIL GABUNGAN (SEKALI) =====
+                        # ============================================================
+                        # PERBAIKAN: dulu ditampilkan per-segmen (Main + tiap sub-boundary
+                        # sendiri-sendiri, 3 sudut pandang setiap kali) -- untuk proyek multi-
+                        # segmen ini bikin laporan sangat panjang & terpecah, padahal Scene 3D
+                        # Gabungan (semua segmen sudah menyatu jadi satu model, sub-boundary
+                        # menimpa area overlap Main) jauh lebih relevan dan representatif.
+                        # Kalau cuma ada 1 segmen (tidak ada sub-boundary), fallback ke 3
+                        # sudut pandang chart individual segmen itu seperti sebelumnya.
+                        _combo_3d_path = st.session_state.get("combined_3d_scene_path")
+                        if _combo_3d_path and os.path.exists(_combo_3d_path):
+                            story.append(Paragraph("NUMERICAL MODELLING (3D) — HASIL GABUNGAN SEMUA SEGMEN", styles["H1"]))
+                            story.append(_divider())
+                            story.append(_img_block(
+                                _combo_3d_path,
+                                "Gambar 1. Scene 3D Gabungan seluruh segmen (Main + sub-boundary) — tiap "
+                                "sub-boundary menimpa area yang tumpang tindih dengan Main/segmen sebelumnya, "
+                                "sehingga mesh rainbow (indeks risiko) yang tampil pada area tsb murni hasil "
+                                "segmen yang paling akhir dibuat.",
+                                max_width=CONTENT_W, max_height=11 * cm,
+                            ))
+                            story.append(Spacer(1, 8))
+                        elif n_seg == 1:
+                            _only_sid, _only_seg = next(iter(seg_results_all.items()))
+                            _num_views_solo = _only_seg.get("numerical_modelling_views") or {}
+                            if any(_num_views_solo.get(k) for k in ("overall", "critical_point", "alternate")):
+                                story.append(Paragraph(f"NUMERICAL MODELLING (3D) — {_only_seg['label'].upper()}", styles["H1"]))
                                 story.append(_divider())
-                                story.append(_img_block(
-                                    _combo_3d_path,
-                                    "Gambar 1. Scene 3D Gabungan seluruh segmen (Main + sub-boundary) — tiap "
-                                    "sub-boundary menimpa area yang tumpang tindih dengan Main/segmen sebelumnya, "
-                                    "sehingga mesh rainbow (indeks risiko) yang tampil pada area tsb murni hasil "
-                                    "segmen yang paling akhir dibuat.",
-                                    max_width=CONTENT_W, max_height=11 * cm,
+                                _view_labels_solo = {
+                                    "overall": "(a) Tampilan Keseluruhan (Overall)",
+                                    "critical_point": "(b) Tampilan Mengarah ke Titik Paling Kritis",
+                                    "alternate": "(c) Tampilan Sudut Lain",
+                                }
+                                for _vk in ("overall", "critical_point", "alternate"):
+                                    _vp = _num_views_solo.get(_vk)
+                                    if _vp:
+                                        story.append(_img_block(_vp, None, max_width=CONTENT_W,
+                                                                 max_height=7 * cm, heading=_view_labels_solo[_vk]))
+                                        story.append(Spacer(1, 6))
+                                story.append(Paragraph(
+                                    f"Gambar 1. Hasil Numerical Modelling 3D {_only_seg['label']} dari tiga sudut "
+                                    "pandang: keseluruhan model, terarah ke titik prioritas mitigasi paling kritis, "
+                                    "dan sudut pandang lain sebagai pembanding bentuk model.",
+                                    styles["Caption"]
                                 ))
                                 story.append(Spacer(1, 8))
-                            elif n_seg == 1:
-                                _only_sid, _only_seg = next(iter(seg_results_all.items()))
-                                _num_views_solo = _only_seg.get("numerical_modelling_views") or {}
-                                if any(_num_views_solo.get(k) for k in ("overall", "critical_point", "alternate")):
-                                    story.append(Paragraph(f"NUMERICAL MODELLING (3D) — {_only_seg['label'].upper()}", styles["H1"]))
-                                    story.append(_divider())
-                                    _view_labels_solo = {
-                                        "overall": "(a) Tampilan Keseluruhan (Overall)",
-                                        "critical_point": "(b) Tampilan Mengarah ke Titik Paling Kritis",
-                                        "alternate": "(c) Tampilan Sudut Lain",
-                                    }
-                                    for _vk in ("overall", "critical_point", "alternate"):
-                                        _vp = _num_views_solo.get(_vk)
-                                        if _vp:
-                                            story.append(_img_block(_vp, None, max_width=CONTENT_W,
-                                                                     max_height=7 * cm, heading=_view_labels_solo[_vk]))
-                                            story.append(Spacer(1, 6))
-                                    story.append(Paragraph(
-                                        f"Gambar 1. Hasil Numerical Modelling 3D {_only_seg['label']} dari tiga sudut "
-                                        "pandang: keseluruhan model, terarah ke titik prioritas mitigasi paling kritis, "
-                                        "dan sudut pandang lain sebagai pembanding bentuk model.",
-                                        styles["Caption"]
-                                    ))
-                                    story.append(Spacer(1, 8))
 
-                            # ===================== PER-SEGMEN =====================
-                            for seg_i, (sid, seg) in enumerate(seg_results_all.items()):
+                        # ===================== PER-SEGMEN =====================
+                        for seg_i, (sid, seg) in enumerate(seg_results_all.items()):
 
-                                if sid in _overridden_by:
-                                    # Area segmen ini tumpang tindih signifikan dengan segmen yang dibuat
-                                    # belakangan -- tidak ditampilkan sebagai section detail penuh terpisah
-                                    # (supaya laporan tidak dobel untuk area fisik yang sama). Cukup catatan
-                                    # singkat + arahan ke segmen penggantinya.
-                                    _override_target = seg_results_all[_overridden_by[sid]]
-                                    story.append(Paragraph(f"{seg_i + 1}. SEGMEN: {seg['label'].upper()}", styles["H1"]))
-                                    story.append(_divider())
-                                    story.append(Paragraph(
-                                        f"Boundary segmen ini tumpang tindih signifikan dengan <b>{_override_target['label']}</b> "
-                                        f"(dibuat setelah segmen ini). Mengikuti asumsi bahwa segmen yang dibuat belakangan "
-                                        f"merepresentasikan kondisi/desain terbaru untuk area yang sama, hasil analisis detail "
-                                        f"untuk area tumpang-tindih ini DIGABUNG ke bagian <b>{_override_target['label']}</b> "
-                                        f"(lihat bagian tersebut) — tidak ditampilkan dobel di sini.",
-                                        styles["Body"]
-                                    ))
-                                    story.append(Spacer(1, 10))
-                                    continue
-
-                                if sid in _low_priority_skip:
-                                    # BARU: segmen ini risikonya rendah & tidak menunjukkan potensi
-                                    # erosi/sedimentasi nyata dibanding segmen lain -- cukup ringkasan
-                                    # singkat (angka sudah ada di Tabel 1), tidak perlu detail penuh
-                                    # berhalaman-halaman untuk segmen yang bukan prioritas.
-                                    story.append(Paragraph(f"{seg_i + 1}. SEGMEN: {seg['label'].upper()}", styles["H1"]))
-                                    story.append(_divider())
-                                    story.append(Paragraph(
-                                        f"Indeks risiko maksimum segmen ini ({seg['max_zone']:.2f}) relatif rendah "
-                                        f"dibanding segmen lain, dan tidak menunjukkan area berpotensi erosi/sedimentasi "
-                                        f"nyata (lihat Tabel 1 pada Ringkasan Eksekutif). Detail analisis penuh "
-                                        f"(metodologi, titik kritis, rekomendasi) tidak ditampilkan di sini untuk menjaga "
-                                        f"laporan tetap fokus pada segmen prioritas — tersedia kembali lewat aplikasi "
-                                        f"kalau sewaktu-waktu diperlukan.",
-                                        styles["Body"]
-                                    ))
-                                    story.append(Spacer(1, 10))
-                                    continue
-
+                            if sid in _overridden_by:
+                                # Area segmen ini tumpang tindih signifikan dengan segmen yang dibuat
+                                # belakangan -- tidak ditampilkan sebagai section detail penuh terpisah
+                                # (supaya laporan tidak dobel untuk area fisik yang sama). Cukup catatan
+                                # singkat + arahan ke segmen penggantinya.
+                                _override_target = seg_results_all[_overridden_by[sid]]
                                 story.append(Paragraph(f"{seg_i + 1}. SEGMEN: {seg['label'].upper()}", styles["H1"]))
                                 story.append(_divider())
-
-                                # --- data & parameter input ---
-                                param_rows = [
-                                    ["Parameter", "Nilai"],
-                                    ["Jenis kondisi", seg["design_type"]],
-                                    ["Metode analisis", seg["analysis_method"]],
-                                    ["Luas area (Ha)", f"{seg['boundary_area_ha']:.2f}"],
-                                    ["Ukuran butir (grain size)", f"{seg['grain_size_mm']:.3f} mm"],
-                                    ["Kecepatan aliran representatif", f"{seg['velocity_hulu']:.3f} m/s"],
-                                    ["Tegangan geser kritis (tau_critical)", f"{seg['tau_critical']:.3f}"],
-                                    ["Faktor hujan ekstrem", f"{seg['rain_factor']:.2f}x"],
-                                    ["Hujan desain terpakai", f"{seg['online_rainfall']:.2f} mm/hari" if seg.get("online_rainfall") else "tidak tersedia"],
-                                    ["Sumber hujan", (seg.get('online_rainfall_meta') or {}).get('source', '-')],
-                                ]
-                                _qr = seg.get("quant") or {}
-                                if _qr.get("rusle"):
-                                    param_rows.append(["Erosivitas hujan R / K / C / P", f"{_qr['rusle']['R']:.0f} / {_qr['K']:.2f} / {_qr['C']:.2f} / {_qr['P']:.2f}"])
-                                    param_rows.append(["Kehilangan tanah rata-rata (RUSLE)", f"{_qr['rusle']['mean_tha']:.1f} ton/ha/th (P95 {_qr['rusle']['p95_tha']:.1f})"])
-                                    param_rows.append(["Sedimen ke kolam (RUSLE x SDR)", f"{_qr['rusle']['sed_yield_t_yr']:.0f} ton/th (~{_qr['rusle']['sed_vol_m3_yr']:.0f} m3/th)"])
-                                if _qr.get("event"):
-                                    param_rows.append(["Hujan rencana R24 / limpasan", f"{_qr['event']['p_mm']:.0f} mm / {_qr['event']['q_mm']:.1f} mm"])
-                                    param_rows.append(["Sedimen event (MUSLE) / TSS", f"{_qr['event']['y_ton']:.0f} ton / {_qr['event']['tss_mg_l']:,.0f} mg/L"])
-                                if _qr.get("pond"):
-                                    param_rows.append(["Kolam pengendap minimum", f"{_qr['pond']['length_m']:.0f} x {_qr['pond']['width_m']:.0f} m; V total {_qr['pond']['vol_total_m3']:,.0f} m3 (d target {_qr['pond']['d_mm']:.3f} mm)"])
-                                cd = seg.get("contour_diag") or {}
-                                if cd:
-                                    param_rows.append(["Titik kontur DXF terbaca", f"{cd.get('n_raw_points', '-')}"])
-                                    param_rows.append(["Titik blunder terdeteksi", f"{cd.get('n_blunder_points', 0)}"])
-
-                                story.append(Paragraph("Data & Parameter Input", styles["H2"]))
-                                story.append(_build_table(param_rows, col_widths=[CONTENT_W*0.45, CONTENT_W*0.55]))
-
-                                if cd.get("all_z_zero"):
-                                    story.append(Spacer(1, 4))
-                                    story.append(Paragraph(
-                                        "<b>PERINGATAN:</b> Semua titik kontur input pada segmen ini memiliki elevasi Z=0. "
-                                        "Hasil surface 3D dan analisis pada segmen ini berpotensi TIDAK MEWAKILI kondisi "
-                                        "topografi aktual. Disarankan verifikasi ulang data DXF sumber.",
-                                        styles["Body"]
-                                    ))
-                                story.append(Spacer(1, 6))
-
-                                # --- hidrologi & hidrolika (jika diaktifkan) ---
-                                hydro = seg.get("hydraulics_result")
-                                if seg.get("use_hydraulics") and hydro:
-                                    story.append(Paragraph("Hidrologi &amp; Hidrolika (Rational Method + Manning's Equation)", styles["H2"]))
-                                    hydro_rows = [
-                                        ["Parameter", "Nilai"],
-                                        ["Intensitas hujan (Mononobe)", f"{hydro['intensity_mm_hr']:.1f} mm/jam"],
-                                        ["Debit rencana Q (Rational Method)", f"{hydro['q_design_m3s']:.3f} m3/s"],
-                                        ["Kedalaman normal h (Manning's)", f"{hydro['h_normal_m']:.3f} m"],
-                                        ["Kecepatan normal V (Manning's)", f"{hydro['v_normal_ms']:.3f} m/s"],
-                                        ["Froude Number", f"{hydro['froude']:.2f} - {hydro['flow_regime']}" if hydro.get("froude") else "-"],
-                                        ["Freeboard tersedia", f"{hydro['freeboard_m']:.2f} m"],
-                                        ["Freeboard minimum disarankan", f"{hydro['min_freeboard_m']:.2f} m"],
-                                        ["Status freeboard", "CUKUP" if hydro["freeboard_ok"] else "KURANG — perlu redesain tinggi/lebar channel"],
-                                    ]
-                                    story.append(_build_table(
-                                        hydro_rows, col_widths=[CONTENT_W*0.5, CONTENT_W*0.5],
-                                        highlight_row=8
-                                    ))
-                                    story.append(Paragraph(
-                                        "Kecepatan aliran &amp; kedalaman pada analisis erosi segmen ini dihitung dari hasil "
-                                        "Manning's Equation di atas (bukan input manual), diturunkan dari debit rencana Metode "
-                                        "Rasional dengan intensitas hujan estimasi rumus Mononobe.",
-                                        styles["BodyItalic"]
-                                    ))
-                                    story.append(Spacer(1, 6))
-
-                                # --- Sebaran Risk Index (10 titik prioritas mitigasi) ---
-                                # Gambar ini sebelumnya hanya tampil di layar (bagian "Numerical Modelling"
-                                # di app) dan tidak pernah ikut masuk ke laporan PDF.
-                                if seg.get("risk_index_chart_path"):
-                                    story.append(_img_block(
-                                        seg["risk_index_chart_path"],
-                                        f"Gambar {seg_i + 2}b. Sebaran nilai Risk Index pada 10 titik prioritas mitigasi "
-                                        f"untuk {seg['label']}, dikelompokkan berdasarkan jenis risiko dominan.",
-                                        max_width=CONTENT_W, max_height=8.5 * cm,
-                                        heading="Sebaran Risk Index — 10 Titik Prioritas Mitigasi",
-                                    ))
-                                    story.append(Spacer(1, 8))
-
-                                # --- Numerical Modelling (3D) per-segmen ---
-                                # DIKEMBALIKAN atas permintaan: selain Scene 3D Gabungan (satu kali, di
-                                # awal laporan), tiap segmen yang tampil detail penuh di sini JUGA dapat
-                                # 3 sudut pandang modelnya sendiri -- supaya bentuk 3D spesifik segmen ini
-                                # (sebelum ditimpa/digabung ke scene gabungan) tetap bisa dilihat terpisah.
-                                _num_views_seg = seg.get("numerical_modelling_views") or {}
-                                if any(_num_views_seg.get(k) for k in ("overall", "critical_point", "alternate")):
-                                    story.append(Paragraph(f"NUMERICAL MODELLING (3D) — {seg['label'].upper()}", styles["H1"]))
-                                    story.append(_divider())
-                                    _view_labels_seg = {
-                                        "overall": "(a) Tampilan Keseluruhan (Overall)",
-                                        "critical_point": "(b) Tampilan Mengarah ke Titik Paling Kritis",
-                                        "alternate": "(c) Tampilan Sudut Lain",
-                                    }
-                                    for _vk in ("overall", "critical_point", "alternate"):
-                                        _vp = _num_views_seg.get(_vk)
-                                        if _vp:
-                                            story.append(_img_block(
-                                                _vp, None, max_width=CONTENT_W, max_height=7 * cm,
-                                                heading=_view_labels_seg[_vk],
-                                            ))
-                                            story.append(Spacer(1, 6))
-                                    story.append(Paragraph(
-                                        f"Gambar {seg_i + 2}c. Hasil Numerical Modelling 3D {seg['label']} dari tiga sudut "
-                                        "pandang: keseluruhan model, terarah ke titik prioritas mitigasi paling kritis "
-                                        "(FlowDensity tertinggi), dan sudut pandang lain sebagai pembanding bentuk model.",
-                                        styles["Caption"]
-                                    ))
-                                    story.append(Spacer(1, 8))
-
-                                # --- 2D Risk Map ---
-                                if seg.get("risk_map_2d_path"):
-                                    story.append(_img_block(
-                                        seg["risk_map_2d_path"],
-                                        f"Gambar {seg_i + 2}d. 2D Risk Map {seg['label']}: garis kontur DXF, boundary area, "
-                                        "sebaran titik erosi, titik overflow, dan zona konvergensi aliran.",
-                                        max_width=CONTENT_W, max_height=10.5 * cm,
-                                        heading="2D Risk Map",
-                                    ))
-                                    story.append(Spacer(1, 8))
-
-                                # --- peta risiko (ringkas, portrait) ---
-                                map_path = f"Erosion_Map_{sid}.png"
-                                # PERBAIKAN: peta ini mahal untuk dibangun (hillshade + citra
-                                # satelit/orthophoto). Kalau file dari generate laporan
-                                # sebelumnya masih ada dan belum ada RUN ANALYSIS baru,
-                                # pakai file lama -- jangan dibangun ulang tiap kali laporan
-                                # digenerate ulang (mis. cuma ganti opsi Ringkas/Lengkap).
-                                if run_button_clicked or not os.path.exists(map_path):
-                                    _build_segment_map_png(seg, map_path)
-                                story.append(_img_block(
-                                    map_path,
-                                    f"Gambar {seg_i + 2}. Peta risiko erosi (kontur merah-hijau), potensi sedimentasi (biru), "
-                                    f"hillshade topografi, dan boundary area untuk {seg['label']}. Versi peta komposit "
-                                    f"lengkap (klasifikasi + grafik + model 3D) disajikan menyusul di bawah.",
-                                    max_width=CONTENT_W, max_height=10.5 * cm,
-                                    heading="Peta Risiko Erosi & Sedimentasi",
-                                ))
-
-                                # --- peta komposit (dipadatkan ke portrait, tidak lagi lembar landscape
-                                # terpisah -- supaya tidak ada lembar nyaris kosong yang memisahkan diri
-                                # dari konten lain) ---
-                                composite_path = f"Composite_Map_{sid}.png"
-                                # PERBAIKAN: sama seperti peta risiko di atas -- peta komposit
-                                # (klasifikasi + grafik + 3D) ini berat, jadi dipakai ulang
-                                # dari generate sebelumnya kalau belum ada RUN ANALYSIS baru.
-                                if run_button_clicked or not os.path.exists(composite_path):
-                                    _build_segment_composite_map_png(seg, composite_path)
-
-                                story.append(_img_block(
-                                    composite_path,
-                                    f"Gambar {seg_i + 2}a. Peta komposit {seg['label']}: klasifikasi risiko erosi/sedimentasi "
-                                    "4 kelas (kiri), grafik luas per kategori (kanan atas), topografi hillshade & zoom titik "
-                                    "kritis (kanan tengah), dan model permukaan 3D berwarna indeks risiko (kanan bawah).",
-                                    max_width=CONTENT_W, max_height=11 * cm,
-                                    heading=f"LEMBAR PETA — SEBARAN POTENSI EROSI & SEDIMENTASI: {seg['label'].upper()}",
+                                story.append(Paragraph(
+                                    f"Boundary segmen ini tumpang tindih signifikan dengan <b>{_override_target['label']}</b> "
+                                    f"(dibuat setelah segmen ini). Mengikuti asumsi bahwa segmen yang dibuat belakangan "
+                                    f"merepresentasikan kondisi/desain terbaru untuk area yang sama, hasil analisis detail "
+                                    f"untuk area tumpang-tindih ini DIGABUNG ke bagian <b>{_override_target['label']}</b> "
+                                    f"(lihat bagian tersebut) — tidak ditampilkan dobel di sini.",
+                                    styles["Body"]
                                 ))
                                 story.append(Spacer(1, 10))
+                                continue
 
-                                # --- metodologi & formula ---
-                                # Pada mode laporan RINGKAS, bab uraian metodologi & turunan
-                                # formula dilewati supaya laporan langsung ke temuan, lokasi,
-                                # dan rekomendasi. Seluruh visual (peta, 3D, penampang) tetap
-                                # dilampirkan penuh -- yang dipangkas hanya teks panjangnya.
-                                if not _report_concise:
-                                    story.append(Paragraph("Metodologi & Formula", styles["H2"]))
-                                    if seg["analysis_method"] == "Hjulstrom Diagram":
-                                        story.append(Paragraph(
-                                            "Klasifikasi risiko erosi/deposisi menggunakan pendekatan diagram Hjulström, yang "
-                                            "membandingkan kecepatan aliran aktual terhadap ambang kecepatan erosi dan deposisi "
-                                            "sebagai fungsi diameter butir sedimen (d, dalam meter). <i>Catatan keterbatasan: "
-                                            "pendekatan power-law ini tidak menangkap efek kohesi pada material lempung/lanau "
-                                            "halus (&lt;0,1 mm), di mana kurva Hjulström asli menunjukkan partikel sangat halus "
-                                            "justru lebih tahan erosi karena kohesi.</i>",
-                                            styles["Body"]
-                                        ))
-                                        f1_path = f"formula_verosion_{sid}.png"
-                                        f2_path = f"formula_vdep_{sid}.png"
-                                        f3_path = f"formula_score_{sid}.png"
-                                        _render_formula_png(r"v_{erosion} = 0.1 \times d^{-0.4}", f1_path)
-                                        _render_formula_png(r"v_{deposition} = 0.01 \times d^{-0.2}", f2_path)
-                                        _render_formula_png(
-                                            r"Skor = clip\left(2 \times \frac{v - v_{deposition}}{v_{erosion} - v_{deposition}},\ 0,\ 2\right)",
-                                            f3_path
-                                        )
-                                        story.append(_fit_image(f1_path, max_width=CONTENT_W*0.55))
-                                        story.append(_fit_image(f2_path, max_width=CONTENT_W*0.55))
-                                        story.append(_fit_image(f3_path, max_width=CONTENT_W*0.85))
-                                        story.append(Paragraph(
-                                            "Skor 0 = zona deposisi dominan, skor 2 = zona erosi ekstrem. Nilai d dikonversi "
-                                            "dari mm ke meter sebelum dihitung.",
-                                            styles["Body"]
-                                        ))
-                                    elif seg["analysis_method"] == "Shields Diagram":
-                                        story.append(Paragraph(
-                                            "Klasifikasi mobilitas sedimen menggunakan parameter Shields tak berdimensi (θ), yang "
-                                            "membandingkan gaya penggerak aliran terhadap gaya penahan berat butiran terendam "
-                                            "(Shields, 1936). Tegangan geser dasar dihitung memakai depth-slope product (dengan "
-                                            "kedalaman aliran h), bukan hanya kemiringan S — koreksi ini penting karena tanpa "
-                                            "suku h, tau0 tidak bersatuan Pascal yang valid secara dimensional.",
-                                            styles["Body"]
-                                        ))
-                                        fs1_path = f"formula_tau0_shields_{sid}.png"
-                                        fs2_path = f"formula_theta_{sid}.png"
-                                        _render_formula_png(r"\tau_0 = \rho_w \times g \times h \times S", fs1_path)
-                                        _render_formula_png(
-                                            r"\theta = \frac{\tau_0}{(\rho_s - \rho_w) \times g \times D_{50}}",
-                                            fs2_path
-                                        )
-                                        story.append(_fit_image(fs1_path, max_width=CONTENT_W*0.55))
-                                        story.append(_fit_image(fs2_path, max_width=CONTENT_W*0.65))
-                                        story.append(Paragraph(
-                                            f"dengan tau0 tegangan geser dasar aktual (N/m²), h = kedalaman aliran = "
-                                            f"{seg['flow_depth']:.2f} m, ρw dan ρs densitas air dan sedimen (kg/m³), g = 9,81 m/s², "
-                                            f"dan D50 diameter butiran median (mm). Klasifikasi: θ &lt; 0,03 → stabil/deposisi "
-                                            "(skor 0); 0,03 ≤ θ &lt; 0,06 → transisi (skor 1); θ ≥ 0,06 → erosi aktif (skor 2).",
-                                            styles["Body"]
-                                        ))
-                                    elif seg["analysis_method"] == "Partheniades + Flow Accumulation":
-                                        story.append(Paragraph(
-                                            "Laju erosi dihitung sebagai fungsi linear selisih tegangan geser aktual terhadap "
-                                            "tegangan geser kritis material (Partheniades, 1965), dikombinasikan dengan bobot "
-                                            "flow accumulation ternormalisasi untuk merepresentasikan efek konsentrasi aliran.",
-                                            styles["Body"]
-                                        ))
-                                        fp1_path = f"formula_tau0_parth_{sid}.png"
-                                        fp2_path = f"formula_erate_{sid}.png"
-                                        fp3_path = f"formula_riskidx_{sid}.png"
-                                        _render_formula_png(r"\tau_0 = \rho_w \times g \times h \times S", fp1_path)
-                                        _render_formula_png(
-                                            r"E = M \times \left(\frac{\tau_0}{\tau_c} - 1\right),\ \ untuk\ \tau_0 > \tau_c",
-                                            fp2_path
-                                        )
-                                        _render_formula_png(
-                                            r"RiskIndex = clip\left(\frac{E \times FlowAccum_{norm}}{P_{99}(E \times FlowAccum_{norm})},\ 0,\ 2\right)",
-                                            fp3_path, fontsize=12
-                                        )
-                                        story.append(_fit_image(fp1_path, max_width=CONTENT_W*0.55))
-                                        story.append(_fit_image(fp2_path, max_width=CONTENT_W*0.75))
-                                        story.append(_fit_image(fp3_path, max_width=CONTENT_W*0.9))
-                                        story.append(Paragraph(
-                                            f"dengan h = kedalaman aliran = {seg['flow_depth']:.2f} m, M = koefisien erodibilitas "
-                                            f"= {seg['erodibility_M']:.4f} kg/m²·s, tauC = tegangan geser kritis = "
-                                            f"{seg['tau_critical']:.3f} N/m². Apabila tau0 ≤ tauC, laju erosi E diasumsikan nol (zona "
-                                            "stabil/deposisi). RiskIndex dinormalisasi terhadap persentil ke-99 hasil kali laju "
-                                            "erosi dengan flow accumulation ternormalisasi, lalu di-clip ke rentang [0,2].",
-                                            styles["Body"]
-                                        ))
-                                    else:
-                                        story.append(Paragraph(
-                                            f"Metode analisis yang digunakan pada segmen ini: <b>{seg['analysis_method']}</b>. "
-                                            "Formula detail mengikuti definisi standar metode tersebut sebagaimana diterapkan pada modul.",
-                                            styles["Body"]
-                                        ))
-
-                                # --- perhitungan titik paling kritis ---
-                                story.append(Paragraph("Perhitungan pada Titik Paling Kritis", styles["H2"]))
-                                top10 = seg["top10_overflow"]
-                                if top10 is not None and len(top10) > 0:
-                                    crit = top10.iloc[0]
-                                    if seg["analysis_method"] == "Hjulstrom Diagram":
-                                        d_m = seg["grain_size_mm"] / 1000.0 + 1e-6
-                                        v_ero_crit = 0.1 * (d_m ** -0.4)
-                                        v_dep_crit = 0.01 * (d_m ** -0.2)
-                                        v_actual = crit.get("Velocity_ms", float("nan"))
-                                        story.append(Paragraph(
-                                            f"Titik kritis berada pada koordinat X={crit['X']:.2f}, Y={crit['Y']:.2f}, "
-                                            f"elevasi (RL)={crit['RL']:.2f} m, dengan skor risiko = {crit.get('RiskScore', float('nan')):.2f}. "
-                                            f"Diameter butir d = {seg['grain_size_mm']:.3f} mm = {d_m:.6f} m. "
-                                            f"v_erosion = 0,1 × ({d_m:.6f})^-0,4 = <b>{v_ero_crit:.4f} m/s</b>. "
-                                            f"v_deposition = 0,01 × ({d_m:.6f})^-0,2 = <b>{v_dep_crit:.4f} m/s</b>. "
-                                            f"Kecepatan aliran aktual pada titik ini = <b>{v_actual:.4f} m/s</b>. "
-                                            + (
-                                                "Kecepatan aktual MELEBIHI ambang erosi → titik ini aktif tererosi."
-                                                if v_actual >= v_ero_crit else
-                                                "Kecepatan aktual berada di bawah ambang deposisi → titik ini cenderung deposisi."
-                                                if v_actual <= v_dep_crit else
-                                                "Kecepatan aktual berada di zona transisi (antara ambang deposisi dan erosi)."
-                                            ),
-                                            styles["Body"]
-                                        ))
-                                    elif seg["analysis_method"] == "Shields Diagram":
-                                        g_grav = 9.81
-                                        d_m = seg["grain_size_mm"] / 1000.0 + 1e-9
-                                        slope_at_crit = float(crit.get("Slope", 0.0))
-                                        h_for_crit = seg.get("flow_depth", 0.3)
-                                        tau0_crit = seg["rho_water"] * g_grav * h_for_crit * slope_at_crit
-                                        theta_crit = tau0_crit / (
-                                            (seg["rho_soil"] - seg["rho_water"]) * g_grav * d_m + 1e-9
-                                        )
-                                        theta_class = (
-                                            "stabil/deposisi (θ &lt; 0,03)" if theta_crit < 0.03 else
-                                            "transisi (0,03 ≤ θ &lt; 0,06)" if theta_crit < 0.06 else
-                                            "erosi aktif (θ ≥ 0,06)"
-                                        )
-                                        story.append(Paragraph(
-                                            f"Titik kritis pada koordinat X={crit['X']:.2f}, Y={crit['Y']:.2f}, "
-                                            f"RL={crit['RL']:.2f} m, kemiringan lokal S={slope_at_crit:.4f} m/m, "
-                                            f"kedalaman aliran h={h_for_crit:.2f} m. "
-                                            f"tau0 = {seg['rho_water']:.0f} × 9,81 × {h_for_crit:.2f} × {slope_at_crit:.4f} = "
-                                            f"<b>{tau0_crit:.4f} N/m²</b>. "
-                                            f"θ = {tau0_crit:.4f} / [({seg['rho_soil']:.0f} − {seg['rho_water']:.0f}) × 9,81 × "
-                                            f"{d_m:.6f}] = <b>{theta_crit:.4f}</b>. "
-                                            f"Klasifikasi: <b>{theta_class}</b>.",
-                                            styles["Body"]
-                                        ))
-                                    elif seg["analysis_method"] == "Partheniades + Flow Accumulation":
-                                        g_grav = 9.81
-                                        slope_at_crit = float(crit.get("Slope", 0.0))
-                                        tau0_crit = seg["rho_water"] * g_grav * seg["flow_depth"] * slope_at_crit
-                                        tau_c = seg["tau_critical"]
-                                        if tau0_crit > tau_c:
-                                            e_rate = seg["erodibility_M"] * (tau0_crit / tau_c - 1.0)
-                                            e_text = f"<b>{e_rate:.5f} kg/m²·s</b> (aktif tererosi, tau0 &gt; tauC)"
-                                        else:
-                                            e_text = "0 kg/m²·s (tau0 ≤ tauC → zona stabil/deposisi)"
-                                        story.append(Paragraph(
-                                            f"Titik kritis pada koordinat X={crit['X']:.2f}, Y={crit['Y']:.2f}, "
-                                            f"RL={crit['RL']:.2f} m, kemiringan lokal S={slope_at_crit:.4f} m/m, "
-                                            f"kepadatan aliran={crit.get('FlowDensity', float('nan')):.3f}. "
-                                            f"tau0 = {seg['rho_water']:.0f} × 9,81 × {seg['flow_depth']:.2f} × "
-                                            f"{slope_at_crit:.4f} = <b>{tau0_crit:.4f} N/m²</b> (tauC = {tau_c:.3f} N/m²). "
-                                            f"Laju erosi E = {e_text}. "
-                                            f"Skor risiko akhir (setelah bobot flow accumulation & normalisasi) = "
-                                            f"<b>{crit.get('RiskScore', float('nan')):.2f}</b>.",
-                                            styles["Body"]
-                                        ))
-                                    else:
-                                        story.append(Paragraph(
-                                            f"Titik kritis berada pada koordinat X={crit['X']:.2f}, Y={crit['Y']:.2f}, "
-                                            f"elevasi (RL)={crit['RL']:.2f} m, kepadatan aliran={crit['FlowDensity']:.3f}.",
-                                            styles["Body"]
-                                        ))
-
-                                    # tabel 10 titik prioritas mitigasi
-                                    table_cols = [c for c in
-                                                  ["Rank", "ID_Titik", "X", "Y", "RL", "JenisRisikoDominan",
-                                                   "RiskScore", "Rekomendasi"]
-                                                  if c in top10.columns]
-                                    crit_rows = [table_cols] + top10[table_cols].head(10).round(3).astype(str).values.tolist()
-                                    n_cols = len(table_cols)
-                                    # lebar proporsional: kolom teks panjang (Rekomendasi) dapat porsi terbesar
-                                    base_w = {
-                                        "Rank": 0.05, "ID_Titik": 0.09, "X": 0.09, "Y": 0.09, "RL": 0.08,
-                                        "JenisRisikoDominan": 0.15, "RiskScore": 0.08, "Rekomendasi": 0.37
-                                    }
-                                    col_w = [CONTENT_W * base_w.get(c, 1.0/n_cols) for c in table_cols]
-
-                                    story.append(Paragraph(
-                                        "Sepuluh titik prioritas mitigasi, diurutkan berdasar kepadatan aliran, dengan "
-                                        "klasifikasi jenis risiko dominan dan rekomendasi spesifik per titik:",
-                                        styles["Body"]
-                                    ))
-                                    story.append(_build_table(crit_rows, col_widths=col_w))
-                                    story.append(Paragraph(
-                                        f"Tabel {seg_i + 2}. Titik prioritas mitigasi — {seg['label']}.",
-                                        styles["Caption"]
-                                    ))
-                                else:
-                                    story.append(Paragraph("Tidak ada titik overflow/kritis signifikan terdeteksi pada segmen ini.", styles["Body"]))
-
-                                # --- TARP ---
-                                story.append(Paragraph("TARP (Trigger Action Response Plan)", styles["H2"]))
-                                tarp_rows, active_idx = _tarp_rows(seg["max_zone"])
-                                tarp_col_w = [CONTENT_W*0.15, CONTENT_W*0.22, CONTENT_W*0.20, CONTENT_W*0.28, CONTENT_W*0.15]
-                                story.append(_build_table(
-                                    tarp_rows, col_widths=tarp_col_w,
-                                    highlight_row=(active_idx + 1) if active_idx is not None else None
-                                ))
-
-                                # --- validasi lapangan ---
-                                validation = seg.get("validation")
-                                if validation:
-                                    story.append(Paragraph("Validasi Lapangan (Ground-Truth)", styles["H2"]))
-                                    _val_source = validation.get("source", "Titik sampel")
-                                    story.append(Paragraph(
-                                        f"Sumber data observasi: <b>{_val_source}</b>. Validasi terhadap "
-                                        f"{validation['n_samples']} sampel/sel observasi lapangan: "
-                                        f"Overall Accuracy = <b>{validation['overall_accuracy']*100:.1f}%</b>, "
-                                        f"Cohen's Kappa (κ) = <b>{validation['kappa']:.2f}</b> "
-                                        f"(kategori: {validation['kappa_interpretation']}, mengikuti skala Landis & Koch, 1977).",
-                                        styles["Body"]
-                                    ))
-                                    if validation.get("area_eroded_observed_ha") is not None:
-                                        story.append(Paragraph(
-                                            f"Luas erosi observasi (DXF): <b>{validation['area_eroded_observed_ha']:.2f} Ha</b>; "
-                                            f"luas erosi prediksi model (kelas Sedang+Tinggi/Ekstrem): "
-                                            f"<b>{validation['area_eroded_predicted_ha']:.2f} Ha</b>.",
-                                            styles["Body"]
-                                        ))
-                                    cm_df_r = validation["confusion_matrix"].reset_index().rename(columns={"index": "Observasi\\Prediksi"})
-                                    cm_rows_r = [list(cm_df_r.columns)] + cm_df_r.astype(str).values.tolist()
-                                    n_cm_cols = len(cm_rows_r[0])
-                                    story.append(_build_table(cm_rows_r, col_widths=[CONTENT_W/n_cm_cols]*n_cm_cols))
-                                    story.append(Spacer(1, 6))
-
-                                    prfs_df_r = validation["prfs"]
-                                    prfs_rows_r = [list(prfs_df_r.columns)] + prfs_df_r.astype(str).values.tolist()
-                                    n_pr_cols = len(prfs_rows_r[0])
-                                    story.append(Paragraph("Precision, Recall, F1-Score per kelas:", styles["Body"]))
-                                    story.append(_build_table(prfs_rows_r, col_widths=[CONTENT_W/n_pr_cols]*n_pr_cols))
-                                else:
-                                    # PERBAIKAN: narasi "Validasi lapangan belum dijalankan..." ini murni
-                                    # imbauan metodologis untuk admin/engineer (soal kelengkapan proses
-                                    # analisis) -- tidak relevan & bisa membingungkan untuk user surveyor
-                                    # yang cuma perlu hasil akhirnya. Disembunyikan untuk surveyor.
-                                    if _is_admin_user():
-                                        story.append(Paragraph(
-                                            "Validasi lapangan belum dijalankan untuk segmen ini. Disarankan menjalankan modul "
-                                            "Validasi Lapangan dengan minimal beberapa titik sampel ground-truth sebelum hasil ini "
-                                            "dipakai sebagai dasar keputusan operasional final.",
-                                            styles["BodyItalic"]
-                                        ))
-
-                                # --- rekomendasi (AI + rule-based status) ---
+                            if sid in _low_priority_skip:
+                                # BARU: segmen ini risikonya rendah & tidak menunjukkan potensi
+                                # erosi/sedimentasi nyata dibanding segmen lain -- cukup ringkasan
+                                # singkat (angka sudah ada di Tabel 1), tidak perlu detail penuh
+                                # berhalaman-halaman untuk segmen yang bukan prioritas.
+                                story.append(Paragraph(f"{seg_i + 1}. SEGMEN: {seg['label'].upper()}", styles["H1"]))
+                                story.append(_divider())
                                 story.append(Paragraph(
-                                    "Rekomendasi Rekayasa (Analisis Berbasis AI)" if _is_admin_user() else "Rekomendasi Rekayasa",
-                                    styles["H2"]
+                                    f"Indeks risiko maksimum segmen ini ({seg['max_zone']:.2f}) relatif rendah "
+                                    f"dibanding segmen lain, dan tidak menunjukkan area berpotensi erosi/sedimentasi "
+                                    f"nyata (lihat Tabel 1 pada Ringkasan Eksekutif). Detail analisis penuh "
+                                    f"(metodologi, titik kritis, rekomendasi) tidak ditampilkan di sini untuk menjaga "
+                                    f"laporan tetap fokus pada segmen prioritas — tersedia kembali lewat aplikasi "
+                                    f"kalau sewaktu-waktu diperlukan.",
+                                    styles["Body"]
                                 ))
-                                rekom = seg.get("recommendation") or {}
-                                ai_rekom = seg.get("ai_recommendation") or {}
-                                if rekom.get("status"):
-                                    story.append(Paragraph(f"<b>Status Klasifikasi (TARP):</b> {rekom['status']}", styles["Body"]))
-                                if ai_rekom.get("narrative"):
-                                    story.append(Paragraph(ai_rekom["narrative"].replace("\n", "<br/>"), styles["Body"]))
-                                for rec in ai_rekom.get("recommendations", []):
-                                    story.append(Paragraph(f"• {rec}", styles["Bullet"]))
-                                if _is_admin_user():
-                                    story.append(Paragraph(
-                                        f"<i>Sumber narasi: {ai_rekom.get('source', 'rule-based')}</i>",
-                                        styles["Caption"]
-                                    ))
+                                story.append(Spacer(1, 10))
+                                continue
+
+                            story.append(Paragraph(f"{seg_i + 1}. SEGMEN: {seg['label'].upper()}", styles["H1"]))
+                            story.append(_divider())
+
+                            # --- data & parameter input ---
+                            param_rows = [
+                                ["Parameter", "Nilai"],
+                                ["Jenis kondisi", seg["design_type"]],
+                                ["Metode analisis", seg["analysis_method"]],
+                                ["Luas area (Ha)", f"{seg['boundary_area_ha']:.2f}"],
+                                ["Ukuran butir (grain size)", f"{seg['grain_size_mm']:.3f} mm"],
+                                ["Kecepatan aliran representatif", f"{seg['velocity_hulu']:.3f} m/s"],
+                                ["Tegangan geser kritis (tau_critical)", f"{seg['tau_critical']:.3f}"],
+                                ["Faktor hujan ekstrem", f"{seg['rain_factor']:.2f}x"],
+                                ["Hujan desain terpakai", f"{seg['online_rainfall']:.2f} mm/hari" if seg.get("online_rainfall") else "tidak tersedia"],
+                                ["Sumber hujan", (seg.get('online_rainfall_meta') or {}).get('source', '-')],
+                            ]
+                            _qr = seg.get("quant") or {}
+                            if _qr.get("rusle"):
+                                param_rows.append(["Erosivitas hujan R / K / C / P", f"{_qr['rusle']['R']:.0f} / {_qr['K']:.2f} / {_qr['C']:.2f} / {_qr['P']:.2f}"])
+                                param_rows.append(["Kehilangan tanah rata-rata (RUSLE)", f"{_qr['rusle']['mean_tha']:.1f} ton/ha/th (P95 {_qr['rusle']['p95_tha']:.1f})"])
+                                param_rows.append(["Sedimen ke kolam (RUSLE x SDR)", f"{_qr['rusle']['sed_yield_t_yr']:.0f} ton/th (~{_qr['rusle']['sed_vol_m3_yr']:.0f} m3/th)"])
+                            if _qr.get("event"):
+                                param_rows.append(["Hujan rencana R24 / limpasan", f"{_qr['event']['p_mm']:.0f} mm / {_qr['event']['q_mm']:.1f} mm"])
+                                param_rows.append(["Sedimen event (MUSLE) / TSS", f"{_qr['event']['y_ton']:.0f} ton / {_qr['event']['tss_mg_l']:,.0f} mg/L"])
+                            if _qr.get("pond"):
+                                param_rows.append(["Kolam pengendap minimum", f"{_qr['pond']['length_m']:.0f} x {_qr['pond']['width_m']:.0f} m; V total {_qr['pond']['vol_total_m3']:,.0f} m3 (d target {_qr['pond']['d_mm']:.3f} mm)"])
+                            cd = seg.get("contour_diag") or {}
+                            if cd:
+                                param_rows.append(["Titik kontur DXF terbaca", f"{cd.get('n_raw_points', '-')}"])
+                                param_rows.append(["Titik blunder terdeteksi", f"{cd.get('n_blunder_points', 0)}"])
+
+                            story.append(Paragraph("Data & Parameter Input", styles["H2"]))
+                            story.append(_build_table(param_rows, col_widths=[CONTENT_W*0.45, CONTENT_W*0.55]))
+
+                            if cd.get("all_z_zero"):
+                                story.append(Spacer(1, 4))
+                                story.append(Paragraph(
+                                    "<b>PERINGATAN:</b> Semua titik kontur input pada segmen ini memiliki elevasi Z=0. "
+                                    "Hasil surface 3D dan analisis pada segmen ini berpotensi TIDAK MEWAKILI kondisi "
+                                    "topografi aktual. Disarankan verifikasi ulang data DXF sumber.",
+                                    styles["Body"]
+                                ))
+                            story.append(Spacer(1, 6))
+
+                            # --- hidrologi & hidrolika (jika diaktifkan) ---
+                            hydro = seg.get("hydraulics_result")
+                            if seg.get("use_hydraulics") and hydro:
+                                story.append(Paragraph("Hidrologi &amp; Hidrolika (Rational Method + Manning's Equation)", styles["H2"]))
+                                hydro_rows = [
+                                    ["Parameter", "Nilai"],
+                                    ["Intensitas hujan (Mononobe)", f"{hydro['intensity_mm_hr']:.1f} mm/jam"],
+                                    ["Debit rencana Q (Rational Method)", f"{hydro['q_design_m3s']:.3f} m3/s"],
+                                    ["Kedalaman normal h (Manning's)", f"{hydro['h_normal_m']:.3f} m"],
+                                    ["Kecepatan normal V (Manning's)", f"{hydro['v_normal_ms']:.3f} m/s"],
+                                    ["Froude Number", f"{hydro['froude']:.2f} - {hydro['flow_regime']}" if hydro.get("froude") else "-"],
+                                    ["Freeboard tersedia", f"{hydro['freeboard_m']:.2f} m"],
+                                    ["Freeboard minimum disarankan", f"{hydro['min_freeboard_m']:.2f} m"],
+                                    ["Status freeboard", "CUKUP" if hydro["freeboard_ok"] else "KURANG — perlu redesain tinggi/lebar channel"],
+                                ]
+                                story.append(_build_table(
+                                    hydro_rows, col_widths=[CONTENT_W*0.5, CONTENT_W*0.5],
+                                    highlight_row=8
+                                ))
+                                story.append(Paragraph(
+                                    "Kecepatan aliran &amp; kedalaman pada analisis erosi segmen ini dihitung dari hasil "
+                                    "Manning's Equation di atas (bukan input manual), diturunkan dari debit rencana Metode "
+                                    "Rasional dengan intensitas hujan estimasi rumus Mononobe.",
+                                    styles["BodyItalic"]
+                                ))
+                                story.append(Spacer(1, 6))
+
+                            # --- Sebaran Risk Index (10 titik prioritas mitigasi) ---
+                            # Gambar ini sebelumnya hanya tampil di layar (bagian "Numerical Modelling"
+                            # di app) dan tidak pernah ikut masuk ke laporan PDF.
+                            if seg.get("risk_index_chart_path"):
+                                story.append(_img_block(
+                                    seg["risk_index_chart_path"],
+                                    f"Gambar {seg_i + 2}b. Sebaran nilai Risk Index pada 10 titik prioritas mitigasi "
+                                    f"untuk {seg['label']}, dikelompokkan berdasarkan jenis risiko dominan.",
+                                    max_width=CONTENT_W, max_height=8.5 * cm,
+                                    heading="Sebaran Risk Index — 10 Titik Prioritas Mitigasi",
+                                ))
                                 story.append(Spacer(1, 8))
 
-                                # --- Mekanisme Penyebab Dominan (root cause) ---
-                                # BARU: sebelumnya dihitung tapi tidak pernah masuk laporan PDF, cuma
-                                # tampil di layar aplikasi.
-                                if rekom.get("root_cause"):
-                                    story.append(Paragraph("Mekanisme Penyebab Dominan", styles["H2"]))
-                                    rc_rows = [["Faktor", "Kontribusi"]]
-                                    for rc in rekom["root_cause"][:4]:
-                                        rc_rows.append([rc["factor"], f"{rc['contribution_pct']:.0f}%"])
-                                    story.append(_build_table(rc_rows, col_widths=[CONTENT_W * 0.7, CONTENT_W * 0.3]))
-                                    story.append(Spacer(1, 6))
-
-                                # --- Perbandingan Opsi Skenario ---
-                                if rekom.get("scenario_options"):
-                                    story.append(Paragraph("Perbandingan Opsi Skenario (Kandidat — Perlu Verifikasi Lapangan)", styles["H2"]))
-                                    so_rows = [["Opsi", "Kemiringan", "Lebar Saluran", "Kecepatan", "Penurunan\nKecepatan", "Freeboard"]]
-                                    for _opt in rekom["scenario_options"]:
-                                        so_rows.append([
-                                            f"{_opt['option']} ({_opt['rank_label']})",
-                                            (f"{_opt['existing_slope_pct']:.1f}%\u2192{_opt['candidate_slope_pct']:.1f}%"
-                                             if _opt["slope_change"] else "tetap"),
-                                            (f"{_opt['existing_width_m']:.2f}\u2192{_opt['candidate_width_m']:.2f} m"
-                                             if _opt["width_change"] else "tetap"),
-                                            f"{_opt['existing_velocity_ms']:.2f}\u2192{_opt['candidate_velocity_ms']:.2f} m/s",
-                                            f"{_opt['velocity_reduction_pct']:.0f}%",
-                                            "Cukup" if _opt["candidate_freeboard_ok"] else "KURANG",
-                                        ])
-                                    story.append(_build_table(
-                                        so_rows,
-                                        col_widths=[CONTENT_W*0.24, CONTENT_W*0.16, CONTENT_W*0.16, CONTENT_W*0.18, CONTENT_W*0.13, CONTENT_W*0.13]
-                                    ))
-                                    story.append(Paragraph(
-                                        "Ranking berdasarkan hasil hitungan hidraulik (kecepatan &amp; freeboard) dengan Manning's "
-                                        "Equation yang sama dengan angka existing — geometri channel lain &amp; debit rencana "
-                                        "diasumsikan tetap, BELUM mempertimbangkan biaya/kompleksitas konstruksi. Ini titik awal "
-                                        "kajian rekayasa lebih lanjut, bukan hasil final.",
-                                        styles["Caption"]
-                                    ))
-                                    story.append(Spacer(1, 6))
-
-                                # --- Rekomendasi Teknis Bertingkat (Geometry -> Hydraulic -> Surface -> Sediment -> Monitoring) ---
-                                if rekom.get("tiered_recommendations"):
-                                    story.append(Paragraph(
-                                        "Rekomendasi Teknis Bertingkat (Geometry \u2192 Hydraulic \u2192 Surface \u2192 Sediment \u2192 Monitoring)",
-                                        styles["H2"]
-                                    ))
-                                    story.append(Paragraph(
-                                        "Urutan tingkat intervensi adalah kerangka internal aplikasi (HEC-15 hanya menjadi acuan "
-                                        "pemilihan lining: tegangan geser izin >= terapan): kendalikan bentuk/energi aliran "
-                                        "dulu (Geometry, Hydraulic) sebelum melapis permukaan (Surface Protection) — bukan "
-                                        "langsung \u201cerosi \u2192 riprap\u201d.",
-                                        styles["BodyItalic"]
-                                    ))
-                                    story.append(Spacer(1, 4))
-                                    for _tier_name, _tier_items in rekom["tiered_recommendations"].items():
-                                        story.append(Paragraph(_tier_name, styles["H2"]))
-                                        tier_rows = [["Pengendalian", "Pengaruh", "Est. Penurunan\nRisiko"]]
-                                        for _item in _tier_items:
-                                            tier_rows.append([
-                                                _item["control"],
-                                                _item["effect"],
-                                                f"~{_item['risk_reduction_pct']:.0f}%" if _item.get("risk_reduction_pct") is not None else "Kualitatif*",
-                                            ])
-                                        story.append(_build_table(
-                                            tier_rows, col_widths=[CONTENT_W*0.34, CONTENT_W*0.48, CONTENT_W*0.18]
+                            # --- Numerical Modelling (3D) per-segmen ---
+                            # DIKEMBALIKAN atas permintaan: selain Scene 3D Gabungan (satu kali, di
+                            # awal laporan), tiap segmen yang tampil detail penuh di sini JUGA dapat
+                            # 3 sudut pandang modelnya sendiri -- supaya bentuk 3D spesifik segmen ini
+                            # (sebelum ditimpa/digabung ke scene gabungan) tetap bisa dilihat terpisah.
+                            _num_views_seg = seg.get("numerical_modelling_views") or {}
+                            if any(_num_views_seg.get(k) for k in ("overall", "critical_point", "alternate")):
+                                story.append(Paragraph(f"NUMERICAL MODELLING (3D) — {seg['label'].upper()}", styles["H1"]))
+                                story.append(_divider())
+                                _view_labels_seg = {
+                                    "overall": "(a) Tampilan Keseluruhan (Overall)",
+                                    "critical_point": "(b) Tampilan Mengarah ke Titik Paling Kritis",
+                                    "alternate": "(c) Tampilan Sudut Lain",
+                                }
+                                for _vk in ("overall", "critical_point", "alternate"):
+                                    _vp = _num_views_seg.get(_vk)
+                                    if _vp:
+                                        story.append(_img_block(
+                                            _vp, None, max_width=CONTENT_W, max_height=7 * cm,
+                                            heading=_view_labels_seg[_vk],
                                         ))
                                         story.append(Spacer(1, 6))
+                                story.append(Paragraph(
+                                    f"Gambar {seg_i + 2}c. Hasil Numerical Modelling 3D {seg['label']} dari tiga sudut "
+                                    "pandang: keseluruhan model, terarah ke titik prioritas mitigasi paling kritis "
+                                    "(FlowDensity tertinggi), dan sudut pandang lain sebagai pembanding bentuk model.",
+                                    styles["Caption"]
+                                ))
+                                story.append(Spacer(1, 8))
+
+                            # --- 2D Risk Map ---
+                            if seg.get("risk_map_2d_path"):
+                                story.append(_img_block(
+                                    seg["risk_map_2d_path"],
+                                    f"Gambar {seg_i + 2}d. 2D Risk Map {seg['label']}: garis kontur DXF, boundary area, "
+                                    "sebaran titik erosi, titik overflow, dan zona konvergensi aliran.",
+                                    max_width=CONTENT_W, max_height=10.5 * cm,
+                                    heading="2D Risk Map",
+                                ))
+                                story.append(Spacer(1, 8))
+
+                            # --- peta risiko (ringkas, portrait) ---
+                            map_path = f"Erosion_Map_{sid}.png"
+                            # PERBAIKAN: peta ini mahal untuk dibangun (hillshade + citra
+                            # satelit/orthophoto). Kalau file dari generate laporan
+                            # sebelumnya masih ada dan belum ada RUN ANALYSIS baru,
+                            # pakai file lama -- jangan dibangun ulang tiap kali laporan
+                            # digenerate ulang (mis. cuma ganti opsi Ringkas/Lengkap).
+                            if run_button_clicked or not os.path.exists(map_path):
+                                _build_segment_map_png(seg, map_path)
+                            story.append(_img_block(
+                                map_path,
+                                f"Gambar {seg_i + 2}. Peta risiko erosi (kontur merah-hijau), potensi sedimentasi (biru), "
+                                f"hillshade topografi, dan boundary area untuk {seg['label']}. Versi peta komposit "
+                                f"lengkap (klasifikasi + grafik + model 3D) disajikan menyusul di bawah.",
+                                max_width=CONTENT_W, max_height=10.5 * cm,
+                                heading="Peta Risiko Erosi & Sedimentasi",
+                            ))
+
+                            # --- peta komposit (dipadatkan ke portrait, tidak lagi lembar landscape
+                            # terpisah -- supaya tidak ada lembar nyaris kosong yang memisahkan diri
+                            # dari konten lain) ---
+                            composite_path = f"Composite_Map_{sid}.png"
+                            # PERBAIKAN: sama seperti peta risiko di atas -- peta komposit
+                            # (klasifikasi + grafik + 3D) ini berat, jadi dipakai ulang
+                            # dari generate sebelumnya kalau belum ada RUN ANALYSIS baru.
+                            if run_button_clicked or not os.path.exists(composite_path):
+                                _build_segment_composite_map_png(seg, composite_path)
+
+                            story.append(_img_block(
+                                composite_path,
+                                f"Gambar {seg_i + 2}a. Peta komposit {seg['label']}: klasifikasi risiko erosi/sedimentasi "
+                                "4 kelas (kiri), grafik luas per kategori (kanan atas), topografi hillshade & zoom titik "
+                                "kritis (kanan tengah), dan model permukaan 3D berwarna indeks risiko (kanan bawah).",
+                                max_width=CONTENT_W, max_height=11 * cm,
+                                heading=f"LEMBAR PETA — SEBARAN POTENSI EROSI & SEDIMENTASI: {seg['label'].upper()}",
+                            ))
+                            story.append(Spacer(1, 10))
+
+                            # --- metodologi & formula ---
+                            # Pada mode laporan RINGKAS, bab uraian metodologi & turunan
+                            # formula dilewati supaya laporan langsung ke temuan, lokasi,
+                            # dan rekomendasi. Seluruh visual (peta, 3D, penampang) tetap
+                            # dilampirkan penuh -- yang dipangkas hanya teks panjangnya.
+                            if not _report_concise:
+                                story.append(Paragraph("Metodologi & Formula", styles["H2"]))
+                                if seg["analysis_method"] == "Hjulstrom Diagram":
                                     story.append(Paragraph(
-                                        "*Kualitatif = efeknya nyata secara rekayasa (mengurangi mekanisme penyebab erosi/"
-                                        "overflow), tapi besaran penurunan risikonya dalam persen belum bisa dihitung otomatis "
-                                        "oleh app ini karena bergantung pada spesifikasi konstruksi (mis. ukuran D50 riprap, "
-                                        "jenis vegetasi) yang ditentukan di tahap DED, di luar cakupan data numerik yang "
-                                        "tersedia saat ini.",
-                                        styles["Caption"]
+                                        "Klasifikasi risiko erosi/deposisi menggunakan pendekatan diagram Hjulström, yang "
+                                        "membandingkan kecepatan aliran aktual terhadap ambang kecepatan erosi dan deposisi "
+                                        "sebagai fungsi diameter butir sedimen (d, dalam meter). <i>Catatan keterbatasan: "
+                                        "pendekatan power-law ini tidak menangkap efek kohesi pada material lempung/lanau "
+                                        "halus (&lt;0,1 mm), di mana kurva Hjulström asli menunjukkan partikel sangat halus "
+                                        "justru lebih tahan erosi karena kohesi.</i>",
+                                        styles["Body"]
+                                    ))
+                                    f1_path = f"formula_verosion_{sid}.png"
+                                    f2_path = f"formula_vdep_{sid}.png"
+                                    f3_path = f"formula_score_{sid}.png"
+                                    _render_formula_png(r"v_{erosion} = 0.1 \times d^{-0.4}", f1_path)
+                                    _render_formula_png(r"v_{deposition} = 0.01 \times d^{-0.2}", f2_path)
+                                    _render_formula_png(
+                                        r"Skor = clip\left(2 \times \frac{v - v_{deposition}}{v_{erosion} - v_{deposition}},\ 0,\ 2\right)",
+                                        f3_path
+                                    )
+                                    story.append(_fit_image(f1_path, max_width=CONTENT_W*0.55))
+                                    story.append(_fit_image(f2_path, max_width=CONTENT_W*0.55))
+                                    story.append(_fit_image(f3_path, max_width=CONTENT_W*0.85))
+                                    story.append(Paragraph(
+                                        "Skor 0 = zona deposisi dominan, skor 2 = zona erosi ekstrem. Nilai d dikonversi "
+                                        "dari mm ke meter sebelum dihitung.",
+                                        styles["Body"]
+                                    ))
+                                elif seg["analysis_method"] == "Shields Diagram":
+                                    story.append(Paragraph(
+                                        "Klasifikasi mobilitas sedimen menggunakan parameter Shields tak berdimensi (θ), yang "
+                                        "membandingkan gaya penggerak aliran terhadap gaya penahan berat butiran terendam "
+                                        "(Shields, 1936). Tegangan geser dasar dihitung memakai depth-slope product (dengan "
+                                        "kedalaman aliran h), bukan hanya kemiringan S — koreksi ini penting karena tanpa "
+                                        "suku h, tau0 tidak bersatuan Pascal yang valid secara dimensional.",
+                                        styles["Body"]
+                                    ))
+                                    fs1_path = f"formula_tau0_shields_{sid}.png"
+                                    fs2_path = f"formula_theta_{sid}.png"
+                                    _render_formula_png(r"\tau_0 = \rho_w \times g \times h \times S", fs1_path)
+                                    _render_formula_png(
+                                        r"\theta = \frac{\tau_0}{(\rho_s - \rho_w) \times g \times D_{50}}",
+                                        fs2_path
+                                    )
+                                    story.append(_fit_image(fs1_path, max_width=CONTENT_W*0.55))
+                                    story.append(_fit_image(fs2_path, max_width=CONTENT_W*0.65))
+                                    story.append(Paragraph(
+                                        f"dengan tau0 tegangan geser dasar aktual (N/m²), h = kedalaman aliran = "
+                                        f"{seg['flow_depth']:.2f} m, ρw dan ρs densitas air dan sedimen (kg/m³), g = 9,81 m/s², "
+                                        f"dan D50 diameter butiran median (mm). Klasifikasi: θ &lt; 0,03 → stabil/deposisi "
+                                        "(skor 0); 0,03 ≤ θ &lt; 0,06 → transisi (skor 1); θ ≥ 0,06 → erosi aktif (skor 2).",
+                                        styles["Body"]
+                                    ))
+                                elif seg["analysis_method"] == "Partheniades + Flow Accumulation":
+                                    story.append(Paragraph(
+                                        "Laju erosi dihitung sebagai fungsi linear selisih tegangan geser aktual terhadap "
+                                        "tegangan geser kritis material (Partheniades, 1965), dikombinasikan dengan bobot "
+                                        "flow accumulation ternormalisasi untuk merepresentasikan efek konsentrasi aliran.",
+                                        styles["Body"]
+                                    ))
+                                    fp1_path = f"formula_tau0_parth_{sid}.png"
+                                    fp2_path = f"formula_erate_{sid}.png"
+                                    fp3_path = f"formula_riskidx_{sid}.png"
+                                    _render_formula_png(r"\tau_0 = \rho_w \times g \times h \times S", fp1_path)
+                                    _render_formula_png(
+                                        r"E = M \times \left(\frac{\tau_0}{\tau_c} - 1\right),\ \ untuk\ \tau_0 > \tau_c",
+                                        fp2_path
+                                    )
+                                    _render_formula_png(
+                                        r"RiskIndex = clip\left(\frac{E \times FlowAccum_{norm}}{P_{99}(E \times FlowAccum_{norm})},\ 0,\ 2\right)",
+                                        fp3_path, fontsize=12
+                                    )
+                                    story.append(_fit_image(fp1_path, max_width=CONTENT_W*0.55))
+                                    story.append(_fit_image(fp2_path, max_width=CONTENT_W*0.75))
+                                    story.append(_fit_image(fp3_path, max_width=CONTENT_W*0.9))
+                                    story.append(Paragraph(
+                                        f"dengan h = kedalaman aliran = {seg['flow_depth']:.2f} m, M = koefisien erodibilitas "
+                                        f"= {seg['erodibility_M']:.4f} kg/m²·s, tauC = tegangan geser kritis = "
+                                        f"{seg['tau_critical']:.3f} N/m². Apabila tau0 ≤ tauC, laju erosi E diasumsikan nol (zona "
+                                        "stabil/deposisi). RiskIndex dinormalisasi terhadap persentil ke-99 hasil kali laju "
+                                        "erosi dengan flow accumulation ternormalisasi, lalu di-clip ke rentang [0,2].",
+                                        styles["Body"]
+                                    ))
+                                else:
+                                    story.append(Paragraph(
+                                        f"Metode analisis yang digunakan pada segmen ini: <b>{seg['analysis_method']}</b>. "
+                                        "Formula detail mengikuti definisi standar metode tersebut sebagaimana diterapkan pada modul.",
+                                        styles["Body"]
                                     ))
 
-                                story.append(PageBreak())
+                            # --- perhitungan titik paling kritis ---
+                            story.append(Paragraph("Perhitungan pada Titik Paling Kritis", styles["H2"]))
+                            top10 = seg["top10_overflow"]
+                            if top10 is not None and len(top10) > 0:
+                                crit = top10.iloc[0]
+                                if seg["analysis_method"] == "Hjulstrom Diagram":
+                                    d_m = seg["grain_size_mm"] / 1000.0 + 1e-6
+                                    v_ero_crit = 0.1 * (d_m ** -0.4)
+                                    v_dep_crit = 0.01 * (d_m ** -0.2)
+                                    v_actual = crit.get("Velocity_ms", float("nan"))
+                                    story.append(Paragraph(
+                                        f"Titik kritis berada pada koordinat X={crit['X']:.2f}, Y={crit['Y']:.2f}, "
+                                        f"elevasi (RL)={crit['RL']:.2f} m, dengan skor risiko = {crit.get('RiskScore', float('nan')):.2f}. "
+                                        f"Diameter butir d = {seg['grain_size_mm']:.3f} mm = {d_m:.6f} m. "
+                                        f"v_erosion = 0,1 × ({d_m:.6f})^-0,4 = <b>{v_ero_crit:.4f} m/s</b>. "
+                                        f"v_deposition = 0,01 × ({d_m:.6f})^-0,2 = <b>{v_dep_crit:.4f} m/s</b>. "
+                                        f"Kecepatan aliran aktual pada titik ini = <b>{v_actual:.4f} m/s</b>. "
+                                        + (
+                                            "Kecepatan aktual MELEBIHI ambang erosi → titik ini aktif tererosi."
+                                            if v_actual >= v_ero_crit else
+                                            "Kecepatan aktual berada di bawah ambang deposisi → titik ini cenderung deposisi."
+                                            if v_actual <= v_dep_crit else
+                                            "Kecepatan aktual berada di zona transisi (antara ambang deposisi dan erosi)."
+                                        ),
+                                        styles["Body"]
+                                    ))
+                                elif seg["analysis_method"] == "Shields Diagram":
+                                    g_grav = 9.81
+                                    d_m = seg["grain_size_mm"] / 1000.0 + 1e-9
+                                    slope_at_crit = float(crit.get("Slope", 0.0))
+                                    h_for_crit = seg.get("flow_depth", 0.3)
+                                    tau0_crit = seg["rho_water"] * g_grav * h_for_crit * slope_at_crit
+                                    theta_crit = tau0_crit / (
+                                        (seg["rho_soil"] - seg["rho_water"]) * g_grav * d_m + 1e-9
+                                    )
+                                    theta_class = (
+                                        "stabil/deposisi (θ &lt; 0,03)" if theta_crit < 0.03 else
+                                        "transisi (0,03 ≤ θ &lt; 0,06)" if theta_crit < 0.06 else
+                                        "erosi aktif (θ ≥ 0,06)"
+                                    )
+                                    story.append(Paragraph(
+                                        f"Titik kritis pada koordinat X={crit['X']:.2f}, Y={crit['Y']:.2f}, "
+                                        f"RL={crit['RL']:.2f} m, kemiringan lokal S={slope_at_crit:.4f} m/m, "
+                                        f"kedalaman aliran h={h_for_crit:.2f} m. "
+                                        f"tau0 = {seg['rho_water']:.0f} × 9,81 × {h_for_crit:.2f} × {slope_at_crit:.4f} = "
+                                        f"<b>{tau0_crit:.4f} N/m²</b>. "
+                                        f"θ = {tau0_crit:.4f} / [({seg['rho_soil']:.0f} − {seg['rho_water']:.0f}) × 9,81 × "
+                                        f"{d_m:.6f}] = <b>{theta_crit:.4f}</b>. "
+                                        f"Klasifikasi: <b>{theta_class}</b>.",
+                                        styles["Body"]
+                                    ))
+                                elif seg["analysis_method"] == "Partheniades + Flow Accumulation":
+                                    g_grav = 9.81
+                                    slope_at_crit = float(crit.get("Slope", 0.0))
+                                    tau0_crit = seg["rho_water"] * g_grav * seg["flow_depth"] * slope_at_crit
+                                    tau_c = seg["tau_critical"]
+                                    if tau0_crit > tau_c:
+                                        e_rate = seg["erodibility_M"] * (tau0_crit / tau_c - 1.0)
+                                        e_text = f"<b>{e_rate:.5f} kg/m²·s</b> (aktif tererosi, tau0 &gt; tauC)"
+                                    else:
+                                        e_text = "0 kg/m²·s (tau0 ≤ tauC → zona stabil/deposisi)"
+                                    story.append(Paragraph(
+                                        f"Titik kritis pada koordinat X={crit['X']:.2f}, Y={crit['Y']:.2f}, "
+                                        f"RL={crit['RL']:.2f} m, kemiringan lokal S={slope_at_crit:.4f} m/m, "
+                                        f"kepadatan aliran={crit.get('FlowDensity', float('nan')):.3f}. "
+                                        f"tau0 = {seg['rho_water']:.0f} × 9,81 × {seg['flow_depth']:.2f} × "
+                                        f"{slope_at_crit:.4f} = <b>{tau0_crit:.4f} N/m²</b> (tauC = {tau_c:.3f} N/m²). "
+                                        f"Laju erosi E = {e_text}. "
+                                        f"Skor risiko akhir (setelah bobot flow accumulation & normalisasi) = "
+                                        f"<b>{crit.get('RiskScore', float('nan')):.2f}</b>.",
+                                        styles["Body"]
+                                    ))
+                                else:
+                                    story.append(Paragraph(
+                                        f"Titik kritis berada pada koordinat X={crit['X']:.2f}, Y={crit['Y']:.2f}, "
+                                        f"elevasi (RL)={crit['RL']:.2f} m, kepadatan aliran={crit['FlowDensity']:.3f}.",
+                                        styles["Body"]
+                                    ))
 
-                                # ===================== BEFORE vs AFTER REKOMENDASI (1 halaman) =====================
-                                # BARU: ringkasan 1 halaman pengendalian -> pengaruh -> level risiko (skor & kategori
-                                # TARP) SEBELUM vs SESUDAH rekomendasi diterapkan.
-                                story.append(Paragraph(f"RINGKASAN BEFORE / AFTER REKOMENDASI — {seg['label'].upper()}", styles["H1"]))
-                                story.append(_divider())
+                                # tabel 10 titik prioritas mitigasi
+                                table_cols = [c for c in
+                                              ["Rank", "ID_Titik", "X", "Y", "RL", "JenisRisikoDominan",
+                                               "RiskScore", "Rekomendasi"]
+                                              if c in top10.columns]
+                                crit_rows = [table_cols] + top10[table_cols].head(10).round(3).astype(str).values.tolist()
+                                n_cols = len(table_cols)
+                                # lebar proporsional: kolom teks panjang (Rekomendasi) dapat porsi terbesar
+                                base_w = {
+                                    "Rank": 0.05, "ID_Titik": 0.09, "X": 0.09, "Y": 0.09, "RL": 0.08,
+                                    "JenisRisikoDominan": 0.15, "RiskScore": 0.08, "Rekomendasi": 0.37
+                                }
+                                col_w = [CONTENT_W * base_w.get(c, 1.0/n_cols) for c in table_cols]
 
-                                _risk_pct_before = min(seg["max_zone"] / 2.0 * 100, 150)
-                                _tarp_rows_before, _tarp_idx_before = _tarp_rows(seg["max_zone"])
-                                _cat_before = _tarp_rows_before[_tarp_idx_before + 1][0].split("  ←")[0] if _tarp_idx_before is not None else "-"
+                                story.append(Paragraph(
+                                    "Sepuluh titik prioritas mitigasi, diurutkan berdasar kepadatan aliran, dengan "
+                                    "klasifikasi jenis risiko dominan dan rekomendasi spesifik per titik:",
+                                    styles["Body"]
+                                ))
+                                story.append(_build_table(crit_rows, col_widths=col_w))
+                                story.append(Paragraph(
+                                    f"Tabel {seg_i + 2}. Titik prioritas mitigasi — {seg['label']}.",
+                                    styles["Caption"]
+                                ))
+                            else:
+                                story.append(Paragraph("Tidak ada titik overflow/kritis signifikan terdeteksi pada segmen ini.", styles["Body"]))
 
-                                _best_scenario_opt = (rekom.get("scenario_options") or [None])[0]
-                                if _best_scenario_opt:
-                                    _vred = _best_scenario_opt["velocity_reduction_pct"] / 100.0
-                                    # Estimasi risiko sesudah: skala score TARP diasumsikan turun proporsional
-                                    # terhadap penurunan kecepatan aliran (perkiraan rekayasa, BUKAN hasil re-running
-                                    # model erosi penuh -- dicatatkan jelas di catatan bawah tabel).
-                                    _score_after_est = max(seg["max_zone"] * (1 - _vred), 0.0)
+                            # --- TARP ---
+                            story.append(Paragraph("TARP (Trigger Action Response Plan)", styles["H2"]))
+                            tarp_rows, active_idx = _tarp_rows(seg["max_zone"])
+                            tarp_col_w = [CONTENT_W*0.15, CONTENT_W*0.22, CONTENT_W*0.20, CONTENT_W*0.28, CONTENT_W*0.15]
+                            story.append(_build_table(
+                                tarp_rows, col_widths=tarp_col_w,
+                                highlight_row=(active_idx + 1) if active_idx is not None else None
+                            ))
+
+                            # --- validasi lapangan ---
+                            validation = seg.get("validation")
+                            if validation:
+                                story.append(Paragraph("Validasi Lapangan (Ground-Truth)", styles["H2"]))
+                                _val_source = validation.get("source", "Titik sampel")
+                                story.append(Paragraph(
+                                    f"Sumber data observasi: <b>{_val_source}</b>. Validasi terhadap "
+                                    f"{validation['n_samples']} sampel/sel observasi lapangan: "
+                                    f"Overall Accuracy = <b>{validation['overall_accuracy']*100:.1f}%</b>, "
+                                    f"Cohen's Kappa (κ) = <b>{validation['kappa']:.2f}</b> "
+                                    f"(kategori: {validation['kappa_interpretation']}, mengikuti skala Landis & Koch, 1977).",
+                                    styles["Body"]
+                                ))
+                                if validation.get("area_eroded_observed_ha") is not None:
+                                    story.append(Paragraph(
+                                        f"Luas erosi observasi (DXF): <b>{validation['area_eroded_observed_ha']:.2f} Ha</b>; "
+                                        f"luas erosi prediksi model (kelas Sedang+Tinggi/Ekstrem): "
+                                        f"<b>{validation['area_eroded_predicted_ha']:.2f} Ha</b>.",
+                                        styles["Body"]
+                                    ))
+                                cm_df_r = validation["confusion_matrix"].reset_index().rename(columns={"index": "Observasi\\Prediksi"})
+                                cm_rows_r = [list(cm_df_r.columns)] + cm_df_r.astype(str).values.tolist()
+                                n_cm_cols = len(cm_rows_r[0])
+                                story.append(_build_table(cm_rows_r, col_widths=[CONTENT_W/n_cm_cols]*n_cm_cols))
+                                story.append(Spacer(1, 6))
+
+                                prfs_df_r = validation["prfs"]
+                                prfs_rows_r = [list(prfs_df_r.columns)] + prfs_df_r.astype(str).values.tolist()
+                                n_pr_cols = len(prfs_rows_r[0])
+                                story.append(Paragraph("Precision, Recall, F1-Score per kelas:", styles["Body"]))
+                                story.append(_build_table(prfs_rows_r, col_widths=[CONTENT_W/n_pr_cols]*n_pr_cols))
+                            else:
+                                # PERBAIKAN: narasi "Validasi lapangan belum dijalankan..." ini murni
+                                # imbauan metodologis untuk admin/engineer (soal kelengkapan proses
+                                # analisis) -- tidak relevan & bisa membingungkan untuk user surveyor
+                                # yang cuma perlu hasil akhirnya. Disembunyikan untuk surveyor.
+                                if _is_admin_user():
+                                    story.append(Paragraph(
+                                        "Validasi lapangan belum dijalankan untuk segmen ini. Disarankan menjalankan modul "
+                                        "Validasi Lapangan dengan minimal beberapa titik sampel ground-truth sebelum hasil ini "
+                                        "dipakai sebagai dasar keputusan operasional final.",
+                                        styles["BodyItalic"]
+                                    ))
+
+                            # --- rekomendasi (AI + rule-based status) ---
+                            story.append(Paragraph(
+                                "Rekomendasi Rekayasa (Analisis Berbasis AI)" if _is_admin_user() else "Rekomendasi Rekayasa",
+                                styles["H2"]
+                            ))
+                            rekom = seg.get("recommendation") or {}
+                            ai_rekom = seg.get("ai_recommendation") or {}
+                            if rekom.get("status"):
+                                story.append(Paragraph(f"<b>Status Klasifikasi (TARP):</b> {rekom['status']}", styles["Body"]))
+                            if ai_rekom.get("narrative"):
+                                story.append(Paragraph(ai_rekom["narrative"].replace("\n", "<br/>"), styles["Body"]))
+                            for rec in ai_rekom.get("recommendations", []):
+                                story.append(Paragraph(f"• {rec}", styles["Bullet"]))
+                            if _is_admin_user():
+                                story.append(Paragraph(
+                                    f"<i>Sumber narasi: {ai_rekom.get('source', 'rule-based')}</i>",
+                                    styles["Caption"]
+                                ))
+                            story.append(Spacer(1, 8))
+
+                            # --- Mekanisme Penyebab Dominan (root cause) ---
+                            # BARU: sebelumnya dihitung tapi tidak pernah masuk laporan PDF, cuma
+                            # tampil di layar aplikasi.
+                            if rekom.get("root_cause"):
+                                story.append(Paragraph("Mekanisme Penyebab Dominan", styles["H2"]))
+                                rc_rows = [["Faktor", "Kontribusi"]]
+                                for rc in rekom["root_cause"][:4]:
+                                    rc_rows.append([rc["factor"], f"{rc['contribution_pct']:.0f}%"])
+                                story.append(_build_table(rc_rows, col_widths=[CONTENT_W * 0.7, CONTENT_W * 0.3]))
+                                story.append(Spacer(1, 6))
+
+                            # --- Perbandingan Opsi Skenario ---
+                            if rekom.get("scenario_options"):
+                                story.append(Paragraph("Perbandingan Opsi Skenario (Kandidat — Perlu Verifikasi Lapangan)", styles["H2"]))
+                                so_rows = [["Opsi", "Kemiringan", "Lebar Saluran", "Kecepatan", "Penurunan\nKecepatan", "Freeboard"]]
+                                for _opt in rekom["scenario_options"]:
+                                    so_rows.append([
+                                        f"{_opt['option']} ({_opt['rank_label']})",
+                                        (f"{_opt['existing_slope_pct']:.1f}%\u2192{_opt['candidate_slope_pct']:.1f}%"
+                                         if _opt["slope_change"] else "tetap"),
+                                        (f"{_opt['existing_width_m']:.2f}\u2192{_opt['candidate_width_m']:.2f} m"
+                                         if _opt["width_change"] else "tetap"),
+                                        f"{_opt['existing_velocity_ms']:.2f}\u2192{_opt['candidate_velocity_ms']:.2f} m/s",
+                                        f"{_opt['velocity_reduction_pct']:.0f}%",
+                                        "Cukup" if _opt["candidate_freeboard_ok"] else "KURANG",
+                                    ])
+                                story.append(_build_table(
+                                    so_rows,
+                                    col_widths=[CONTENT_W*0.24, CONTENT_W*0.16, CONTENT_W*0.16, CONTENT_W*0.18, CONTENT_W*0.13, CONTENT_W*0.13]
+                                ))
+                                story.append(Paragraph(
+                                    "Ranking berdasarkan hasil hitungan hidraulik (kecepatan &amp; freeboard) dengan Manning's "
+                                    "Equation yang sama dengan angka existing — geometri channel lain &amp; debit rencana "
+                                    "diasumsikan tetap, BELUM mempertimbangkan biaya/kompleksitas konstruksi. Ini titik awal "
+                                    "kajian rekayasa lebih lanjut, bukan hasil final.",
+                                    styles["Caption"]
+                                ))
+                                story.append(Spacer(1, 6))
+
+                            # --- Rekomendasi Teknis Bertingkat (Geometry -> Hydraulic -> Surface -> Sediment -> Monitoring) ---
+                            if rekom.get("tiered_recommendations"):
+                                story.append(Paragraph(
+                                    "Rekomendasi Teknis Bertingkat (Geometry \u2192 Hydraulic \u2192 Surface \u2192 Sediment \u2192 Monitoring)",
+                                    styles["H2"]
+                                ))
+                                story.append(Paragraph(
+                                    "Urutan tingkat intervensi adalah kerangka internal aplikasi (HEC-15 hanya menjadi acuan "
+                                    "pemilihan lining: tegangan geser izin >= terapan): kendalikan bentuk/energi aliran "
+                                    "dulu (Geometry, Hydraulic) sebelum melapis permukaan (Surface Protection) — bukan "
+                                    "langsung \u201cerosi \u2192 riprap\u201d.",
+                                    styles["BodyItalic"]
+                                ))
+                                story.append(Spacer(1, 4))
+                                for _tier_name, _tier_items in rekom["tiered_recommendations"].items():
+                                    story.append(Paragraph(_tier_name, styles["H2"]))
+                                    tier_rows = [["Pengendalian", "Pengaruh", "Est. Penurunan\nRisiko"]]
+                                    for _item in _tier_items:
+                                        tier_rows.append([
+                                            _item["control"],
+                                            _item["effect"],
+                                            f"~{_item['risk_reduction_pct']:.0f}%" if _item.get("risk_reduction_pct") is not None else "Kualitatif*",
+                                        ])
+                                    story.append(_build_table(
+                                        tier_rows, col_widths=[CONTENT_W*0.34, CONTENT_W*0.48, CONTENT_W*0.18]
+                                    ))
+                                    story.append(Spacer(1, 6))
+                                story.append(Paragraph(
+                                    "*Kualitatif = efeknya nyata secara rekayasa (mengurangi mekanisme penyebab erosi/"
+                                    "overflow), tapi besaran penurunan risikonya dalam persen belum bisa dihitung otomatis "
+                                    "oleh app ini karena bergantung pada spesifikasi konstruksi (mis. ukuran D50 riprap, "
+                                    "jenis vegetasi) yang ditentukan di tahap DED, di luar cakupan data numerik yang "
+                                    "tersedia saat ini.",
+                                    styles["Caption"]
+                                ))
+
+                            story.append(PageBreak())
+
+                            # ===================== BEFORE vs AFTER REKOMENDASI (1 halaman) =====================
+                            # BARU: ringkasan 1 halaman pengendalian -> pengaruh -> level risiko (skor & kategori
+                            # TARP) SEBELUM vs SESUDAH rekomendasi diterapkan.
+                            story.append(Paragraph(f"RINGKASAN BEFORE / AFTER REKOMENDASI — {seg['label'].upper()}", styles["H1"]))
+                            story.append(_divider())
+
+                            _risk_pct_before = min(seg["max_zone"] / 2.0 * 100, 150)
+                            _tarp_rows_before, _tarp_idx_before = _tarp_rows(seg["max_zone"])
+                            _cat_before = _tarp_rows_before[_tarp_idx_before + 1][0].split("  ←")[0] if _tarp_idx_before is not None else "-"
+
+                            _best_scenario_opt = (rekom.get("scenario_options") or [None])[0]
+                            if _best_scenario_opt:
+                                _vred = _best_scenario_opt["velocity_reduction_pct"] / 100.0
+                                # Estimasi risiko sesudah: skala score TARP diasumsikan turun proporsional
+                                # terhadap penurunan kecepatan aliran (perkiraan rekayasa, BUKAN hasil re-running
+                                # model erosi penuh -- dicatatkan jelas di catatan bawah tabel).
+                                _score_after_est = max(seg["max_zone"] * (1 - _vred), 0.0)
+                                _risk_pct_after = min(_score_after_est / 2.0 * 100, 150)
+                                _tarp_rows_after, _tarp_idx_after = _tarp_rows(_score_after_est)
+                                _cat_after = _tarp_rows_after[_tarp_idx_after + 1][0].split("  ←")[0] if _tarp_idx_after is not None else "-"
+                                _after_is_estimate = True
+                                _after_is_qualitative_estimate = False
+                            elif rekom.get("tiered_recommendations"):
+                                # BARU: fallback estimasi untuk kasus tanpa skenario geometri/hidraulik
+                                # kuantitatif (mis. rekomendasinya cuma Surface/Sediment/Monitoring).
+                                # Dipakai asumsi efektivitas KONSERVATIF per tingkat (batas bawah rentang
+                                # umum di literatur erosion & sediment control -- BUKAN hasil pengukuran
+                                # spesifik lokasi ini), digabung dengan rumus 1-produk(1-r) supaya efek
+                                # antar-tingkat tidak dijumlah naif (menghindari estimasi berlebihan).
+                                _tier_assumed_reduction = {
+                                    "Geometry Control": 0.35, "Hydraulic Control": 0.25,
+                                    "Surface Protection": 0.30, "Sediment Control": 0.40,
+                                    "Monitoring": 0.0,
+                                }
+                                _combined_keep = 1.0
+                                for _tn in rekom["tiered_recommendations"].keys():
+                                    _combined_keep *= (1 - _tier_assumed_reduction.get(_tn, 0.0))
+                                _vred_qual = 1 - _combined_keep
+                                if _vred_qual > 0:
+                                    _score_after_est = max(seg["max_zone"] * (1 - _vred_qual), 0.0)
                                     _risk_pct_after = min(_score_after_est / 2.0 * 100, 150)
                                     _tarp_rows_after, _tarp_idx_after = _tarp_rows(_score_after_est)
                                     _cat_after = _tarp_rows_after[_tarp_idx_after + 1][0].split("  ←")[0] if _tarp_idx_after is not None else "-"
                                     _after_is_estimate = True
-                                    _after_is_qualitative_estimate = False
-                                elif rekom.get("tiered_recommendations"):
-                                    # BARU: fallback estimasi untuk kasus tanpa skenario geometri/hidraulik
-                                    # kuantitatif (mis. rekomendasinya cuma Surface/Sediment/Monitoring).
-                                    # Dipakai asumsi efektivitas KONSERVATIF per tingkat (batas bawah rentang
-                                    # umum di literatur erosion & sediment control -- BUKAN hasil pengukuran
-                                    # spesifik lokasi ini), digabung dengan rumus 1-produk(1-r) supaya efek
-                                    # antar-tingkat tidak dijumlah naif (menghindari estimasi berlebihan).
-                                    _tier_assumed_reduction = {
-                                        "Geometry Control": 0.35, "Hydraulic Control": 0.25,
-                                        "Surface Protection": 0.30, "Sediment Control": 0.40,
-                                        "Monitoring": 0.0,
-                                    }
-                                    _combined_keep = 1.0
-                                    for _tn in rekom["tiered_recommendations"].keys():
-                                        _combined_keep *= (1 - _tier_assumed_reduction.get(_tn, 0.0))
-                                    _vred_qual = 1 - _combined_keep
-                                    if _vred_qual > 0:
-                                        _score_after_est = max(seg["max_zone"] * (1 - _vred_qual), 0.0)
-                                        _risk_pct_after = min(_score_after_est / 2.0 * 100, 150)
-                                        _tarp_rows_after, _tarp_idx_after = _tarp_rows(_score_after_est)
-                                        _cat_after = _tarp_rows_after[_tarp_idx_after + 1][0].split("  ←")[0] if _tarp_idx_after is not None else "-"
-                                        _after_is_estimate = True
-                                        _after_is_qualitative_estimate = True
-                                    else:
-                                        _risk_pct_after = _risk_pct_before
-                                        _cat_after = _cat_before
-                                        _after_is_estimate = False
-                                        _after_is_qualitative_estimate = False
+                                    _after_is_qualitative_estimate = True
                                 else:
-                                    _risk_pct_after = None
-                                    _cat_after = "Tidak ada intervensi tambahan dipicu (risiko dalam ambang aman)"
+                                    _risk_pct_after = _risk_pct_before
+                                    _cat_after = _cat_before
                                     _after_is_estimate = False
                                     _after_is_qualitative_estimate = False
+                            else:
+                                _risk_pct_after = None
+                                _cat_after = "Tidak ada intervensi tambahan dipicu (risiko dalam ambang aman)"
+                                _after_is_estimate = False
+                                _after_is_qualitative_estimate = False
 
-                                ba_rows = [
-                                    ["", "SEBELUM (Kondisi Saat Ini)", "SESUDAH (Estimasi Pasca-Rekomendasi)"],
-                                    ["Level Risiko (Kategori TARP)", _cat_before, _cat_after],
-                                    ["Skor Risiko (persentase terhadap ambang kritis TARP)",
-                                     f"{_risk_pct_before:.0f}%",
-                                     f"{_risk_pct_after:.0f}%" if _risk_pct_after is not None else "-"],
-                                    ["Kecepatan Aliran",
-                                     f"{hydro['v_normal_ms']:.2f} m/s" if hydro else f"{seg['velocity_hulu']:.2f} m/s",
-                                     (f"{_best_scenario_opt['candidate_velocity_ms']:.2f} m/s" if _best_scenario_opt else "-")],
-                                ]
-                                story.append(_build_table(ba_rows, col_widths=[CONTENT_W*0.34, CONTENT_W*0.33, CONTENT_W*0.33]))
-                                story.append(Spacer(1, 6))
+                            ba_rows = [
+                                ["", "SEBELUM (Kondisi Saat Ini)", "SESUDAH (Estimasi Pasca-Rekomendasi)"],
+                                ["Level Risiko (Kategori TARP)", _cat_before, _cat_after],
+                                ["Skor Risiko (persentase terhadap ambang kritis TARP)",
+                                 f"{_risk_pct_before:.0f}%",
+                                 f"{_risk_pct_after:.0f}%" if _risk_pct_after is not None else "-"],
+                                ["Kecepatan Aliran",
+                                 f"{hydro['v_normal_ms']:.2f} m/s" if hydro else f"{seg['velocity_hulu']:.2f} m/s",
+                                 (f"{_best_scenario_opt['candidate_velocity_ms']:.2f} m/s" if _best_scenario_opt else "-")],
+                            ]
+                            story.append(_build_table(ba_rows, col_widths=[CONTENT_W*0.34, CONTENT_W*0.33, CONTENT_W*0.33]))
+                            story.append(Spacer(1, 6))
 
-                                story.append(Paragraph("Pengendalian yang Diterapkan (Ringkasan)", styles["H2"]))
-                                if rekom.get("tiered_recommendations"):
-                                    for _tier_name, _tier_items in rekom["tiered_recommendations"].items():
-                                        for _item in _tier_items:
-                                            story.append(Paragraph(f"• <b>[{_tier_name}]</b> {_item['control']}", styles["Bullet"]))
-                                else:
-                                    story.append(Paragraph(
-                                        "Tidak ada pengendalian tambahan yang dipicu untuk segmen ini — indikator risiko "
-                                        "berada dalam ambang yang tidak memerlukan intervensi geometri/hidraulik/permukaan "
-                                        "tambahan di luar praktik O&amp;M rutin.",
-                                        styles["Body"]
-                                    ))
-                                story.append(Spacer(1, 6))
-
-                                if _after_is_estimate and not _after_is_qualitative_estimate:
-                                    story.append(Paragraph(
-                                        "<b>Catatan:</b> Skor &amp; kategori \u201cSESUDAH\u201d adalah estimasi rekayasa (skor TARP "
-                                        "diasumsikan turun proporsional terhadap penurunan kecepatan aliran dari opsi skenario "
-                                        "geometri/hidraulik terbaik di atas) — BUKAN hasil re-running model erosi 3D secara "
-                                        "penuh. Untuk verifikasi akhir sebelum konstruksi, disarankan re-run RUN ANALYSIS "
-                                        "dengan geometri DXF yang sudah direvisi sesuai rekomendasi.",
-                                        styles["Caption"]
-                                    ))
-                                elif _after_is_estimate and _after_is_qualitative_estimate:
-                                    story.append(Paragraph(
-                                        "<b>Catatan:</b> Segmen ini tidak punya skenario geometri/hidraulik kuantitatif, "
-                                        "jadi skor &amp; kategori \u201cSESUDAH\u201d di atas adalah estimasi berbasis ASUMSI "
-                                        "efektivitas konservatif per jenis pengendalian (Surface Protection \u2248 30%, Sediment "
-                                        "Control \u2248 40%, Hydraulic Control \u2248 25% — batas bawah rentang umum di literatur "
-                                        "erosion &amp; sediment control, digabung dengan rumus 1\u2212\u220f(1\u2212r) supaya efeknya "
-                                        "tidak dijumlah berlebihan), BUKAN hasil pengukuran/hitungan spesifik lokasi ini. "
-                                        "Efektivitas AKTUAL sangat tergantung spesifikasi konstruksi (ukuran D50 riprap, jenis "
-                                        "vegetasi, dimensi sediment trap) yang ditentukan di tahap DED.",
-                                        styles["Caption"]
-                                    ))
-                                else:
-                                    story.append(Paragraph(
-                                        "<b>Catatan:</b> Tidak ada rekomendasi tambahan yang dipicu untuk segmen ini — kondisi "
-                                        "SEBELUM dan SESUDAH dianggap sama karena indikator risiko sudah berada dalam ambang "
-                                        "yang tidak memerlukan intervensi di luar praktik O&amp;M rutin.",
-                                        styles["Caption"]
-                                    ))
-
-                                story.append(PageBreak())
-
-                            # ===================== INTERPRETASI & REKOMENDASI (RINGKASAN PROYEK) =====================
-                            story.append(Paragraph("INTERPRETASI &amp; REKOMENDASI", styles["H1"]))
-                            _IN = _rep_interpretation(_F, seg_results_all)
-                            if _IN["ai_used"]:
-                                story.append(_status_box(
-                                    "\u26a0 Sebagian narasi di bawah dihasilkan AI dari hasil numerik seluruh segmen yang dianalisis. "
-                                    "WAJIB DIPERIKSA & DITANDATANGANI ENGINEER GEOTEKNIK BERLISENSI. Nilai indeks/kuantitatif tetap dari solver aplikasi.",
-                                    "#D97A00"
-                                ))
-                                story.append(Spacer(1, 8))
-                            story.append(Paragraph("Ringkasan Status", styles["H2"]))
-                            story.append(Paragraph(_IN["status_par"], styles["Body"]))
-                            if _IN["drivers"]:
-                                story.append(Paragraph("Faktor Pengendali", styles["H2"]))
-                                for _dn, _dt in _IN["drivers"]:
-                                    story.append(Paragraph(f"<b>{_dn}:</b> {_dt}", styles["Bullet"]))
-                            if _IN["fit"]:
-                                story.append(Paragraph("Kesesuaian Kriteria", styles["H2"]))
-                                for _ft, _fc in _IN["fit"]:
-                                    _col = {"critical": "#C62828", "warn": "#D97A00", "ok": "#1B7F3B"}[_fc]
-                                    story.append(Paragraph(f'<font color="{_col}">\u25cf</font> {_ft}', styles["Bullet"]))
-                            if _IN["worst_narrative"]:
-                                story.append(Paragraph(f"Catatan tambahan — {_F['worst'].get('label', '-')}", styles["H2"]))
-                                story.append(Paragraph(_IN["worst_narrative"].replace(chr(10), "<br/>"), styles["Body"]))
-                            if _IN["worst_recs"]:
-                                story.append(Paragraph(f"Rekomendasi prioritas — {_F['worst'].get('label', '-')}", styles["H2"]))
-                                for _r in _IN["worst_recs"]:
-                                    story.append(Paragraph(f"• {_r}", styles["Bullet"]))
-                            story.append(Spacer(1, 10))
-
-                            # ===================== LEMBAR PENGESAHAN (REVIEWER SIGN-OFF) =====================
-                            if reviewer_name or reviewer_role or reviewer_signature_path:
-                                story.append(Paragraph("LEMBAR PENGESAHAN", styles["H1"]))
-                                story.append(_divider())
+                            story.append(Paragraph("Pengendalian yang Diterapkan (Ringkasan)", styles["H2"]))
+                            if rekom.get("tiered_recommendations"):
+                                for _tier_name, _tier_items in rekom["tiered_recommendations"].items():
+                                    for _item in _tier_items:
+                                        story.append(Paragraph(f"• <b>[{_tier_name}]</b> {_item['control']}", styles["Bullet"]))
+                            else:
                                 story.append(Paragraph(
-                                    "Laporan teknis ini telah ditinjau (reviewed) oleh pihak berikut sebelum diunduh/didistribusikan:",
+                                    "Tidak ada pengendalian tambahan yang dipicu untuk segmen ini — indikator risiko "
+                                    "berada dalam ambang yang tidak memerlukan intervensi geometri/hidraulik/permukaan "
+                                    "tambahan di luar praktik O&amp;M rutin.",
                                     styles["Body"]
                                 ))
-                                story.append(Spacer(1, 10))
-                                if reviewer_signature_path:
-                                    try:
-                                        story.append(_fit_image(reviewer_signature_path, max_width=5 * cm))
-                                    except Exception:
-                                        pass
-                                story.append(Spacer(1, 4))
-                                sign_rows = [
-                                    ["Item", "Keterangan"],
-                                    [_t("Nama Reviewer", "Reviewer Name"), reviewer_name or "-"],
-                                    [_t("Jabatan / Peran", "Position / Role"), reviewer_role or "-"],
-                                    ["Tanggal Review", reviewer_date.strftime("%d %B %Y") if reviewer_date else "-"],
-                                ]
-                                story.append(_build_table(sign_rows, col_widths=[CONTENT_W * 0.35, CONTENT_W * 0.65]))
-                                story.append(Spacer(1, 14))
+                            story.append(Spacer(1, 6))
 
-                            # ---- DASAR KLASIFIKASI & AMBANG (selalu disertakan, juga pada laporan ringkas) ----
-                            story.append(Paragraph("DASAR KLASIFIKASI & AMBANG", styles["H2"]))
+                            if _after_is_estimate and not _after_is_qualitative_estimate:
+                                story.append(Paragraph(
+                                    "<b>Catatan:</b> Skor &amp; kategori \u201cSESUDAH\u201d adalah estimasi rekayasa (skor TARP "
+                                    "diasumsikan turun proporsional terhadap penurunan kecepatan aliran dari opsi skenario "
+                                    "geometri/hidraulik terbaik di atas) — BUKAN hasil re-running model erosi 3D secara "
+                                    "penuh. Untuk verifikasi akhir sebelum konstruksi, disarankan re-run RUN ANALYSIS "
+                                    "dengan geometri DXF yang sudah direvisi sesuai rekomendasi.",
+                                    styles["Caption"]
+                                ))
+                            elif _after_is_estimate and _after_is_qualitative_estimate:
+                                story.append(Paragraph(
+                                    "<b>Catatan:</b> Segmen ini tidak punya skenario geometri/hidraulik kuantitatif, "
+                                    "jadi skor &amp; kategori \u201cSESUDAH\u201d di atas adalah estimasi berbasis ASUMSI "
+                                    "efektivitas konservatif per jenis pengendalian (Surface Protection \u2248 30%, Sediment "
+                                    "Control \u2248 40%, Hydraulic Control \u2248 25% — batas bawah rentang umum di literatur "
+                                    "erosion &amp; sediment control, digabung dengan rumus 1\u2212\u220f(1\u2212r) supaya efeknya "
+                                    "tidak dijumlah berlebihan), BUKAN hasil pengukuran/hitungan spesifik lokasi ini. "
+                                    "Efektivitas AKTUAL sangat tergantung spesifikasi konstruksi (ukuran D50 riprap, jenis "
+                                    "vegetasi, dimensi sediment trap) yang ditentukan di tahap DED.",
+                                    styles["Caption"]
+                                ))
+                            else:
+                                story.append(Paragraph(
+                                    "<b>Catatan:</b> Tidak ada rekomendasi tambahan yang dipicu untuk segmen ini — kondisi "
+                                    "SEBELUM dan SESUDAH dianggap sama karena indikator risiko sudah berada dalam ambang "
+                                    "yang tidak memerlukan intervensi di luar praktik O&amp;M rutin.",
+                                    styles["Caption"]
+                                ))
+
+                            story.append(PageBreak())
+
+                        # ===================== INTERPRETASI & REKOMENDASI (RINGKASAN PROYEK) =====================
+                        story.append(Paragraph("INTERPRETASI &amp; REKOMENDASI", styles["H1"]))
+                        _IN = _rep_interpretation(_F, seg_results_all)
+                        if _IN["ai_used"]:
+                            story.append(_status_box(
+                                "\u26a0 Sebagian narasi di bawah dihasilkan AI dari hasil numerik seluruh segmen yang dianalisis. "
+                                "WAJIB DIPERIKSA & DITANDATANGANI ENGINEER GEOTEKNIK BERLISENSI. Nilai indeks/kuantitatif tetap dari solver aplikasi.",
+                                "#D97A00"
+                            ))
+                            story.append(Spacer(1, 8))
+                        story.append(Paragraph("Ringkasan Status", styles["H2"]))
+                        story.append(Paragraph(_IN["status_par"], styles["Body"]))
+                        if _IN["drivers"]:
+                            story.append(Paragraph("Faktor Pengendali", styles["H2"]))
+                            for _dn, _dt in _IN["drivers"]:
+                                story.append(Paragraph(f"<b>{_dn}:</b> {_dt}", styles["Bullet"]))
+                        if _IN["fit"]:
+                            story.append(Paragraph("Kesesuaian Kriteria", styles["H2"]))
+                            for _ft, _fc in _IN["fit"]:
+                                _col = {"critical": "#C62828", "warn": "#D97A00", "ok": "#1B7F3B"}[_fc]
+                                story.append(Paragraph(f'<font color="{_col}">\u25cf</font> {_ft}', styles["Bullet"]))
+                        if _IN["worst_narrative"]:
+                            story.append(Paragraph(f"Catatan tambahan — {_F['worst'].get('label', '-')}", styles["H2"]))
+                            story.append(Paragraph(_IN["worst_narrative"].replace(chr(10), "<br/>"), styles["Body"]))
+                        if _IN["worst_recs"]:
+                            story.append(Paragraph(f"Rekomendasi prioritas — {_F['worst'].get('label', '-')}", styles["H2"]))
+                            for _r in _IN["worst_recs"]:
+                                story.append(Paragraph(f"• {_r}", styles["Bullet"]))
+                        story.append(Spacer(1, 10))
+
+                        # ===================== LEMBAR PENGESAHAN (REVIEWER SIGN-OFF) =====================
+                        if reviewer_name or reviewer_role or reviewer_signature_path:
+                            story.append(Paragraph("LEMBAR PENGESAHAN", styles["H1"]))
+                            story.append(_divider())
                             story.append(Paragraph(
-                                "Tabel berikut menyatakan dasar tiap klasifikasi yang dipakai pada laporan ini: regulasi, "
-                                "literatur, atau ambang internal (indikatif). Kriteria regulasi yang relevan (Kepmen ESDM "
-                                "1827 K/30/MEM/2018) mengatur FK/PK kestabilan lereng, bukan indeks erosi permukaan; ambang "
-                                "indeks erosi pada laporan ini adalah ambang internal dan perlu diselaraskan dengan standar/"
-                                "TARP perusahaan serta validasi lapangan sebelum dipakai untuk keputusan.",
+                                "Laporan teknis ini telah ditinjau (reviewed) oleh pihak berikut sebelum diunduh/didistribusikan:",
                                 styles["Body"]
                             ))
+                            story.append(Spacer(1, 10))
+                            if reviewer_signature_path:
+                                try:
+                                    story.append(_fit_image(reviewer_signature_path, max_width=5 * cm))
+                                except Exception:
+                                    pass
                             story.append(Spacer(1, 4))
-                            story.append(_build_table(
-                                _classification_report_rows(pdf_safe=True),
-                                col_widths=[CONTENT_W * 0.19, CONTENT_W * 0.30, CONTENT_W * 0.13, CONTENT_W * 0.38],
-                            ))
-                            story.append(Spacer(1, 12))
+                            sign_rows = [
+                                ["Item", "Keterangan"],
+                                [_t("Nama Reviewer", "Reviewer Name"), reviewer_name or "-"],
+                                [_t("Jabatan / Peran", "Position / Role"), reviewer_role or "-"],
+                                ["Tanggal Review", reviewer_date.strftime("%d %B %Y") if reviewer_date else "-"],
+                            ]
+                            story.append(_build_table(sign_rows, col_widths=[CONTENT_W * 0.35, CONTENT_W * 0.65]))
+                            story.append(Spacer(1, 14))
 
-                            if not _report_concise:
-                                story.append(Paragraph("REFERENSI METODOLOGI", styles["H2"]))
-                                for ref in _classification_report_refs(pdf_safe=True):
-                                    story.append(Paragraph(f"• {ref}", styles["Body"]))
-                                for ref in [
-                                    "Hjulström, F. (1935). Studies of the morphological activity of rivers as illustrated by the "
-                                    "River Fyris. Bulletin of the Geological Institute of Uppsala, 25, 221-527.",
-                                    "Shields, A. (1936). Anwendung der Ähnlichkeitsmechanik und der Turbulenzforschung auf die "
-                                    "Geschiebebewegung. Mitteilungen der Preußischen Versuchsanstalt für Wasserbau und Schiffbau, Berlin.",
-                                    "Partheniades, E. (1965). Erosion and deposition of cohesive soils. Journal of the Hydraulics "
-                                    "Division, ASCE, 91(1), 105-139.",
-                                    "Chow, V.T. (1959). Open-Channel Hydraulics. McGraw-Hill, New York. (persamaan Manning)",
-                                    "Mononobe (dalam Suripin, 2004). Sistem Drainase Perkotaan yang Berkelanjutan — rumus "
-                                    "intensitas hujan dari data hujan harian.",
-                                    "Cohen, J. (1960). A coefficient of agreement for nominal scales. Educational and Psychological "
-                                    "Measurement, 20(1), 37-46.",
-                                    "Landis, J.R., & Koch, G.G. (1977). The measurement of observer agreement for categorical data. "
-                                    "Biometrics, 33(1), 159-174.",
-                                ]:
-                                    story.append(Paragraph(f"• {ref}", styles["Body"]))
+                        # ---- DASAR KLASIFIKASI & AMBANG (selalu disertakan, juga pada laporan ringkas) ----
+                        story.append(Paragraph("DASAR KLASIFIKASI & AMBANG", styles["H2"]))
+                        story.append(Paragraph(
+                            "Tabel berikut menyatakan dasar tiap klasifikasi yang dipakai pada laporan ini: regulasi, "
+                            "literatur, atau ambang internal (indikatif). Kriteria regulasi yang relevan (Kepmen ESDM "
+                            "1827 K/30/MEM/2018) mengatur FK/PK kestabilan lereng, bukan indeks erosi permukaan; ambang "
+                            "indeks erosi pada laporan ini adalah ambang internal dan perlu diselaraskan dengan standar/"
+                            "TARP perusahaan serta validasi lapangan sebelum dipakai untuk keputusan.",
+                            styles["Body"]
+                        ))
+                        story.append(Spacer(1, 4))
+                        story.append(_build_table(
+                            _classification_report_rows(pdf_safe=True),
+                            col_widths=[CONTENT_W * 0.19, CONTENT_W * 0.30, CONTENT_W * 0.13, CONTENT_W * 0.38],
+                        ))
+                        story.append(Spacer(1, 12))
 
-                            doc.build(story)
+                        if not _report_concise:
+                            story.append(Paragraph("REFERENSI METODOLOGI", styles["H2"]))
+                            for ref in _classification_report_refs(pdf_safe=True):
+                                story.append(Paragraph(f"• {ref}", styles["Body"]))
+                            for ref in [
+                                "Hjulström, F. (1935). Studies of the morphological activity of rivers as illustrated by the "
+                                "River Fyris. Bulletin of the Geological Institute of Uppsala, 25, 221-527.",
+                                "Shields, A. (1936). Anwendung der Ähnlichkeitsmechanik und der Turbulenzforschung auf die "
+                                "Geschiebebewegung. Mitteilungen der Preußischen Versuchsanstalt für Wasserbau und Schiffbau, Berlin.",
+                                "Partheniades, E. (1965). Erosion and deposition of cohesive soils. Journal of the Hydraulics "
+                                "Division, ASCE, 91(1), 105-139.",
+                                "Chow, V.T. (1959). Open-Channel Hydraulics. McGraw-Hill, New York. (persamaan Manning)",
+                                "Mononobe (dalam Suripin, 2004). Sistem Drainase Perkotaan yang Berkelanjutan — rumus "
+                                "intensitas hujan dari data hujan harian.",
+                                "Cohen, J. (1960). A coefficient of agreement for nominal scales. Educational and Psychological "
+                                "Measurement, 20(1), 37-46.",
+                                "Landis, J.R., & Koch, G.G. (1977). The measurement of observer agreement for categorical data. "
+                                "Biometrics, 33(1), 159-174.",
+                            ]:
+                                story.append(Paragraph(f"• {ref}", styles["Body"]))
 
-                            # PERBAIKAN: sebelumnya st.download_button dipanggil LANGSUNG di sini,
-                            # di dalam blok "if gen_report_run" yang sekali-pakai (di-pop dari
-                            # session_state). Begitu ada rerun berikutnya -- termasuk rerun yang
-                            # dipicu oleh KLIK tombol download itu sendiri -- flag-nya sudah hilang,
-                            # blok ini tidak jalan lagi, dan tombol download pun ikut hilang/gagal
-                            # tampil. Sekarang byte PDF-nya disimpan ke session_state, dan tombol
-                            # download-nya dirender terpisah di luar blok ini (lihat di bawah) supaya
-                            # tetap muncul selama byte-nya ada -- pola yang sama dengan tombol
-                            # "Download Project (.eroproj)" yang sudah terbukti bisa diunduh.
-                            with open(pdf_file, "rb") as f:
-                                st.session_state["report_pdf_bytes"] = f.read()
-                            st.session_state["report_pdf_name"] = "Laporan_Teknis_Erosi_Sedimentasi.pdf"
+                        doc.build(story)
 
-                            # ============================================================
-                            # ================= EXPORT WORD (.docx) =====================
-                            # ============================================================
-                            # Mengikuti struktur konten yang sama dengan PDF di atas (ringkasan
-                            # eksekutif, data & parameter, hidrologi-hidrolika, rekomendasi
-                            # bertingkat, root cause, skenario, before/after) tapi ditulis ulang
-                            # dari `seg_results_all` secara independen (bukan menumpang loop PDF
-                            # di atas) -- supaya perubahan salah satu format tidak berisiko
-                            # merusak format yang lain.
-                            def _docx_shade_cell(cell, hex_color):
-                                shd = docx_qn("w:shd")
-                                from docx.oxml import OxmlElement
-                                el = OxmlElement("w:shd")
-                                el.set(docx_qn("w:val"), "clear")
-                                el.set(docx_qn("w:color"), "auto")
-                                el.set(docx_qn("w:fill"), hex_color)
-                                cell._tc.get_or_add_tcPr().append(el)
-
-                            def _docx_heading(doc_, text, level=1):
-                                h = doc_.add_heading(text, level=level)
-                                for run in h.runs:
-                                    run.font.color.rgb = DocxRGBColor(0x0B, 0x3D, 0x2E)
-                                return h
-
-                            def _docx_table(doc_, rows, header_bg="0B3D2E"):
-                                n_cols = len(rows[0])
-                                tbl = doc_.add_table(rows=len(rows), cols=n_cols)
-                                tbl.style = "Table Grid"
-                                tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
-                                for r_i, row in enumerate(rows):
-                                    for c_i, val in enumerate(row):
-                                        cell = tbl.cell(r_i, c_i)
-                                        cell.text = str(val)
-                                        for p in cell.paragraphs:
-                                            for run in p.runs:
-                                                run.font.size = DocxPt(9)
-                                                if r_i == 0:
-                                                    run.font.bold = True
-                                                    run.font.color.rgb = DocxRGBColor(0xFF, 0xFF, 0xFF)
-                                        if r_i == 0:
-                                            _docx_shade_cell(cell, header_bg)
-                                        elif r_i % 2 == 0:
-                                            _docx_shade_cell(cell, "F2F6F4")
-                                return tbl
-
-                            docx_doc = DocxDocument()
-
-                            def _docx_status_box(doc_, text, hex_color):
-                                tb = doc_.add_table(rows=1, cols=1)
-                                c = tb.cell(0, 0)
-                                c.text = text
-                                for p_ in c.paragraphs:
-                                    p_.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                                    for r_ in p_.runs:
-                                        r_.font.bold = True
-                                        r_.font.size = DocxPt(12)
-                                        r_.font.color.rgb = DocxRGBColor(0xFF, 0xFF, 0xFF)
-                                _docx_shade_cell(c, hex_color.lstrip("#"))
-                                return tb
-
-                            _t_title = docx_doc.add_heading("LAPORAN TEKNIS ANALISIS EROSI, SEDIMENTASI & LIMPASAN", level=0)
-                            for run in _t_title.runs:
-                                run.font.color.rgb = DocxRGBColor(0x0B, 0x3D, 0x2E)
-                            _sub_p = docx_doc.add_paragraph("Evaluasi Geoteknik Sekat/Channel Berbasis Model Numerik DXF (DEM, D8, Hidrologi-Hidrolika)")
-                            _sub_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-                            _rp_d = st.session_state.get("rep_project") or (st.session_state.get("active_project_name") or "-")
-                            _rl_d = st.session_state.get("rep_location") or "-"
-                            _ra_d = st.session_state.get("rep_author") or "-"
-                            _rw_d = st.session_state.get("rep_worktype") or "-"
-                            for _lbl, _val in [("Nama proyek/pekerjaan", _rp_d), ("Lokasi / IUP", _rl_d), ("Jenis pekerjaan", _rw_d),
-                                              ("Penyusun", _ra_d), ("Tanggal", pd.Timestamp.now().strftime("%d %B %Y, %H:%M") + " WIB"),
-                                              ("Jumlah segmen dianalisis", str(n_seg)),
-                                              ("Sumber hujan", (rain_meta_global or {}).get("source", "tidak tersedia"))]:
-                                _pm = docx_doc.add_paragraph()
-                                _pm.add_run(f"{_lbl}: ").bold = True
-                                _pm.add_run(str(_val))
-
-                            _rep_map_path_docx = os.path.join(tempfile.mkdtemp(), "peta_lokasi_docx.png")
-                            if _rep_location_map(seg_results_all, st.session_state.get("section_results"), _rep_map_path_docx):
-                                _docx_heading(docx_doc, "PETA LOKASI & SEGMEN", level=1)
-                                docx_doc.add_picture(_rep_map_path_docx, width=DocxCm(16))
-                                docx_doc.add_paragraph(
-                                    "Gambar 1. Peta lokasi (DEM & hillshade) seluruh segmen yang dianalisis — garis berwarna = boundary segmen, "
-                                    "garis kuning = garis Cross Section, segitiga merah = titik risiko terparah per segmen."
-                                ).italic = True
-
-                            _docx_heading(docx_doc, "RINGKASAN & KESIMPULAN", level=1)
-                            _Fd = _rep_facts(seg_results_all, st.session_state.get("section_results"), rain_meta_global, rain_val_global)
-                            for _p_txt_d in _rep_summary_paragraphs(_Fd):
-                                _rep_docx_add_rich(docx_doc.add_paragraph(), _p_txt_d)
-                            if _overridden_by or _low_priority_skip:
-                                docx_doc.add_paragraph(
-                                    (f" {len(_overridden_by)} segmen area-nya tumpang tindih dengan segmen lain yang dibuat "
-                                     f"belakangan sehingga hasilnya digabung (tidak ditampilkan dobel) — lihat catatan pada Tabel 1."
-                                     if _overridden_by else "")
-                                    + (f" {len(_low_priority_skip)} segmen risikonya rendah & ditampilkan ringkas — lihat Tabel 1."
-                                       if _low_priority_skip else "")
-                                )
-                            _kes_key_d, _kes_txt_d, _kes_col_d = _Fd["conclusion"]
-                            _pkes = docx_doc.add_paragraph()
-                            _pkes.add_run("Kesimpulan:").bold = True
-                            _docx_status_box(docx_doc, _kes_txt_d, _kes_col_d)
-                            docx_doc.add_paragraph("")
-
-                            _docx_heading(docx_doc, "KRITERIA ACUAN", level=1)
-                            docx_doc.add_paragraph(
-                                "Setiap klasifikasi/ambang pada laporan ini dicatat dasarnya: regulasi, literatur, atau ambang internal (indikatif). "
-                                "Kriteria regulasi yang relevan pada aplikasi ini (Kepmen ESDM 1827 K/30/MEM/2018) mengatur FK/PK kestabilan lereng, "
-                                "BUKAN indeks erosi permukaan — ambang indeks erosi di bawah ini adalah ambang internal aplikasi dan perlu diselaraskan "
-                                "dengan standar/TARP perusahaan serta validasi lapangan sebelum dipakai untuk keputusan."
+                        with open(pdf_file, "rb") as f:
+                            st.download_button(
+                                label="Download Laporan Teknis Lengkap (PDF)",
+                                data=f,
+                                file_name="Laporan_Teknis_Erosi_Sedimentasi.pdf",
+                                mime="application/pdf"
                             )
-                            _docx_table(docx_doc, _rep_criteria_rows(_Fd, pdf_safe=False))
 
-                            _docx_heading(docx_doc, "METODOLOGI", level=1)
-                            for _mh_d, _mt_d in _rep_method_paragraphs(_Fd):
-                                _pmm = docx_doc.add_paragraph()
-                                _pmm.add_run(f"{_mh_d}. ").bold = True
-                                _pmm.add_run(_mt_d)
+                        # ============================================================
+                        # ================= EXPORT WORD (.docx) =====================
+                        # ============================================================
+                        # Mengikuti struktur konten yang sama dengan PDF di atas (ringkasan
+                        # eksekutif, data & parameter, hidrologi-hidrolika, rekomendasi
+                        # bertingkat, root cause, skenario, before/after) tapi ditulis ulang
+                        # dari `seg_results_all` secara independen (bukan menumpang loop PDF
+                        # di atas) -- supaya perubahan salah satu format tidak berisiko
+                        # merusak format yang lain.
+                        def _docx_shade_cell(cell, hex_color):
+                            shd = docx_qn("w:shd")
+                            from docx.oxml import OxmlElement
+                            el = OxmlElement("w:shd")
+                            el.set(docx_qn("w:val"), "clear")
+                            el.set(docx_qn("w:color"), "auto")
+                            el.set(docx_qn("w:fill"), hex_color)
+                            cell._tc.get_or_add_tcPr().append(el)
 
-                            _docx_heading(docx_doc, "DATA MASUKAN PER SEGMEN", level=1)
-                            _docx_table(docx_doc, _rep_input_rows(seg_results_all))
+                        def _docx_heading(doc_, text, level=1):
+                            h = doc_.add_heading(text, level=level)
+                            for run in h.runs:
+                                run.font.color.rgb = DocxRGBColor(0x0B, 0x3D, 0x2E)
+                            return h
+
+                        def _docx_table(doc_, rows, header_bg="0B3D2E"):
+                            n_cols = len(rows[0])
+                            tbl = doc_.add_table(rows=len(rows), cols=n_cols)
+                            tbl.style = "Table Grid"
+                            tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+                            for r_i, row in enumerate(rows):
+                                for c_i, val in enumerate(row):
+                                    cell = tbl.cell(r_i, c_i)
+                                    cell.text = str(val)
+                                    for p in cell.paragraphs:
+                                        for run in p.runs:
+                                            run.font.size = DocxPt(9)
+                                            if r_i == 0:
+                                                run.font.bold = True
+                                                run.font.color.rgb = DocxRGBColor(0xFF, 0xFF, 0xFF)
+                                    if r_i == 0:
+                                        _docx_shade_cell(cell, header_bg)
+                                    elif r_i % 2 == 0:
+                                        _docx_shade_cell(cell, "F2F6F4")
+                            return tbl
+
+                        docx_doc = DocxDocument()
+
+                        def _docx_status_box(doc_, text, hex_color):
+                            tb = doc_.add_table(rows=1, cols=1)
+                            c = tb.cell(0, 0)
+                            c.text = text
+                            for p_ in c.paragraphs:
+                                p_.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                for r_ in p_.runs:
+                                    r_.font.bold = True
+                                    r_.font.size = DocxPt(12)
+                                    r_.font.color.rgb = DocxRGBColor(0xFF, 0xFF, 0xFF)
+                            _docx_shade_cell(c, hex_color.lstrip("#"))
+                            return tb
+
+                        _t_title = docx_doc.add_heading("LAPORAN TEKNIS ANALISIS EROSI, SEDIMENTASI & LIMPASAN", level=0)
+                        for run in _t_title.runs:
+                            run.font.color.rgb = DocxRGBColor(0x0B, 0x3D, 0x2E)
+                        _sub_p = docx_doc.add_paragraph("Evaluasi Geoteknik Sekat/Channel Berbasis Model Numerik DXF (DEM, D8, Hidrologi-Hidrolika)")
+                        _sub_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+                        _rp_d = st.session_state.get("rep_project") or (st.session_state.get("active_project_name") or "-")
+                        _rl_d = st.session_state.get("rep_location") or "-"
+                        _ra_d = st.session_state.get("rep_author") or "-"
+                        _rw_d = st.session_state.get("rep_worktype") or "-"
+                        for _lbl, _val in [("Nama proyek/pekerjaan", _rp_d), ("Lokasi / IUP", _rl_d), ("Jenis pekerjaan", _rw_d),
+                                          ("Penyusun", _ra_d), ("Tanggal", pd.Timestamp.now().strftime("%d %B %Y, %H:%M") + " WIB"),
+                                          ("Jumlah segmen dianalisis", str(n_seg)),
+                                          ("Sumber hujan", (rain_meta_global or {}).get("source", "tidak tersedia"))]:
+                            _pm = docx_doc.add_paragraph()
+                            _pm.add_run(f"{_lbl}: ").bold = True
+                            _pm.add_run(str(_val))
+
+                        _rep_map_path_docx = os.path.join(tempfile.mkdtemp(), "peta_lokasi_docx.png")
+                        if _rep_location_map(seg_results_all, st.session_state.get("section_results"), _rep_map_path_docx):
+                            _docx_heading(docx_doc, "PETA LOKASI & SEGMEN", level=1)
+                            docx_doc.add_picture(_rep_map_path_docx, width=DocxCm(16))
+                            docx_doc.add_paragraph(
+                                "Gambar 1. Peta lokasi (DEM & hillshade) seluruh segmen yang dianalisis — garis berwarna = boundary segmen, "
+                                "garis kuning = garis Cross Section, segitiga merah = titik risiko terparah per segmen."
+                            ).italic = True
+
+                        _docx_heading(docx_doc, "RINGKASAN & KESIMPULAN", level=1)
+                        _Fd = _rep_facts(seg_results_all, st.session_state.get("section_results"), rain_meta_global, rain_val_global)
+                        for _p_txt_d in _rep_summary_paragraphs(_Fd):
+                            _rep_docx_add_rich(docx_doc.add_paragraph(), _p_txt_d)
+                        if _overridden_by or _low_priority_skip:
+                            docx_doc.add_paragraph(
+                                (f" {len(_overridden_by)} segmen area-nya tumpang tindih dengan segmen lain yang dibuat "
+                                 f"belakangan sehingga hasilnya digabung (tidak ditampilkan dobel) — lihat catatan pada Tabel 1."
+                                 if _overridden_by else "")
+                                + (f" {len(_low_priority_skip)} segmen risikonya rendah & ditampilkan ringkas — lihat Tabel 1."
+                                   if _low_priority_skip else "")
+                            )
+                        _kes_key_d, _kes_txt_d, _kes_col_d = _Fd["conclusion"]
+                        _pkes = docx_doc.add_paragraph()
+                        _pkes.add_run("Kesimpulan:").bold = True
+                        _docx_status_box(docx_doc, _kes_txt_d, _kes_col_d)
+                        docx_doc.add_paragraph("")
+
+                        _docx_heading(docx_doc, "KRITERIA ACUAN", level=1)
+                        docx_doc.add_paragraph(
+                            "Setiap klasifikasi/ambang pada laporan ini dicatat dasarnya: regulasi, literatur, atau ambang internal (indikatif). "
+                            "Kriteria regulasi yang relevan pada aplikasi ini (Kepmen ESDM 1827 K/30/MEM/2018) mengatur FK/PK kestabilan lereng, "
+                            "BUKAN indeks erosi permukaan — ambang indeks erosi di bawah ini adalah ambang internal aplikasi dan perlu diselaraskan "
+                            "dengan standar/TARP perusahaan serta validasi lapangan sebelum dipakai untuk keputusan."
+                        )
+                        _docx_table(docx_doc, _rep_criteria_rows(_Fd, pdf_safe=False))
+
+                        _docx_heading(docx_doc, "METODOLOGI", level=1)
+                        for _mh_d, _mt_d in _rep_method_paragraphs(_Fd):
+                            _pmm = docx_doc.add_paragraph()
+                            _pmm.add_run(f"{_mh_d}. ").bold = True
+                            _pmm.add_run(_mt_d)
+
+                        _docx_heading(docx_doc, "DATA MASUKAN PER SEGMEN", level=1)
+                        _docx_table(docx_doc, _rep_input_rows(seg_results_all))
+                        docx_doc.add_page_break()
+
+                        _docx_heading(docx_doc, "RINGKASAN EKSEKUTIF", level=1)
+                        docx_doc.add_paragraph(
+                            f"Laporan ini merangkum hasil evaluasi geoteknik otomatis terhadap {n_seg} segmen "
+                            f"sekat/channel berdasarkan pemodelan permukaan 3D dari data DXF, dikombinasikan dengan "
+                            f"analisis hidrologi-hidrolika dan salah satu dari tiga metode erosi (Hjulström, Shields, "
+                            f"atau Partheniades). Rata-rata area berpotensi erosi di seluruh segmen adalah "
+                            f"{avg_erosion_ratio:.1f}%. Segmen dengan indeks risiko tertinggi adalah {worst_seg['label']} "
+                            f"(indeks {worst_seg['max_zone']:.2f} dari skala 0-2). Dari seluruh segmen, {n_reject} "
+                            f"segmen berada pada status kritis/tidak direkomendasikan dan memerlukan tindak lanjut "
+                            f"prioritas."
+                            + (
+                                f" {len(_overridden_by)} segmen area-nya tumpang tindih dengan segmen lain yang dibuat "
+                                f"belakangan sehingga hasilnya digabung (tidak ditampilkan dobel) — lihat catatan pada "
+                                f"Tabel 1."
+                                if _overridden_by else ""
+                            )
+                        )
+                        _docx_table(docx_doc, summary_rows)
+
+                        # --- Temuan Utama & Tindak Lanjut (tabel yang sama dengan PDF) ---
+                        _docx_heading(docx_doc, "TEMUAN UTAMA & TINDAK LANJUT", level=1)
+                        docx_doc.add_paragraph(
+                            "Tabel berikut merangkum lokasi temuan dan tindakan yang perlu diambil per segmen: "
+                            "area berpotensi erosi, potensi sedimentasi, titik limpasan (overflow), beserta "
+                            "mitigasi prioritasnya. Koordinat yang dicantumkan adalah titik terparah pada "
+                            "masing-masing kategori berdasarkan hasil pemodelan, sehingga bisa langsung dipakai "
+                            "sebagai acuan lokasi inspeksi dan penanganan lapangan."
+                        )
+                        _docx_table(docx_doc, _find_rows)
+                        _p_find_note = docx_doc.add_paragraph()
+                        _p_find_note.add_run(
+                            "Koordinat mengikuti sistem koordinat DXF yang diunggah. Titik terparah ditentukan "
+                            "dari hasil pemodelan, bukan pengukuran lapangan — verifikasi lapangan tetap "
+                            "diperlukan sebelum pelaksanaan pekerjaan."
+                        ).italic = True
+                        docx_doc.add_page_break()
+
+                        # --- Cross Section (bisa lebih dari satu garis, kalau user sudah pakai
+                        # alat Cross Section "Gambar di Peta" di layar) -- pakai PNG rainbow
+                        # (LineCollection) yang sama seperti dirender untuk PDF di atas ---
+                        _docx_report_sections = st.session_state.get("section_results", {})
+                        _docx_cs_pngs = [
+                            f"CrossSection_{_i}.png" for _i in range(len(_docx_report_sections))
+                            if os.path.exists(f"CrossSection_{_i}.png")
+                        ]
+                        if not _docx_cs_pngs and os.path.exists("CrossSection.png"):
+                            _docx_cs_pngs = ["CrossSection.png"]
+                            _docx_report_sections = {"Section A-A'": {}}
+                        if _docx_cs_pngs:
+                            _docx_heading(docx_doc, "PENAMPANG MELINTANG (CROSS SECTION)", level=1)
+                            for _cs_i, (_cs_name, _cs_png) in enumerate(
+                                zip(list(_docx_report_sections.keys()), _docx_cs_pngs)
+                            ):
+                                docx_doc.add_picture(_cs_png, width=DocxCm(16))
+                                _p_cs = docx_doc.add_paragraph()
+                                _p_cs.add_run(
+                                    f"Gambar {_cs_i + 1}. Penampang melintang {_cs_name} — mesh berlapis mengikuti "
+                                    f"topografi dengan kontur warna (biru=rendah, merah=tinggi) dari parameter hasil "
+                                    f"analisis; warna di bawah permukaan adalah ilustrasi zona pengaruh (bukan data "
+                                    f"terukur), biru muda = muka air, abu-abu = di luar batas analisis, bintang = nilai maksimum."
+                                ).italic = True
                             docx_doc.add_page_break()
 
-                            _docx_heading(docx_doc, "RINGKASAN EKSEKUTIF", level=1)
-                            docx_doc.add_paragraph(
-                                f"Laporan ini merangkum hasil evaluasi geoteknik otomatis terhadap {n_seg} segmen "
-                                f"sekat/channel berdasarkan pemodelan permukaan 3D dari data DXF, dikombinasikan dengan "
-                                f"analisis hidrologi-hidrolika dan salah satu dari tiga metode erosi (Hjulström, Shields, "
-                                f"atau Partheniades). Rata-rata area berpotensi erosi di seluruh segmen adalah "
-                                f"{avg_erosion_ratio:.1f}%. Segmen dengan indeks risiko tertinggi adalah {worst_seg['label']} "
-                                f"(indeks {worst_seg['max_zone']:.2f} dari skala 0-2). Dari seluruh segmen, {n_reject} "
-                                f"segmen berada pada status kritis/tidak direkomendasikan dan memerlukan tindak lanjut "
-                                f"prioritas."
-                                + (
-                                    f" {len(_overridden_by)} segmen area-nya tumpang tindih dengan segmen lain yang dibuat "
-                                    f"belakangan sehingga hasilnya digabung (tidak ditampilkan dobel) — lihat catatan pada "
-                                    f"Tabel 1."
-                                    if _overridden_by else ""
-                                )
-                            )
-                            _docx_table(docx_doc, summary_rows)
-
-                            # --- Temuan Utama & Tindak Lanjut (tabel yang sama dengan PDF) ---
-                            _docx_heading(docx_doc, "TEMUAN UTAMA & TINDAK LANJUT", level=1)
-                            docx_doc.add_paragraph(
-                                "Tabel berikut merangkum lokasi temuan dan tindakan yang perlu diambil per segmen: "
-                                "area berpotensi erosi, potensi sedimentasi, titik limpasan (overflow), beserta "
-                                "mitigasi prioritasnya. Koordinat yang dicantumkan adalah titik terparah pada "
-                                "masing-masing kategori berdasarkan hasil pemodelan, sehingga bisa langsung dipakai "
-                                "sebagai acuan lokasi inspeksi dan penanganan lapangan."
-                            )
-                            _docx_table(docx_doc, _find_rows)
-                            _p_find_note = docx_doc.add_paragraph()
-                            _p_find_note.add_run(
-                                "Koordinat mengikuti sistem koordinat DXF yang diunggah. Titik terparah ditentukan "
-                                "dari hasil pemodelan, bukan pengukuran lapangan — verifikasi lapangan tetap "
-                                "diperlukan sebelum pelaksanaan pekerjaan."
+                        # --- Numerical Modelling (3D) -- hasil gabungan (sekali), sama seperti PDF ---
+                        _combo_3d_path_docx = st.session_state.get("combined_3d_scene_path")
+                        if _combo_3d_path_docx and os.path.exists(_combo_3d_path_docx):
+                            _docx_heading(docx_doc, "NUMERICAL MODELLING (3D) — HASIL GABUNGAN SEMUA SEGMEN", level=1)
+                            docx_doc.add_picture(_combo_3d_path_docx, width=DocxCm(20))
+                            _p_n3d = docx_doc.add_paragraph()
+                            _p_n3d.add_run(
+                                "Gambar 2. Scene 3D Gabungan seluruh segmen (Main + sub-boundary) — tiap sub-boundary "
+                                "menimpa area yang tumpang tindih dengan Main/segmen sebelumnya."
                             ).italic = True
                             docx_doc.add_page_break()
-
-                            # --- Cross Section (bisa lebih dari satu garis, kalau user sudah pakai
-                            # alat Cross Section "Gambar di Peta" di layar) -- pakai PNG rainbow
-                            # (LineCollection) yang sama seperti dirender untuk PDF di atas ---
-                            _docx_report_sections = st.session_state.get("section_results", {})
-                            _docx_cs_pngs = [
-                                f"CrossSection_{_i}.png" for _i in range(len(_docx_report_sections))
-                                if os.path.exists(f"CrossSection_{_i}.png")
-                            ]
-                            if not _docx_cs_pngs and os.path.exists("CrossSection.png"):
-                                _docx_cs_pngs = ["CrossSection.png"]
-                                _docx_report_sections = {"Section A-A'": {}}
-                            if _docx_cs_pngs:
-                                _docx_heading(docx_doc, "PENAMPANG MELINTANG (CROSS SECTION)", level=1)
-                                for _cs_i, (_cs_name, _cs_png) in enumerate(
-                                    zip(list(_docx_report_sections.keys()), _docx_cs_pngs)
-                                ):
-                                    docx_doc.add_picture(_cs_png, width=DocxCm(16))
-                                    _p_cs = docx_doc.add_paragraph()
-                                    _p_cs.add_run(
-                                        f"Gambar {_cs_i + 1}. Penampang melintang {_cs_name} — mesh berlapis mengikuti "
-                                        f"topografi dengan kontur warna (biru=rendah, merah=tinggi) dari parameter hasil "
-                                        f"analisis; warna di bawah permukaan adalah ilustrasi zona pengaruh (bukan data "
-                                        f"terukur), biru muda = muka air, abu-abu = di luar batas analisis, bintang = nilai maksimum."
-                                    ).italic = True
+                        elif n_seg == 1:
+                            _only_sid_docx, _only_seg_docx = next(iter(seg_results_all.items()))
+                            _num_views_solo_docx = _only_seg_docx.get("numerical_modelling_views") or {}
+                            _view_labels_solo_docx = {
+                                "overall": "(a) Tampilan Keseluruhan (Overall)",
+                                "critical_point": "(b) Tampilan Mengarah ke Titik Paling Kritis",
+                                "alternate": "(c) Tampilan Sudut Lain",
+                            }
+                            if any(_num_views_solo_docx.get(k) for k in _view_labels_solo_docx):
+                                _docx_heading(docx_doc, f"NUMERICAL MODELLING (3D) — {_only_seg_docx['label'].upper()}", level=1)
+                                for _vk_docx, _vlabel_docx in _view_labels_solo_docx.items():
+                                    _vp_docx = _num_views_solo_docx.get(_vk_docx)
+                                    if _vp_docx and os.path.exists(_vp_docx):
+                                        _p_vh = docx_doc.add_paragraph()
+                                        _p_vh.add_run(_vlabel_docx).bold = True
+                                        docx_doc.add_picture(_vp_docx, width=DocxCm(18))
                                 docx_doc.add_page_break()
 
-                            # --- Numerical Modelling (3D) -- hasil gabungan (sekali), sama seperti PDF ---
-                            _combo_3d_path_docx = st.session_state.get("combined_3d_scene_path")
-                            if _combo_3d_path_docx and os.path.exists(_combo_3d_path_docx):
-                                _docx_heading(docx_doc, "NUMERICAL MODELLING (3D) — HASIL GABUNGAN SEMUA SEGMEN", level=1)
-                                docx_doc.add_picture(_combo_3d_path_docx, width=DocxCm(20))
-                                _p_n3d = docx_doc.add_paragraph()
-                                _p_n3d.add_run(
-                                    "Gambar 2. Scene 3D Gabungan seluruh segmen (Main + sub-boundary) — tiap sub-boundary "
-                                    "menimpa area yang tumpang tindih dengan Main/segmen sebelumnya."
-                                ).italic = True
-                                docx_doc.add_page_break()
-                            elif n_seg == 1:
-                                _only_sid_docx, _only_seg_docx = next(iter(seg_results_all.items()))
-                                _num_views_solo_docx = _only_seg_docx.get("numerical_modelling_views") or {}
-                                _view_labels_solo_docx = {
-                                    "overall": "(a) Tampilan Keseluruhan (Overall)",
-                                    "critical_point": "(b) Tampilan Mengarah ke Titik Paling Kritis",
-                                    "alternate": "(c) Tampilan Sudut Lain",
-                                }
-                                if any(_num_views_solo_docx.get(k) for k in _view_labels_solo_docx):
-                                    _docx_heading(docx_doc, f"NUMERICAL MODELLING (3D) — {_only_seg_docx['label'].upper()}", level=1)
-                                    for _vk_docx, _vlabel_docx in _view_labels_solo_docx.items():
-                                        _vp_docx = _num_views_solo_docx.get(_vk_docx)
-                                        if _vp_docx and os.path.exists(_vp_docx):
-                                            _p_vh = docx_doc.add_paragraph()
-                                            _p_vh.add_run(_vlabel_docx).bold = True
-                                            docx_doc.add_picture(_vp_docx, width=DocxCm(18))
-                                    docx_doc.add_page_break()
-
-                            for seg_i, (sid, seg) in enumerate(seg_results_all.items()):
-                                if sid in _overridden_by:
-                                    _override_target_docx = seg_results_all[_overridden_by[sid]]
-                                    _docx_heading(docx_doc, f"{seg_i + 1}. SEGMEN: {seg['label'].upper()}", level=1)
-                                    docx_doc.add_paragraph(
-                                        f"Boundary segmen ini tumpang tindih signifikan dengan {_override_target_docx['label']} "
-                                        f"(dibuat setelah segmen ini). Hasil analisis detail untuk area tumpang-tindih ini "
-                                        f"digabung ke bagian {_override_target_docx['label']} — tidak ditampilkan dobel di sini."
-                                    )
-                                    continue
-
-                                if sid in _low_priority_skip:
-                                    _docx_heading(docx_doc, f"{seg_i + 1}. SEGMEN: {seg['label'].upper()}", level=1)
-                                    docx_doc.add_paragraph(
-                                        f"Indeks risiko maksimum segmen ini ({seg['max_zone']:.2f}) relatif rendah "
-                                        f"dibanding segmen lain, dan tidak menunjukkan area berpotensi erosi/sedimentasi "
-                                        f"nyata (lihat Tabel 1 pada Ringkasan Eksekutif). Detail analisis penuh tidak "
-                                        f"ditampilkan di sini untuk menjaga laporan tetap fokus pada segmen prioritas."
-                                    )
-                                    continue
-
+                        for seg_i, (sid, seg) in enumerate(seg_results_all.items()):
+                            if sid in _overridden_by:
+                                _override_target_docx = seg_results_all[_overridden_by[sid]]
                                 _docx_heading(docx_doc, f"{seg_i + 1}. SEGMEN: {seg['label'].upper()}", level=1)
-
-                                _docx_heading(docx_doc, "Data & Parameter Input", level=2)
-                                _param_rows_docx = [
-                                    ["Parameter", "Nilai"],
-                                    ["Jenis kondisi", seg["design_type"]],
-                                    ["Metode analisis", seg["analysis_method"]],
-                                    ["Luas area (Ha)", f"{seg['boundary_area_ha']:.2f}"],
-                                    ["Ukuran butir (grain size)", f"{seg['grain_size_mm']:.3f} mm"],
-                                    ["Kecepatan aliran representatif", f"{seg['velocity_hulu']:.3f} m/s"],
-                                ]
-                                _qd = seg.get("quant") or {}
-                                if _qd.get("rusle"):
-                                    _param_rows_docx.append(["Erosivitas hujan R / K / C / P", f"{_qd['rusle']['R']:.0f} / {_qd['K']:.2f} / {_qd['C']:.2f} / {_qd['P']:.2f}"])
-                                    _param_rows_docx.append(["Kehilangan tanah rata-rata (RUSLE)", f"{_qd['rusle']['mean_tha']:.1f} ton/ha/th (P95 {_qd['rusle']['p95_tha']:.1f})"])
-                                    _param_rows_docx.append(["Sedimen ke kolam (RUSLE x SDR)", f"{_qd['rusle']['sed_yield_t_yr']:.0f} ton/th (~{_qd['rusle']['sed_vol_m3_yr']:.0f} m3/th)"])
-                                if _qd.get("event"):
-                                    _param_rows_docx.append(["Hujan rencana R24 / limpasan", f"{_qd['event']['p_mm']:.0f} mm / {_qd['event']['q_mm']:.1f} mm"])
-                                    _param_rows_docx.append(["Sedimen event (MUSLE) / TSS", f"{_qd['event']['y_ton']:.0f} ton / {_qd['event']['tss_mg_l']:,.0f} mg/L"])
-                                if _qd.get("pond"):
-                                    _param_rows_docx.append(["Kolam pengendap minimum", f"{_qd['pond']['length_m']:.0f} x {_qd['pond']['width_m']:.0f} m; V total {_qd['pond']['vol_total_m3']:,.0f} m3 (d target {_qd['pond']['d_mm']:.3f} mm)"])
-                                _docx_table(docx_doc, _param_rows_docx)
-
-                                _hydro_docx = seg.get("hydraulics_result")
-                                if seg.get("use_hydraulics") and _hydro_docx:
-                                    _docx_heading(docx_doc, "Hidrologi & Hidrolika (Rational Method + Manning's Equation)", level=2)
-                                    _docx_table(docx_doc, [
-                                        ["Parameter", "Nilai"],
-                                        ["Debit rencana Q", f"{_hydro_docx['q_design_m3s']:.3f} m3/s"],
-                                        ["Kecepatan normal V", f"{_hydro_docx['v_normal_ms']:.3f} m/s"],
-                                        ["Freeboard tersedia", f"{_hydro_docx['freeboard_m']:.2f} m"],
-                                        ["Status freeboard", "CUKUP" if _hydro_docx["freeboard_ok"] else "KURANG"],
-                                    ])
-
-                                # --- Metodologi & Formula (sama seperti PDF, gambar formula dipakai ulang) ---
-                                # Dilewati pada mode laporan RINGKAS, sama seperti versi PDF.
-                                if not _report_concise:
-                                    _docx_heading(docx_doc, "Metodologi & Formula", level=2)
-                                    if seg["analysis_method"] == "Hjulstrom Diagram":
-                                        docx_doc.add_paragraph(
-                                            "Klasifikasi risiko erosi/deposisi menggunakan pendekatan diagram Hjulström, yang "
-                                            "membandingkan kecepatan aliran aktual terhadap ambang kecepatan erosi dan deposisi "
-                                            "sebagai fungsi diameter butir sedimen (d, dalam meter). Catatan keterbatasan: "
-                                            "pendekatan power-law ini tidak menangkap efek kohesi pada material lempung/lanau "
-                                            "halus (<0,1 mm)."
-                                        )
-                                        for _fpath in (f"formula_verosion_{sid}.png", f"formula_vdep_{sid}.png", f"formula_score_{sid}.png"):
-                                            if os.path.exists(_fpath):
-                                                docx_doc.add_picture(_fpath, width=DocxCm(9))
-                                        docx_doc.add_paragraph(
-                                            "Skor 0 = zona deposisi dominan, skor 2 = zona erosi ekstrem. Nilai d dikonversi "
-                                            "dari mm ke meter sebelum dihitung."
-                                        )
-                                    elif seg["analysis_method"] == "Shields Diagram":
-                                        docx_doc.add_paragraph(
-                                            "Klasifikasi mobilitas sedimen menggunakan parameter Shields tak berdimensi (θ), yang "
-                                            "membandingkan gaya penggerak aliran terhadap gaya penahan berat butiran terendam "
-                                            "(Shields, 1936). Tegangan geser dasar dihitung memakai depth-slope product."
-                                        )
-                                        for _fpath in (f"formula_tau0_shields_{sid}.png", f"formula_theta_{sid}.png"):
-                                            if os.path.exists(_fpath):
-                                                docx_doc.add_picture(_fpath, width=DocxCm(9))
-                                        docx_doc.add_paragraph(
-                                            f"dengan tau0 tegangan geser dasar aktual (N/m²), h = kedalaman aliran = "
-                                            f"{seg['flow_depth']:.2f} m. Klasifikasi: θ < 0,03 → stabil/deposisi (skor 0); "
-                                            "0,03 ≤ θ < 0,06 → transisi (skor 1); θ ≥ 0,06 → erosi aktif (skor 2)."
-                                        )
-                                    elif seg["analysis_method"] == "Partheniades + Flow Accumulation":
-                                        docx_doc.add_paragraph(
-                                            "Laju erosi dihitung sebagai fungsi linear selisih tegangan geser aktual terhadap "
-                                            "tegangan geser kritis material (Partheniades, 1965), dikombinasikan dengan bobot "
-                                            "flow accumulation ternormalisasi."
-                                        )
-                                        for _fpath in (f"formula_tau0_parth_{sid}.png", f"formula_erate_{sid}.png", f"formula_riskidx_{sid}.png"):
-                                            if os.path.exists(_fpath):
-                                                docx_doc.add_picture(_fpath, width=DocxCm(9))
-                                        docx_doc.add_paragraph(
-                                            f"dengan h = kedalaman aliran = {seg['flow_depth']:.2f} m, M = koefisien erodibilitas "
-                                            f"= {seg['erodibility_M']:.4f} kg/m²·s, tauC = tegangan geser kritis = "
-                                            f"{seg['tau_critical']:.3f} N/m²."
-                                        )
-                                    else:
-                                        docx_doc.add_paragraph(
-                                            f"Metode analisis yang digunakan pada segmen ini: {seg['analysis_method']}. "
-                                            "Formula detail mengikuti definisi standar metode tersebut sebagaimana diterapkan pada modul."
-                                        )
-
-                                # --- Perhitungan pada Titik Paling Kritis + Top 10 ---
-                                _docx_heading(docx_doc, "Perhitungan pada Titik Paling Kritis", level=2)
-                                _top10_docx = seg["top10_overflow"]
-                                if _top10_docx is not None and len(_top10_docx) > 0:
-                                    _crit_docx = _top10_docx.iloc[0]
-                                    docx_doc.add_paragraph(
-                                        f"Titik kritis berada pada koordinat X={_crit_docx['X']:.2f}, Y={_crit_docx['Y']:.2f}, "
-                                        f"elevasi (RL)={_crit_docx['RL']:.2f} m, dengan skor risiko = "
-                                        f"{_crit_docx.get('RiskScore', float('nan')):.2f}."
-                                    )
-                                    _table_cols_docx = [c for c in
-                                                        ["Rank", "ID_Titik", "X", "Y", "RL", "JenisRisikoDominan",
-                                                         "RiskScore", "Rekomendasi"]
-                                                        if c in _top10_docx.columns]
-                                    _crit_rows_docx = [_table_cols_docx] + _top10_docx[_table_cols_docx].head(10).round(3).astype(str).values.tolist()
-                                    docx_doc.add_paragraph(
-                                        "Sepuluh titik prioritas mitigasi, diurutkan berdasar kepadatan aliran, dengan "
-                                        "klasifikasi jenis risiko dominan dan rekomendasi spesifik per titik:"
-                                    )
-                                    _docx_table(docx_doc, _crit_rows_docx)
-                                else:
-                                    docx_doc.add_paragraph("Tidak ada titik overflow/kritis signifikan terdeteksi pada segmen ini.")
-
-                                # --- TARP ---
-                                _docx_heading(docx_doc, "TARP (Trigger Action Response Plan)", level=2)
-                                _tarp_rows_docx, _ = _tarp_rows(seg["max_zone"])
-                                _docx_table(docx_doc, _tarp_rows_docx)
-
-                                # --- Validasi Lapangan ---
-                                _validation_docx = seg.get("validation")
-                                if _validation_docx:
-                                    _docx_heading(docx_doc, "Validasi Lapangan (Ground-Truth)", level=2)
-                                    docx_doc.add_paragraph(
-                                        f"Sumber data observasi: {_validation_docx.get('source', 'Titik sampel')}. Validasi "
-                                        f"terhadap {_validation_docx['n_samples']} sampel/sel observasi lapangan: "
-                                        f"Overall Accuracy = {_validation_docx['overall_accuracy']*100:.1f}%, "
-                                        f"Cohen's Kappa (κ) = {_validation_docx['kappa']:.2f} "
-                                        f"(kategori: {_validation_docx['kappa_interpretation']})."
-                                    )
-                                    _cm_df_docx = _validation_docx["confusion_matrix"].reset_index().rename(columns={"index": "Observasi\\Prediksi"})
-                                    _docx_table(docx_doc, [list(_cm_df_docx.columns)] + _cm_df_docx.astype(str).values.tolist())
-                                    docx_doc.add_paragraph("Precision, Recall, F1-Score per kelas:")
-                                    _prfs_df_docx = _validation_docx["prfs"]
-                                    _docx_table(docx_doc, [list(_prfs_df_docx.columns)] + _prfs_df_docx.astype(str).values.tolist())
-                                elif _is_admin_user():
-                                    docx_doc.add_paragraph(
-                                        "Validasi lapangan belum dijalankan untuk segmen ini. Disarankan menjalankan modul "
-                                        "Validasi Lapangan dengan minimal beberapa titik sampel ground-truth sebelum hasil ini "
-                                        "dipakai sebagai dasar keputusan operasional final."
-                                    ).italic = True
-
-                                _rekom_docx = seg.get("recommendation") or {}
-                                _ai_rekom_docx = seg.get("ai_recommendation") or {}
-                                _docx_heading(docx_doc, "Rekomendasi Rekayasa", level=2)
-                                if _rekom_docx.get("status"):
-                                    _p_status = docx_doc.add_paragraph()
-                                    _p_status.add_run("Status Klasifikasi (TARP): ").bold = True
-                                    _p_status.add_run(_rekom_docx["status"])
-                                if _ai_rekom_docx.get("narrative"):
-                                    docx_doc.add_paragraph(_ai_rekom_docx["narrative"])
-
-                                if _rekom_docx.get("root_cause"):
-                                    _docx_heading(docx_doc, "Mekanisme Penyebab Dominan", level=3)
-                                    _rc_rows_docx = [["Faktor", "Kontribusi"]]
-                                    for rc in _rekom_docx["root_cause"][:4]:
-                                        _rc_rows_docx.append([rc["factor"], f"{rc['contribution_pct']:.0f}%"])
-                                    _docx_table(docx_doc, _rc_rows_docx)
-
-                                if _rekom_docx.get("scenario_options"):
-                                    _docx_heading(docx_doc, "Perbandingan Opsi Skenario", level=3)
-                                    _so_rows_docx = [["Opsi", "Kecepatan", "Penurunan", "Freeboard"]]
-                                    for _opt in _rekom_docx["scenario_options"]:
-                                        _so_rows_docx.append([
-                                            f"{_opt['option']} ({_opt['rank_label']})",
-                                            f"{_opt['existing_velocity_ms']:.2f}\u2192{_opt['candidate_velocity_ms']:.2f} m/s",
-                                            f"{_opt['velocity_reduction_pct']:.0f}%",
-                                            "Cukup" if _opt["candidate_freeboard_ok"] else "KURANG",
-                                        ])
-                                    _docx_table(docx_doc, _so_rows_docx)
-
-                                if _rekom_docx.get("tiered_recommendations"):
-                                    _docx_heading(docx_doc, "Rekomendasi Teknis Bertingkat", level=3)
-                                    for _tier_name, _tier_items in _rekom_docx["tiered_recommendations"].items():
-                                        _p_tier = docx_doc.add_paragraph()
-                                        _p_tier.add_run(_tier_name).bold = True
-                                        _tier_rows_docx = [["Pengendalian", "Pengaruh", "Est. Penurunan Risiko"]]
-                                        for _item in _tier_items:
-                                            _tier_rows_docx.append([
-                                                _item["control"], _item["effect"],
-                                                f"~{_item['risk_reduction_pct']:.0f}%" if _item.get("risk_reduction_pct") is not None else "Kualitatif",
-                                            ])
-                                        _docx_table(docx_doc, _tier_rows_docx)
-
-                                # --- before / after (sama seperti PDF) ---
-                                _docx_heading(docx_doc, "Ringkasan Before / After Rekomendasi", level=2)
-                                _risk_pct_before_docx = min(seg["max_zone"] / 2.0 * 100, 150)
-                                _tarp_rows_b_docx, _tarp_idx_b_docx = _tarp_rows(seg["max_zone"])
-                                _cat_before_docx = (
-                                    _tarp_rows_b_docx[_tarp_idx_b_docx + 1][0].split("  ←")[0]
-                                    if _tarp_idx_b_docx is not None else "-"
+                                docx_doc.add_paragraph(
+                                    f"Boundary segmen ini tumpang tindih signifikan dengan {_override_target_docx['label']} "
+                                    f"(dibuat setelah segmen ini). Hasil analisis detail untuk area tumpang-tindih ini "
+                                    f"digabung ke bagian {_override_target_docx['label']} — tidak ditampilkan dobel di sini."
                                 )
-                                _best_opt_docx = (_rekom_docx.get("scenario_options") or [None])[0]
-                                if _best_opt_docx:
-                                    _vred_docx = _best_opt_docx["velocity_reduction_pct"] / 100.0
-                                    _score_after_docx = max(seg["max_zone"] * (1 - _vred_docx), 0.0)
-                                    _risk_pct_after_docx = min(_score_after_docx / 2.0 * 100, 150)
-                                    _tarp_rows_a_docx, _tarp_idx_a_docx = _tarp_rows(_score_after_docx)
-                                    _cat_after_docx = (
-                                        _tarp_rows_a_docx[_tarp_idx_a_docx + 1][0].split("  ←")[0]
-                                        if _tarp_idx_a_docx is not None else "-"
-                                    )
-                                    _risk_after_str_docx = f"{_risk_pct_after_docx:.0f}%"
-                                elif _rekom_docx.get("tiered_recommendations"):
-                                    _tier_assumed_reduction_docx = {
-                                        "Geometry Control": 0.35, "Hydraulic Control": 0.25,
-                                        "Surface Protection": 0.30, "Sediment Control": 0.40,
-                                        "Monitoring": 0.0,
-                                    }
-                                    _combined_keep_docx = 1.0
-                                    for _tn_docx in _rekom_docx["tiered_recommendations"].keys():
-                                        _combined_keep_docx *= (1 - _tier_assumed_reduction_docx.get(_tn_docx, 0.0))
-                                    _vred_qual_docx = 1 - _combined_keep_docx
-                                    _score_after_docx = max(seg["max_zone"] * (1 - _vred_qual_docx), 0.0)
-                                    _risk_pct_after_docx = min(_score_after_docx / 2.0 * 100, 150)
-                                    _tarp_rows_a_docx, _tarp_idx_a_docx = _tarp_rows(_score_after_docx)
-                                    _cat_after_docx = (
-                                        _tarp_rows_a_docx[_tarp_idx_a_docx + 1][0].split("  ←")[0]
-                                        if _tarp_idx_a_docx is not None else "-"
-                                    )
-                                    _risk_after_str_docx = f"{_risk_pct_after_docx:.0f}% (estimasi kualitatif)"
-                                else:
-                                    _cat_after_docx = _cat_before_docx
-                                    _risk_after_str_docx = f"{_risk_pct_before_docx:.0f}%"
+                                continue
+
+                            if sid in _low_priority_skip:
+                                _docx_heading(docx_doc, f"{seg_i + 1}. SEGMEN: {seg['label'].upper()}", level=1)
+                                docx_doc.add_paragraph(
+                                    f"Indeks risiko maksimum segmen ini ({seg['max_zone']:.2f}) relatif rendah "
+                                    f"dibanding segmen lain, dan tidak menunjukkan area berpotensi erosi/sedimentasi "
+                                    f"nyata (lihat Tabel 1 pada Ringkasan Eksekutif). Detail analisis penuh tidak "
+                                    f"ditampilkan di sini untuk menjaga laporan tetap fokus pada segmen prioritas."
+                                )
+                                continue
+
+                            _docx_heading(docx_doc, f"{seg_i + 1}. SEGMEN: {seg['label'].upper()}", level=1)
+
+                            _docx_heading(docx_doc, "Data & Parameter Input", level=2)
+                            _param_rows_docx = [
+                                ["Parameter", "Nilai"],
+                                ["Jenis kondisi", seg["design_type"]],
+                                ["Metode analisis", seg["analysis_method"]],
+                                ["Luas area (Ha)", f"{seg['boundary_area_ha']:.2f}"],
+                                ["Ukuran butir (grain size)", f"{seg['grain_size_mm']:.3f} mm"],
+                                ["Kecepatan aliran representatif", f"{seg['velocity_hulu']:.3f} m/s"],
+                            ]
+                            _qd = seg.get("quant") or {}
+                            if _qd.get("rusle"):
+                                _param_rows_docx.append(["Erosivitas hujan R / K / C / P", f"{_qd['rusle']['R']:.0f} / {_qd['K']:.2f} / {_qd['C']:.2f} / {_qd['P']:.2f}"])
+                                _param_rows_docx.append(["Kehilangan tanah rata-rata (RUSLE)", f"{_qd['rusle']['mean_tha']:.1f} ton/ha/th (P95 {_qd['rusle']['p95_tha']:.1f})"])
+                                _param_rows_docx.append(["Sedimen ke kolam (RUSLE x SDR)", f"{_qd['rusle']['sed_yield_t_yr']:.0f} ton/th (~{_qd['rusle']['sed_vol_m3_yr']:.0f} m3/th)"])
+                            if _qd.get("event"):
+                                _param_rows_docx.append(["Hujan rencana R24 / limpasan", f"{_qd['event']['p_mm']:.0f} mm / {_qd['event']['q_mm']:.1f} mm"])
+                                _param_rows_docx.append(["Sedimen event (MUSLE) / TSS", f"{_qd['event']['y_ton']:.0f} ton / {_qd['event']['tss_mg_l']:,.0f} mg/L"])
+                            if _qd.get("pond"):
+                                _param_rows_docx.append(["Kolam pengendap minimum", f"{_qd['pond']['length_m']:.0f} x {_qd['pond']['width_m']:.0f} m; V total {_qd['pond']['vol_total_m3']:,.0f} m3 (d target {_qd['pond']['d_mm']:.3f} mm)"])
+                            _docx_table(docx_doc, _param_rows_docx)
+
+                            _hydro_docx = seg.get("hydraulics_result")
+                            if seg.get("use_hydraulics") and _hydro_docx:
+                                _docx_heading(docx_doc, "Hidrologi & Hidrolika (Rational Method + Manning's Equation)", level=2)
                                 _docx_table(docx_doc, [
-                                    ["", "SEBELUM", "SESUDAH (estimasi)"],
-                                    ["Level Risiko (TARP)", _cat_before_docx, _cat_after_docx],
-                                    ["Skor Risiko (%)", f"{_risk_pct_before_docx:.0f}%", _risk_after_str_docx],
+                                    ["Parameter", "Nilai"],
+                                    ["Debit rencana Q", f"{_hydro_docx['q_design_m3s']:.3f} m3/s"],
+                                    ["Kecepatan normal V", f"{_hydro_docx['v_normal_ms']:.3f} m/s"],
+                                    ["Freeboard tersedia", f"{_hydro_docx['freeboard_m']:.2f} m"],
+                                    ["Status freeboard", "CUKUP" if _hydro_docx["freeboard_ok"] else "KURANG"],
                                 ])
-                                _p_note_docx = docx_doc.add_paragraph()
-                                _p_note_docx.add_run(
-                                    "Catatan: nilai \"SESUDAH\" adalah estimasi rekayasa berdasarkan opsi skenario "
-                                    "geometri/hidraulik terbaik (bila tersedia); kalau tidak ada skenario kuantitatif, "
-                                    "dipakai asumsi efektivitas konservatif per jenis pengendalian (lihat catatan detail "
-                                    "di laporan PDF). BUKAN hasil re-running model erosi 3D penuh — untuk verifikasi akhir, "
-                                    "disarankan re-run RUN ANALYSIS dengan geometri DXF yang sudah direvisi."
+
+                            # --- Metodologi & Formula (sama seperti PDF, gambar formula dipakai ulang) ---
+                            # Dilewati pada mode laporan RINGKAS, sama seperti versi PDF.
+                            if not _report_concise:
+                                _docx_heading(docx_doc, "Metodologi & Formula", level=2)
+                                if seg["analysis_method"] == "Hjulstrom Diagram":
+                                    docx_doc.add_paragraph(
+                                        "Klasifikasi risiko erosi/deposisi menggunakan pendekatan diagram Hjulström, yang "
+                                        "membandingkan kecepatan aliran aktual terhadap ambang kecepatan erosi dan deposisi "
+                                        "sebagai fungsi diameter butir sedimen (d, dalam meter). Catatan keterbatasan: "
+                                        "pendekatan power-law ini tidak menangkap efek kohesi pada material lempung/lanau "
+                                        "halus (<0,1 mm)."
+                                    )
+                                    for _fpath in (f"formula_verosion_{sid}.png", f"formula_vdep_{sid}.png", f"formula_score_{sid}.png"):
+                                        if os.path.exists(_fpath):
+                                            docx_doc.add_picture(_fpath, width=DocxCm(9))
+                                    docx_doc.add_paragraph(
+                                        "Skor 0 = zona deposisi dominan, skor 2 = zona erosi ekstrem. Nilai d dikonversi "
+                                        "dari mm ke meter sebelum dihitung."
+                                    )
+                                elif seg["analysis_method"] == "Shields Diagram":
+                                    docx_doc.add_paragraph(
+                                        "Klasifikasi mobilitas sedimen menggunakan parameter Shields tak berdimensi (θ), yang "
+                                        "membandingkan gaya penggerak aliran terhadap gaya penahan berat butiran terendam "
+                                        "(Shields, 1936). Tegangan geser dasar dihitung memakai depth-slope product."
+                                    )
+                                    for _fpath in (f"formula_tau0_shields_{sid}.png", f"formula_theta_{sid}.png"):
+                                        if os.path.exists(_fpath):
+                                            docx_doc.add_picture(_fpath, width=DocxCm(9))
+                                    docx_doc.add_paragraph(
+                                        f"dengan tau0 tegangan geser dasar aktual (N/m²), h = kedalaman aliran = "
+                                        f"{seg['flow_depth']:.2f} m. Klasifikasi: θ < 0,03 → stabil/deposisi (skor 0); "
+                                        "0,03 ≤ θ < 0,06 → transisi (skor 1); θ ≥ 0,06 → erosi aktif (skor 2)."
+                                    )
+                                elif seg["analysis_method"] == "Partheniades + Flow Accumulation":
+                                    docx_doc.add_paragraph(
+                                        "Laju erosi dihitung sebagai fungsi linear selisih tegangan geser aktual terhadap "
+                                        "tegangan geser kritis material (Partheniades, 1965), dikombinasikan dengan bobot "
+                                        "flow accumulation ternormalisasi."
+                                    )
+                                    for _fpath in (f"formula_tau0_parth_{sid}.png", f"formula_erate_{sid}.png", f"formula_riskidx_{sid}.png"):
+                                        if os.path.exists(_fpath):
+                                            docx_doc.add_picture(_fpath, width=DocxCm(9))
+                                    docx_doc.add_paragraph(
+                                        f"dengan h = kedalaman aliran = {seg['flow_depth']:.2f} m, M = koefisien erodibilitas "
+                                        f"= {seg['erodibility_M']:.4f} kg/m²·s, tauC = tegangan geser kritis = "
+                                        f"{seg['tau_critical']:.3f} N/m²."
+                                    )
+                                else:
+                                    docx_doc.add_paragraph(
+                                        f"Metode analisis yang digunakan pada segmen ini: {seg['analysis_method']}. "
+                                        "Formula detail mengikuti definisi standar metode tersebut sebagaimana diterapkan pada modul."
+                                    )
+
+                            # --- Perhitungan pada Titik Paling Kritis + Top 10 ---
+                            _docx_heading(docx_doc, "Perhitungan pada Titik Paling Kritis", level=2)
+                            _top10_docx = seg["top10_overflow"]
+                            if _top10_docx is not None and len(_top10_docx) > 0:
+                                _crit_docx = _top10_docx.iloc[0]
+                                docx_doc.add_paragraph(
+                                    f"Titik kritis berada pada koordinat X={_crit_docx['X']:.2f}, Y={_crit_docx['Y']:.2f}, "
+                                    f"elevasi (RL)={_crit_docx['RL']:.2f} m, dengan skor risiko = "
+                                    f"{_crit_docx.get('RiskScore', float('nan')):.2f}."
+                                )
+                                _table_cols_docx = [c for c in
+                                                    ["Rank", "ID_Titik", "X", "Y", "RL", "JenisRisikoDominan",
+                                                     "RiskScore", "Rekomendasi"]
+                                                    if c in _top10_docx.columns]
+                                _crit_rows_docx = [_table_cols_docx] + _top10_docx[_table_cols_docx].head(10).round(3).astype(str).values.tolist()
+                                docx_doc.add_paragraph(
+                                    "Sepuluh titik prioritas mitigasi, diurutkan berdasar kepadatan aliran, dengan "
+                                    "klasifikasi jenis risiko dominan dan rekomendasi spesifik per titik:"
+                                )
+                                _docx_table(docx_doc, _crit_rows_docx)
+                            else:
+                                docx_doc.add_paragraph("Tidak ada titik overflow/kritis signifikan terdeteksi pada segmen ini.")
+
+                            # --- TARP ---
+                            _docx_heading(docx_doc, "TARP (Trigger Action Response Plan)", level=2)
+                            _tarp_rows_docx, _ = _tarp_rows(seg["max_zone"])
+                            _docx_table(docx_doc, _tarp_rows_docx)
+
+                            # --- Validasi Lapangan ---
+                            _validation_docx = seg.get("validation")
+                            if _validation_docx:
+                                _docx_heading(docx_doc, "Validasi Lapangan (Ground-Truth)", level=2)
+                                docx_doc.add_paragraph(
+                                    f"Sumber data observasi: {_validation_docx.get('source', 'Titik sampel')}. Validasi "
+                                    f"terhadap {_validation_docx['n_samples']} sampel/sel observasi lapangan: "
+                                    f"Overall Accuracy = {_validation_docx['overall_accuracy']*100:.1f}%, "
+                                    f"Cohen's Kappa (κ) = {_validation_docx['kappa']:.2f} "
+                                    f"(kategori: {_validation_docx['kappa_interpretation']})."
+                                )
+                                _cm_df_docx = _validation_docx["confusion_matrix"].reset_index().rename(columns={"index": "Observasi\\Prediksi"})
+                                _docx_table(docx_doc, [list(_cm_df_docx.columns)] + _cm_df_docx.astype(str).values.tolist())
+                                docx_doc.add_paragraph("Precision, Recall, F1-Score per kelas:")
+                                _prfs_df_docx = _validation_docx["prfs"]
+                                _docx_table(docx_doc, [list(_prfs_df_docx.columns)] + _prfs_df_docx.astype(str).values.tolist())
+                            elif _is_admin_user():
+                                docx_doc.add_paragraph(
+                                    "Validasi lapangan belum dijalankan untuk segmen ini. Disarankan menjalankan modul "
+                                    "Validasi Lapangan dengan minimal beberapa titik sampel ground-truth sebelum hasil ini "
+                                    "dipakai sebagai dasar keputusan operasional final."
                                 ).italic = True
 
-                                # --- gambar-gambar pendukung: Risk Index, 2D Risk Map, Peta Risiko, Peta Komposit ---
-                                # (sama dengan urutan di laporan PDF)
-                                if seg.get("risk_index_chart_path") and os.path.exists(seg["risk_index_chart_path"]):
-                                    _docx_heading(docx_doc, "Sebaran Risk Index — 10 Titik Prioritas Mitigasi", level=2)
-                                    docx_doc.add_picture(seg["risk_index_chart_path"], width=DocxCm(16))
+                            _rekom_docx = seg.get("recommendation") or {}
+                            _ai_rekom_docx = seg.get("ai_recommendation") or {}
+                            _docx_heading(docx_doc, "Rekomendasi Rekayasa", level=2)
+                            if _rekom_docx.get("status"):
+                                _p_status = docx_doc.add_paragraph()
+                                _p_status.add_run("Status Klasifikasi (TARP): ").bold = True
+                                _p_status.add_run(_rekom_docx["status"])
+                            if _ai_rekom_docx.get("narrative"):
+                                docx_doc.add_paragraph(_ai_rekom_docx["narrative"])
 
-                                # --- Numerical Modelling (3D) per-segmen (sama seperti PDF) ---
-                                _num_views_seg_docx = seg.get("numerical_modelling_views") or {}
-                                _view_labels_seg_docx = {
-                                    "overall": "(a) Tampilan Keseluruhan (Overall)",
-                                    "critical_point": "(b) Tampilan Mengarah ke Titik Paling Kritis",
-                                    "alternate": "(c) Tampilan Sudut Lain",
+                            if _rekom_docx.get("root_cause"):
+                                _docx_heading(docx_doc, "Mekanisme Penyebab Dominan", level=3)
+                                _rc_rows_docx = [["Faktor", "Kontribusi"]]
+                                for rc in _rekom_docx["root_cause"][:4]:
+                                    _rc_rows_docx.append([rc["factor"], f"{rc['contribution_pct']:.0f}%"])
+                                _docx_table(docx_doc, _rc_rows_docx)
+
+                            if _rekom_docx.get("scenario_options"):
+                                _docx_heading(docx_doc, "Perbandingan Opsi Skenario", level=3)
+                                _so_rows_docx = [["Opsi", "Kecepatan", "Penurunan", "Freeboard"]]
+                                for _opt in _rekom_docx["scenario_options"]:
+                                    _so_rows_docx.append([
+                                        f"{_opt['option']} ({_opt['rank_label']})",
+                                        f"{_opt['existing_velocity_ms']:.2f}\u2192{_opt['candidate_velocity_ms']:.2f} m/s",
+                                        f"{_opt['velocity_reduction_pct']:.0f}%",
+                                        "Cukup" if _opt["candidate_freeboard_ok"] else "KURANG",
+                                    ])
+                                _docx_table(docx_doc, _so_rows_docx)
+
+                            if _rekom_docx.get("tiered_recommendations"):
+                                _docx_heading(docx_doc, "Rekomendasi Teknis Bertingkat", level=3)
+                                for _tier_name, _tier_items in _rekom_docx["tiered_recommendations"].items():
+                                    _p_tier = docx_doc.add_paragraph()
+                                    _p_tier.add_run(_tier_name).bold = True
+                                    _tier_rows_docx = [["Pengendalian", "Pengaruh", "Est. Penurunan Risiko"]]
+                                    for _item in _tier_items:
+                                        _tier_rows_docx.append([
+                                            _item["control"], _item["effect"],
+                                            f"~{_item['risk_reduction_pct']:.0f}%" if _item.get("risk_reduction_pct") is not None else "Kualitatif",
+                                        ])
+                                    _docx_table(docx_doc, _tier_rows_docx)
+
+                            # --- before / after (sama seperti PDF) ---
+                            _docx_heading(docx_doc, "Ringkasan Before / After Rekomendasi", level=2)
+                            _risk_pct_before_docx = min(seg["max_zone"] / 2.0 * 100, 150)
+                            _tarp_rows_b_docx, _tarp_idx_b_docx = _tarp_rows(seg["max_zone"])
+                            _cat_before_docx = (
+                                _tarp_rows_b_docx[_tarp_idx_b_docx + 1][0].split("  ←")[0]
+                                if _tarp_idx_b_docx is not None else "-"
+                            )
+                            _best_opt_docx = (_rekom_docx.get("scenario_options") or [None])[0]
+                            if _best_opt_docx:
+                                _vred_docx = _best_opt_docx["velocity_reduction_pct"] / 100.0
+                                _score_after_docx = max(seg["max_zone"] * (1 - _vred_docx), 0.0)
+                                _risk_pct_after_docx = min(_score_after_docx / 2.0 * 100, 150)
+                                _tarp_rows_a_docx, _tarp_idx_a_docx = _tarp_rows(_score_after_docx)
+                                _cat_after_docx = (
+                                    _tarp_rows_a_docx[_tarp_idx_a_docx + 1][0].split("  ←")[0]
+                                    if _tarp_idx_a_docx is not None else "-"
+                                )
+                                _risk_after_str_docx = f"{_risk_pct_after_docx:.0f}%"
+                            elif _rekom_docx.get("tiered_recommendations"):
+                                _tier_assumed_reduction_docx = {
+                                    "Geometry Control": 0.35, "Hydraulic Control": 0.25,
+                                    "Surface Protection": 0.30, "Sediment Control": 0.40,
+                                    "Monitoring": 0.0,
                                 }
-                                if any(_num_views_seg_docx.get(k) for k in _view_labels_seg_docx):
-                                    _docx_heading(docx_doc, f"Numerical Modelling (3D) — {seg['label']}", level=2)
-                                    for _vk_seg, _vlabel_seg in _view_labels_seg_docx.items():
-                                        _vp_seg = _num_views_seg_docx.get(_vk_seg)
-                                        if _vp_seg and os.path.exists(_vp_seg):
-                                            _p_vh_seg = docx_doc.add_paragraph()
-                                            _p_vh_seg.add_run(_vlabel_seg).bold = True
-                                            docx_doc.add_picture(_vp_seg, width=DocxCm(16))
+                                _combined_keep_docx = 1.0
+                                for _tn_docx in _rekom_docx["tiered_recommendations"].keys():
+                                    _combined_keep_docx *= (1 - _tier_assumed_reduction_docx.get(_tn_docx, 0.0))
+                                _vred_qual_docx = 1 - _combined_keep_docx
+                                _score_after_docx = max(seg["max_zone"] * (1 - _vred_qual_docx), 0.0)
+                                _risk_pct_after_docx = min(_score_after_docx / 2.0 * 100, 150)
+                                _tarp_rows_a_docx, _tarp_idx_a_docx = _tarp_rows(_score_after_docx)
+                                _cat_after_docx = (
+                                    _tarp_rows_a_docx[_tarp_idx_a_docx + 1][0].split("  ←")[0]
+                                    if _tarp_idx_a_docx is not None else "-"
+                                )
+                                _risk_after_str_docx = f"{_risk_pct_after_docx:.0f}% (estimasi kualitatif)"
+                            else:
+                                _cat_after_docx = _cat_before_docx
+                                _risk_after_str_docx = f"{_risk_pct_before_docx:.0f}%"
+                            _docx_table(docx_doc, [
+                                ["", "SEBELUM", "SESUDAH (estimasi)"],
+                                ["Level Risiko (TARP)", _cat_before_docx, _cat_after_docx],
+                                ["Skor Risiko (%)", f"{_risk_pct_before_docx:.0f}%", _risk_after_str_docx],
+                            ])
+                            _p_note_docx = docx_doc.add_paragraph()
+                            _p_note_docx.add_run(
+                                "Catatan: nilai \"SESUDAH\" adalah estimasi rekayasa berdasarkan opsi skenario "
+                                "geometri/hidraulik terbaik (bila tersedia); kalau tidak ada skenario kuantitatif, "
+                                "dipakai asumsi efektivitas konservatif per jenis pengendalian (lihat catatan detail "
+                                "di laporan PDF). BUKAN hasil re-running model erosi 3D penuh — untuk verifikasi akhir, "
+                                "disarankan re-run RUN ANALYSIS dengan geometri DXF yang sudah direvisi."
+                            ).italic = True
 
-                                if seg.get("risk_map_2d_path") and os.path.exists(seg["risk_map_2d_path"]):
-                                    _docx_heading(docx_doc, "2D Risk Map", level=2)
-                                    docx_doc.add_picture(seg["risk_map_2d_path"], width=DocxCm(16))
+                            # --- gambar-gambar pendukung: Risk Index, 2D Risk Map, Peta Risiko, Peta Komposit ---
+                            # (sama dengan urutan di laporan PDF)
+                            if seg.get("risk_index_chart_path") and os.path.exists(seg["risk_index_chart_path"]):
+                                _docx_heading(docx_doc, "Sebaran Risk Index — 10 Titik Prioritas Mitigasi", level=2)
+                                docx_doc.add_picture(seg["risk_index_chart_path"], width=DocxCm(16))
 
-                                _map_path_docx = f"Erosion_Map_{sid}.png"
-                                if os.path.exists(_map_path_docx):
-                                    _docx_heading(docx_doc, "Peta Risiko Erosi & Sedimentasi", level=2)
-                                    docx_doc.add_picture(_map_path_docx, width=DocxCm(16))
+                            # --- Numerical Modelling (3D) per-segmen (sama seperti PDF) ---
+                            _num_views_seg_docx = seg.get("numerical_modelling_views") or {}
+                            _view_labels_seg_docx = {
+                                "overall": "(a) Tampilan Keseluruhan (Overall)",
+                                "critical_point": "(b) Tampilan Mengarah ke Titik Paling Kritis",
+                                "alternate": "(c) Tampilan Sudut Lain",
+                            }
+                            if any(_num_views_seg_docx.get(k) for k in _view_labels_seg_docx):
+                                _docx_heading(docx_doc, f"Numerical Modelling (3D) — {seg['label']}", level=2)
+                                for _vk_seg, _vlabel_seg in _view_labels_seg_docx.items():
+                                    _vp_seg = _num_views_seg_docx.get(_vk_seg)
+                                    if _vp_seg and os.path.exists(_vp_seg):
+                                        _p_vh_seg = docx_doc.add_paragraph()
+                                        _p_vh_seg.add_run(_vlabel_seg).bold = True
+                                        docx_doc.add_picture(_vp_seg, width=DocxCm(16))
 
-                                _composite_path_docx = f"Composite_Map_{sid}.png"
-                                if os.path.exists(_composite_path_docx):
-                                    docx_doc.add_page_break()
-                                    _docx_heading(docx_doc, f"LEMBAR PETA — SEBARAN POTENSI EROSI & SEDIMENTASI: {seg['label'].upper()}", level=1)
-                                    docx_doc.add_picture(_composite_path_docx, width=DocxCm(24))
-                                    _p_comp = docx_doc.add_paragraph()
-                                    _p_comp.add_run(
-                                        f"Peta komposit {seg['label']}: klasifikasi risiko erosi/sedimentasi 4 kelas, grafik "
-                                        "luas per kategori, topografi hillshade & zoom titik kritis, dan model permukaan 3D "
-                                        "berwarna indeks risiko."
-                                    ).italic = True
+                            if seg.get("risk_map_2d_path") and os.path.exists(seg["risk_map_2d_path"]):
+                                _docx_heading(docx_doc, "2D Risk Map", level=2)
+                                docx_doc.add_picture(seg["risk_map_2d_path"], width=DocxCm(16))
 
+                            _map_path_docx = f"Erosion_Map_{sid}.png"
+                            if os.path.exists(_map_path_docx):
+                                _docx_heading(docx_doc, "Peta Risiko Erosi & Sedimentasi", level=2)
+                                docx_doc.add_picture(_map_path_docx, width=DocxCm(16))
+
+                            _composite_path_docx = f"Composite_Map_{sid}.png"
+                            if os.path.exists(_composite_path_docx):
                                 docx_doc.add_page_break()
+                                _docx_heading(docx_doc, f"LEMBAR PETA — SEBARAN POTENSI EROSI & SEDIMENTASI: {seg['label'].upper()}", level=1)
+                                docx_doc.add_picture(_composite_path_docx, width=DocxCm(24))
+                                _p_comp = docx_doc.add_paragraph()
+                                _p_comp.add_run(
+                                    f"Peta komposit {seg['label']}: klasifikasi risiko erosi/sedimentasi 4 kelas, grafik "
+                                    "luas per kategori, topografi hillshade & zoom titik kritis, dan model permukaan 3D "
+                                    "berwarna indeks risiko."
+                                ).italic = True
 
-                            _docx_heading(docx_doc, "INTERPRETASI & REKOMENDASI", level=1)
-                            _INd = _rep_interpretation(_Fd, seg_results_all)
-                            if _INd["ai_used"]:
-                                _docx_status_box(docx_doc, "\u26a0 Sebagian narasi di bawah dihasilkan AI dari hasil numerik seluruh segmen. "
-                                                 "WAJIB DIPERIKSA & DITANDATANGANI ENGINEER GEOTEKNIK BERLISENSI. Nilai indeks/kuantitatif tetap dari solver aplikasi.",
-                                                 "#D97A00")
-                                docx_doc.add_paragraph("")
-                            _docx_heading(docx_doc, "Ringkasan Status", level=2)
-                            _rep_docx_add_rich(docx_doc.add_paragraph(), _INd["status_par"])
-                            if _INd["drivers"]:
-                                _docx_heading(docx_doc, "Faktor Pengendali", level=2)
-                                for _dn_d, _dt_d in _INd["drivers"]:
-                                    _pfd = docx_doc.add_paragraph(style="List Bullet")
-                                    _pfd.add_run(f"{_dn_d}: ").bold = True
-                                    _pfd.add_run(_dt_d)
-                            if _INd["fit"]:
-                                _docx_heading(docx_doc, "Kesesuaian Kriteria", level=2)
-                                for _ft_d, _fc_d in _INd["fit"]:
-                                    _pft = docx_doc.add_paragraph(style="List Bullet")
-                                    _rep_docx_add_rich(_pft, _ft_d)
-                            if _INd["worst_narrative"]:
-                                _docx_heading(docx_doc, f"Catatan tambahan — {_Fd['worst'].get('label', '-')}", level=2)
-                                docx_doc.add_paragraph(_INd["worst_narrative"])
-                            if _INd["worst_recs"]:
-                                _docx_heading(docx_doc, f"Rekomendasi prioritas — {_Fd['worst'].get('label', '-')}", level=2)
-                                for _r_d in _INd["worst_recs"]:
-                                    docx_doc.add_paragraph(str(_r_d), style="List Bullet")
                             docx_doc.add_page_break()
 
-                            if reviewer_name or reviewer_role or reviewer_signature_path:
-                                _docx_heading(docx_doc, "LEMBAR PENGESAHAN", level=1)
-                                if reviewer_signature_path and os.path.exists(reviewer_signature_path):
-                                    try:
-                                        docx_doc.add_picture(reviewer_signature_path, width=DocxCm(4))
-                                    except Exception:
-                                        pass
-                                _docx_table(docx_doc, [
-                                    ["Item", "Keterangan"],
-                                    ["Nama Reviewer", reviewer_name or "-"],
-                                    ["Jabatan / Peran", reviewer_role or "-"],
-                                    ["Tanggal Review", reviewer_date.strftime("%d %B %Y") if reviewer_date else "-"],
-                                ])
+                        _docx_heading(docx_doc, "INTERPRETASI & REKOMENDASI", level=1)
+                        _INd = _rep_interpretation(_Fd, seg_results_all)
+                        if _INd["ai_used"]:
+                            _docx_status_box(docx_doc, "\u26a0 Sebagian narasi di bawah dihasilkan AI dari hasil numerik seluruh segmen. "
+                                             "WAJIB DIPERIKSA & DITANDATANGANI ENGINEER GEOTEKNIK BERLISENSI. Nilai indeks/kuantitatif tetap dari solver aplikasi.",
+                                             "#D97A00")
+                            docx_doc.add_paragraph("")
+                        _docx_heading(docx_doc, "Ringkasan Status", level=2)
+                        _rep_docx_add_rich(docx_doc.add_paragraph(), _INd["status_par"])
+                        if _INd["drivers"]:
+                            _docx_heading(docx_doc, "Faktor Pengendali", level=2)
+                            for _dn_d, _dt_d in _INd["drivers"]:
+                                _pfd = docx_doc.add_paragraph(style="List Bullet")
+                                _pfd.add_run(f"{_dn_d}: ").bold = True
+                                _pfd.add_run(_dt_d)
+                        if _INd["fit"]:
+                            _docx_heading(docx_doc, "Kesesuaian Kriteria", level=2)
+                            for _ft_d, _fc_d in _INd["fit"]:
+                                _pft = docx_doc.add_paragraph(style="List Bullet")
+                                _rep_docx_add_rich(_pft, _ft_d)
+                        if _INd["worst_narrative"]:
+                            _docx_heading(docx_doc, f"Catatan tambahan — {_Fd['worst'].get('label', '-')}", level=2)
+                            docx_doc.add_paragraph(_INd["worst_narrative"])
+                        if _INd["worst_recs"]:
+                            _docx_heading(docx_doc, f"Rekomendasi prioritas — {_Fd['worst'].get('label', '-')}", level=2)
+                            for _r_d in _INd["worst_recs"]:
+                                docx_doc.add_paragraph(str(_r_d), style="List Bullet")
+                        docx_doc.add_page_break()
 
-                            # ---- DASAR KLASIFIKASI & AMBANG (selalu disertakan, juga pada laporan ringkas) ----
-                            _docx_heading(docx_doc, "DASAR KLASIFIKASI & AMBANG", level=2)
-                            docx_doc.add_paragraph(
-                                "Tabel berikut menyatakan dasar tiap klasifikasi yang dipakai pada laporan ini: regulasi, "
-                                "literatur, atau ambang internal (indikatif). Kriteria regulasi yang relevan (Kepmen ESDM "
-                                "1827 K/30/MEM/2018) mengatur FK/PK kestabilan lereng, bukan indeks erosi permukaan; ambang "
-                                "indeks erosi pada laporan ini adalah ambang internal dan perlu diselaraskan dengan standar/"
-                                "TARP perusahaan serta validasi lapangan sebelum dipakai untuk keputusan."
-                            )
-                            _docx_table(docx_doc, _classification_report_rows(pdf_safe=False))
+                        if reviewer_name or reviewer_role or reviewer_signature_path:
+                            _docx_heading(docx_doc, "LEMBAR PENGESAHAN", level=1)
+                            if reviewer_signature_path and os.path.exists(reviewer_signature_path):
+                                try:
+                                    docx_doc.add_picture(reviewer_signature_path, width=DocxCm(4))
+                                except Exception:
+                                    pass
+                            _docx_table(docx_doc, [
+                                ["Item", "Keterangan"],
+                                ["Nama Reviewer", reviewer_name or "-"],
+                                ["Jabatan / Peran", reviewer_role or "-"],
+                                ["Tanggal Review", reviewer_date.strftime("%d %B %Y") if reviewer_date else "-"],
+                            ])
 
-                            # Daftar referensi dilewati pada mode laporan RINGKAS (sama seperti PDF).
-                            if not _report_concise:
-                                _docx_heading(docx_doc, "REFERENSI METODOLOGI", level=2)
-                                for ref in _classification_report_refs(pdf_safe=False):
-                                    docx_doc.add_paragraph(f"• {ref}")
-                                for ref in [
-                                    "Hjulström, F. (1935). Studies of the morphological activity of rivers as illustrated by the "
-                                    "River Fyris. Bulletin of the Geological Institute of Uppsala, 25, 221-527.",
-                                    "Shields, A. (1936). Anwendung der Ähnlichkeitsmechanik und der Turbulenzforschung auf die "
-                                    "Geschiebebewegung. Mitteilungen der Preußischen Versuchsanstalt für Wasserbau und Schiffbau, Berlin.",
-                                    "Partheniades, E. (1965). Erosion and deposition of cohesive soils. Journal of the Hydraulics "
-                                    "Division, ASCE, 91(1), 105-139.",
-                                    "Chow, V.T. (1959). Open-Channel Hydraulics. McGraw-Hill, New York. (persamaan Manning)",
-                                    "Mononobe (dalam Suripin, 2004). Sistem Drainase Perkotaan yang Berkelanjutan — rumus "
-                                    "intensitas hujan dari data hujan harian.",
-                                    "Cohen, J. (1960). A coefficient of agreement for nominal scales. Educational and Psychological "
-                                    "Measurement, 20(1), 37-46.",
-                                    "Landis, J.R., & Koch, G.G. (1977). The measurement of observer agreement for categorical data. "
-                                    "Biometrics, 33(1), 159-174.",
-                                ]:
-                                    docx_doc.add_paragraph(f"• {ref}")
-
-                            docx_buffer = io.BytesIO()
-                            docx_doc.save(docx_buffer)
-                            docx_buffer.seek(0)
-                            # Sama seperti PDF di atas: simpan byte-nya ke session_state, jangan
-                            # panggil st.download_button langsung di sini (lihat catatan di bagian PDF).
-                            st.session_state["report_docx_bytes"] = docx_buffer.getvalue()
-                            st.session_state["report_docx_name"] = "Laporan_Teknis_Erosi_Sedimentasi.docx"
-
-                            st.success(_t(
-                                "Laporan berhasil dibuat. Tombol download PDF & Word ada di bawah.",
-                                "Report generated successfully. PDF & Word download buttons are below."
-                            ))
-                        except Exception as _e_report:
-                            # PERBAIKAN: sebelumnya error apa pun di tengah proses generate laporan
-                            # (PDF/Word) membuat script berhenti diam-diam -- untuk user non-admin
-                            # (surveyor), kotak traceback Streamlit malah disembunyikan lewat CSS
-                            # (lihat "stException { display:none }" di atas), jadi yang kelihatan
-                            # cuma sisa elemen kosong / "None". Sekarang errornya ditangkap dan
-                            # ditampilkan jelas ke SEMUA role, supaya penyebabnya kelihatan.
-                            st.error(
-                                _t(
-                                    f"Gagal membuat laporan: {_e_report}. Coba lagi; kalau masih gagal, "
-                                    f"catat pesan error ini dan segmen/opsi apa yang dipakai saat generate.",
-                                    f"Failed to generate the report: {_e_report}. Please try again; if it "
-                                    f"still fails, note this error message and which segment/options were used."
-                                )
-                            )
-                            if _is_admin:
-                                with st.expander("Traceback lengkap (admin)"):
-                                    st.exception(_e_report)
-
-                # ================= TOMBOL DOWNLOAD LAPORAN (PERSISTEN) =================
-                # Dirender di LUAR blok "if gen_report_run" di atas supaya tombolnya tetap
-                # tampil selama byte laporan masih ada di session_state -- tidak hilang lagi
-                # setelah rerun apa pun (klik tombol lain, klik download itu sendiri, dst).
-                _rep_pdf_bytes = st.session_state.get("report_pdf_bytes")
-                _rep_docx_bytes = st.session_state.get("report_docx_bytes")
-                if _rep_pdf_bytes or _rep_docx_bytes:
-                    st.markdown("---")
-                    _sub_header(_t("Download Laporan Teknis", "Download Technical Report"))
-                    _repc1, _repc2 = st.columns(2)
-                    if _rep_pdf_bytes:
-                        _repc1.download_button(
-                            _t("⬇ Download Laporan (PDF)", "⬇ Download Report (PDF)"),
-                            data=_rep_pdf_bytes,
-                            file_name=st.session_state.get("report_pdf_name", "Laporan_Teknis_Erosi_Sedimentasi.pdf"),
-                            mime="application/pdf",
-                            key="dl_report_pdf_persist",
-                            width="stretch",
+                        # ---- DASAR KLASIFIKASI & AMBANG (selalu disertakan, juga pada laporan ringkas) ----
+                        _docx_heading(docx_doc, "DASAR KLASIFIKASI & AMBANG", level=2)
+                        docx_doc.add_paragraph(
+                            "Tabel berikut menyatakan dasar tiap klasifikasi yang dipakai pada laporan ini: regulasi, "
+                            "literatur, atau ambang internal (indikatif). Kriteria regulasi yang relevan (Kepmen ESDM "
+                            "1827 K/30/MEM/2018) mengatur FK/PK kestabilan lereng, bukan indeks erosi permukaan; ambang "
+                            "indeks erosi pada laporan ini adalah ambang internal dan perlu diselaraskan dengan standar/"
+                            "TARP perusahaan serta validasi lapangan sebelum dipakai untuk keputusan."
                         )
-                    if _rep_docx_bytes:
-                        _repc2.download_button(
-                            _t("⬇ Download Laporan (Word)", "⬇ Download Report (Word)"),
-                            data=_rep_docx_bytes,
-                            file_name=st.session_state.get("report_docx_name", "Laporan_Teknis_Erosi_Sedimentasi.docx"),
-                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                            key="dl_report_docx_persist",
-                            width="stretch",
+                        _docx_table(docx_doc, _classification_report_rows(pdf_safe=False))
+
+                        # Daftar referensi dilewati pada mode laporan RINGKAS (sama seperti PDF).
+                        if not _report_concise:
+                            _docx_heading(docx_doc, "REFERENSI METODOLOGI", level=2)
+                            for ref in _classification_report_refs(pdf_safe=False):
+                                docx_doc.add_paragraph(f"• {ref}")
+                            for ref in [
+                                "Hjulström, F. (1935). Studies of the morphological activity of rivers as illustrated by the "
+                                "River Fyris. Bulletin of the Geological Institute of Uppsala, 25, 221-527.",
+                                "Shields, A. (1936). Anwendung der Ähnlichkeitsmechanik und der Turbulenzforschung auf die "
+                                "Geschiebebewegung. Mitteilungen der Preußischen Versuchsanstalt für Wasserbau und Schiffbau, Berlin.",
+                                "Partheniades, E. (1965). Erosion and deposition of cohesive soils. Journal of the Hydraulics "
+                                "Division, ASCE, 91(1), 105-139.",
+                                "Chow, V.T. (1959). Open-Channel Hydraulics. McGraw-Hill, New York. (persamaan Manning)",
+                                "Mononobe (dalam Suripin, 2004). Sistem Drainase Perkotaan yang Berkelanjutan — rumus "
+                                "intensitas hujan dari data hujan harian.",
+                                "Cohen, J. (1960). A coefficient of agreement for nominal scales. Educational and Psychological "
+                                "Measurement, 20(1), 37-46.",
+                                "Landis, J.R., & Koch, G.G. (1977). The measurement of observer agreement for categorical data. "
+                                "Biometrics, 33(1), 159-174.",
+                            ]:
+                                docx_doc.add_paragraph(f"• {ref}")
+
+                        docx_buffer = io.BytesIO()
+                        docx_doc.save(docx_buffer)
+                        docx_buffer.seek(0)
+                        st.download_button(
+                            label="Download Laporan Teknis Lengkap (Word)",
+                            data=docx_buffer,
+                            file_name="Laporan_Teknis_Erosi_Sedimentasi.docx",
+                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                         )
 
 
