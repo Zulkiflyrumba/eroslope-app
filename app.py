@@ -3763,34 +3763,92 @@ def _fk_fs_map_figure(res, flipped, C):
     return fig
 
 
-def _fk_animation_figure(prof, flipped, C, layers, water, res, method, max_disp, nfr=14):
+def _fk_animation_figure(prof, flipped, C, layers, water, res, method, max_disp, nfr=14, n_chunks=16):
+    """Animasi keruntuhan. SEBELUMNYA: 1 blok kaku (poligon utuh dari muka tanah sampai busur) yg
+    dirotasi rigid terhadap 1 titik pusat lingkaran -- kelihatan spt "busur yang jatuh" (rigid-body),
+    bukan longsoran material yg wajar.
+    SEKARANG: massa longsor dipecah jadi beberapa "bongkahan" (potongan vertikal spt metode irisan),
+    tiap bongkahan bergerak MENGIKUTI ARAH TANGENSIAL busur DI POSISINYA SENDIRI (bukan rotasi rigid
+    1 pusat jauh) dgn BESAR PERPINDAHAN BERBEDA-BEDA -- bagian dekat kaki (toe) bergerak lebih jauh
+    drpd bagian dekat mahkota (crown), meniru pola keruntuhan progresif (toe membulge/menyembul lebih
+    dulu, mahkota baru turun menyusul) -- plus rotasi & jitter kecil per bongkahan yg tumbuh seiring
+    waktu supaya potongan2nya kelihatan pecah/rontok saling lepas, bukan tetap jadi 1 lembar utuh."""
     r = res["results"][method]
     x, z = prof
     base = _fk_model_figure(prof, flipped, C, layers, water, {"results": {}, "trials": []}, method, show_trials=False, show_slices=False)
-    xa, ya = _fk_arc(r["cx"], r["cy"], r["R"], r["x_in"], r["x_out"], 90)
-    gxs = np.linspace(r["x_out"], r["x_in"], 60)
-    gz = np.interp(gxs, x, z)
-    px0 = np.concatenate([xa, gxs])
-    py0 = np.concatenate([ya, gz])
-    th_max = max_disp / r["R"]
+    cx, cy, R = r["cx"], r["cy"], r["R"]
+    x_in, x_out = float(r["x_in"]), float(r["x_out"])
+    xa, ya = _fk_arc(cx, cy, R, x_in, x_out, 200)
 
-    def rot(th):
-        c, s = np.cos(th), np.sin(th)
-        dx, dy = px0 - r["cx"], py0 - r["cy"]
-        return r["cx"] + dx * c - dy * s, r["cy"] + dx * s + dy * c
+    n_chunks = int(n_chunks)
+    edges = np.linspace(x_in, x_out, n_chunks + 1)
+    _rng = np.random.default_rng(42)  # seed tetap -> animasi reproducible, bukan acak tiap render ulang
+    _chunk_fills = ["rgba(200,20,20,0.45)", "rgba(170,45,25,0.45)", "rgba(140,25,25,0.45)", "rgba(180,60,30,0.45)"]
 
-    x0, y0 = rot(0.0)
+    chunks0 = []
+    for i in range(n_chunks):
+        lo, hi = edges[i], edges[i + 1]
+        xs_b = np.linspace(lo, hi, 8)
+        yb_ = cy - np.sqrt(np.maximum(R ** 2 - (xs_b - cx) ** 2, 0.0))
+        xs_t = xs_b[::-1]
+        yt_ = np.interp(xs_t, x, z)
+        px = np.concatenate([xs_b, xs_t])
+        py = np.concatenate([yb_, yt_])
+        xmid = 0.5 * (lo + hi)
+        t_pos = float(np.clip((xmid - x_in) / max(x_out - x_in, 1e-6), 0.0, 1.0))  # 0=mahkota, 1=kaki lereng
+        _jphase = float(_rng.uniform(0, 6.28))
+        chunks0.append(dict(px=px, py=py, xmid=xmid, t_pos=t_pos, jphase=_jphase))
+
+    def _tangent_dir(xm):
+        dxc = np.clip(xm - cx, -R + 1e-6, R - 1e-6)
+        denom = float(np.sqrt(max(R ** 2 - dxc ** 2, 1e-6)))
+        d = np.array([1.0, dxc / denom])
+        return d / np.hypot(d[0], d[1])
+
+    def _chunk_state(ch, k, t_frac):
+        # perpindahan progresif: kaki lereng (t_pos~1) bergerak jauh lbh besar drpd mahkota (t_pos~0)
+        disp = max_disp * (0.30 + 1.0 * ch["t_pos"]) * t_frac
+        dxdir = _tangent_dir(ch["xmid"])
+        ox, oy = dxdir[0] * disp, dxdir[1] * disp
+        # jitter & "settle" tambahan per bongkahan (tumbuh seiring waktu) -> kesan pecah/rontok,
+        # bukan meluncur rapi sbg 1 lembar -- fase acak tetap (seed) supaya konsisten antar frame
+        jit = 0.10 * disp
+        ox += jit * np.sin(ch["jphase"] + t_frac * 2.4)
+        oy += -0.10 * disp - jit * 0.4 * np.cos(ch["jphase"] * 1.3)
+        px2 = ch["px"] + ox
+        py2 = ch["py"] + oy
+        # rotasi kecil per bongkahan (deformasi internal, arah gantian per potongan)
+        ang = (0.05 + 0.07 * ch["t_pos"]) * (disp / max(0.15 * R, 1.0)) * (1.0 if k % 2 == 0 else -0.7)
+        cxm, cym = float(np.mean(px2)), float(np.mean(py2))
+        cc, ss = np.cos(ang), np.sin(ang)
+        rx = cxm + (px2 - cxm) * cc - (py2 - cym) * ss
+        ry = cym + (px2 - cxm) * ss + (py2 - cym) * cc
+        # sedikit menyusut ke tengah seiring waktu -> celah antar bongkahan makin kelihatan (retak)
+        shrink = 1.0 - 0.10 * t_frac
+        rx = cxm + (rx - cxm) * shrink
+        ry = cym + (ry - cym) * shrink
+        return rx, ry
+
     fig = base
     fig.add_trace(go.Scatter(x=_fk_disp_x(xa, flipped, C), y=ya, mode="lines", line=dict(color="#d10000", width=2, dash="dash"),
                              name=_t("Bidang gelincir", "Slip surface"), showlegend=True))
-    fig.add_trace(go.Scatter(x=_fk_disp_x(x0, flipped, C), y=y0, fill="toself", mode="lines", line=dict(color="#b30000", width=2),
-                             fillcolor="rgba(220,0,0,0.30)", name=_t("Massa longsor", "Sliding mass")))
-    idx = len(fig.data) - 1
+    idx0 = len(fig.data)
+    for k, ch in enumerate(chunks0):
+        rx, ry = _chunk_state(ch, k, 0.0)
+        fig.add_trace(go.Scatter(x=_fk_disp_x(rx, flipped, C), y=ry, fill="toself", mode="lines",
+                                 line=dict(color="#7a1010", width=1),
+                                 fillcolor=_chunk_fills[k % len(_chunk_fills)],
+                                 name=_t("Massa longsor", "Sliding mass") if k == 0 else None,
+                                 showlegend=(k == 0), hoverinfo="skip"))
     frames = []
-    for k in range(nfr + 1):
-        xr_, yr_ = rot(th_max * k / nfr)
-        frames.append(go.Frame(data=[go.Scatter(x=_fk_disp_x(xr_, flipped, C), y=yr_, fill="toself", mode="lines", line=dict(color="#b30000", width=2),
-                                                fillcolor="rgba(220,0,0,0.30)")], traces=[idx], name=str(k)))
+    for kf in range(nfr + 1):
+        t_frac = kf / nfr
+        fdata = []
+        for k, ch in enumerate(chunks0):
+            rx, ry = _chunk_state(ch, k, t_frac)
+            fdata.append(go.Scatter(x=_fk_disp_x(rx, flipped, C), y=ry, fill="toself", mode="lines",
+                                    line=dict(color="#7a1010", width=1), fillcolor=_chunk_fills[k % len(_chunk_fills)]))
+        frames.append(go.Frame(data=fdata, traces=list(range(idx0, idx0 + n_chunks)), name=str(kf)))
     fig.frames = frames
     fig.update_layout(
         updatemenus=[dict(type="buttons", showactive=False, x=0.02, y=1.12, xanchor="left",
@@ -3858,12 +3916,23 @@ def _render_fk_tab():
         else:
             _c1, _c2, _c3 = st.columns([2, 1, 1])
             _nm = _c1.selectbox(_t("Penampang", "Section"), list(_secs), key="fk_sec_sel")
-            _np = _c2.number_input(_t("Jumlah titik", "Points"), 20, 300, 60, 10, key="fk_sec_np")
-            _sm = _c3.number_input(_t("Haluskan (jendela)", "Smoothing window"), 1, 15, 3, 2, key="fk_sec_sm")
             _r = _secs[_nm]
             _d, _e = np.asarray(_r["distance"], dtype=float), np.asarray(_r["elevation"], dtype=float)
             _ok = np.isfinite(_d) & np.isfinite(_e)
             _d, _e = _d[_ok], _e[_ok]
+            # PERBAIKAN: sebelumnya default 60 titik + dihaluskan (jendela=3) otomatis -- itu yang
+            # membuat profil di tab ini kelihatan bulat/smooth dibanding penampang aslinya di tab Cross
+            # Section (yg sudah persis mengikuti mesh/DXF, lihat _xs_sample_profile). Sekarang defaultnya
+            # MENGIKUTI jumlah titik penampang asli apa adanya (tanpa dihaluskan) supaya bentuknya tegas
+            # sesuai mesh -- keduanya masih bisa dikurangi/dihaluskan manual kalau perhitungan terasa
+            # berat atau permukaannya terlalu bergerigi utk metode irisan.
+            _np_default = int(np.clip(len(_d) if len(_d) else 60, 20, 600))
+            _np = _c2.number_input(_t("Jumlah titik", "Points"), 20, 1500, _np_default, 10, key="fk_sec_np",
+                                   help=_t("Default = jumlah titik penampang aslinya (mengikuti mesh/DXF persis, tidak dipotong/dibulatkan).",
+                                           "Default = the original cross-section's own point count (follows the mesh/DXF exactly, not cut down/rounded off)."))
+            _sm = _c3.number_input(_t("Haluskan (jendela)", "Smoothing window"), 1, 15, 1, 2, key="fk_sec_sm",
+                                   help=_t("1 = TIDAK dihaluskan (ikuti mesh apa adanya -- disarankan). Naikkan hanya kalau permukaannya terlalu bergerigi utk metode irisan.",
+                                           "1 = NOT smoothed (follow the mesh as-is -- recommended). Raise only if the surface is too jagged for the slice method."))
             if len(_d) >= 5:
                 _xg = np.linspace(_d.min(), _d.max(), int(_np))
                 _zg = np.interp(_xg, _d, _e)
