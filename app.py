@@ -1232,9 +1232,89 @@ def _xs_available_params(r):
     return _out
 
 
-def _xs_sample_profile(vertices, grid_x, grid_y, grid_z, fields, inside=None):
-    """Sampel profil sepanjang polyline dgn interpolasi BILINEAR (bukan nearest-neighbour
-    yg menghasilkan garis bergerigi/tangga). fields = {nama: array_grid} ikut disampel."""
+_XS_TIN_CACHE = {}
+
+
+def _xs_tin_get(tx, ty, tz):
+    """TIN Delaunay dari titik kontur DXF (sudah dibersihkan). Di-cache (1 entri) karena mahal.
+    Koordinat digeser ke pusat titik (UTM 7-digit -> presisi qhull lebih aman)."""
+    from scipy.spatial import Delaunay
+    from scipy.interpolate import LinearNDInterpolator
+
+    tx = np.asarray(tx, dtype=float)
+    ty = np.asarray(ty, dtype=float)
+    tz = np.asarray(tz, dtype=float)
+    ok = np.isfinite(tx) & np.isfinite(ty) & np.isfinite(tz)
+    if ok.sum() < 3:
+        return None
+    tx, ty, tz = tx[ok], ty[ok], tz[ok]
+    key = (len(tx), round(float(tx.sum()), 3), round(float(ty.sum()), 3), round(float(tz.sum()), 3))
+    c = _XS_TIN_CACHE.get("entry")
+    if c is not None and c["key"] == key:
+        return c
+    ox, oy = float(tx.mean()), float(ty.mean())
+    P = np.column_stack([tx - ox, ty - oy])
+    tri = Delaunay(P)
+    interp = LinearNDInterpolator(tri, tz)
+    S = tri.simplices
+    e = np.concatenate([S[:, [0, 1]], S[:, [1, 2]], S[:, [2, 0]]])
+    e.sort(axis=1)
+    n = len(P)
+    code = np.unique(e[:, 0].astype(np.int64) * n + e[:, 1].astype(np.int64))
+    c = {"key": key, "o": (ox, oy), "P": P, "tri": tri, "interp": interp,
+         "ea": code // n, "eb": code % n}
+    _XS_TIN_CACHE.clear()
+    _XS_TIN_CACHE["entry"] = c
+    return c
+
+
+def _xs_tin_crossings(c, vx, vy, cum):
+    """Jarak-sepanjang-garis (s) di mana polyline penampang memotong SISI segitiga TIN.
+    Di antara dua titik potong berurutan, elevasi TIN linear persis -> profil = polyline eksak."""
+    ox, oy = c["o"]
+    P, ea, eb = c["P"], c["ea"], c["eb"]
+    ax, ay = P[ea, 0], P[ea, 1]
+    bx, by = P[eb, 0], P[eb, 1]
+    ex, ey = bx - ax, by - ay
+    elen = np.hypot(ex, ey)
+    emin_x, emax_x = np.minimum(ax, bx), np.maximum(ax, bx)
+    emin_y, emax_y = np.minimum(ay, by), np.maximum(ay, by)
+    out = []
+    vx = np.asarray(vx, dtype=float) - ox
+    vy = np.asarray(vy, dtype=float) - oy
+    for i in range(len(vx) - 1):
+        x0, y0, x1, y1 = vx[i], vy[i], vx[i + 1], vy[i + 1]
+        dx, dy = x1 - x0, y1 - y0
+        L = float(np.hypot(dx, dy))
+        if L <= 0:
+            continue
+        m = ((emax_x >= min(x0, x1) - 1e-9) & (emin_x <= max(x0, x1) + 1e-9)
+             & (emax_y >= min(y0, y1) - 1e-9) & (emin_y <= max(y0, y1) + 1e-9))
+        idx = np.nonzero(m)[0]
+        if idx.size == 0:
+            continue
+        den = dx * ey[idx] - dy * ex[idx]
+        good = np.abs(den) > 1e-9 * L * elen[idx]
+        if not good.any():
+            continue
+        idx, den = idx[good], den[good]
+        wx, wy = ax[idx] - x0, ay[idx] - y0
+        t = (wx * ey[idx] - wy * ex[idx]) / den
+        u = (wx * dy - wy * dx) / den
+        hit = (t >= -1e-9) & (t <= 1 + 1e-9) & (u >= -1e-9) & (u <= 1 + 1e-9)
+        if hit.any():
+            out.append(cum[i] + np.clip(t[hit], 0.0, 1.0) * L)
+    return np.concatenate(out) if out else np.zeros(0)
+
+
+def _xs_sample_profile(vertices, grid_x, grid_y, grid_z, fields, inside=None, tin_xyz=None):
+    """Sampel profil sepanjang polyline. fields = {nama: array_grid} ikut disampel (bilinear).
+
+    ELEVASI: kalau tin_xyz=(x, y, z) titik kontur DXF diberikan, elevasi diambil LANGSUNG dari TIN
+    DXF (interpolasi linear per segitiga) dan titik-titik potong garis dengan sisi segitiga ikut
+    dimasukkan sebagai vertex profil -> perubahan kemiringan/breakline tampil TEGAS (kaku) persis
+    seperti DXF, tidak dibulatkan oleh raster grid. Tanpa tin_xyz (atau di luar TIN) jatuh ke
+    interpolasi bilinear grid seperti sebelumnya."""
     from scipy.interpolate import RegularGridInterpolator
 
     _gxa = np.asarray(grid_x, dtype=float)
@@ -1267,12 +1347,29 @@ def _xs_sample_profile(vertices, grid_x, grid_y, grid_z, fields, inside=None):
     _cell = min(abs(_gx[1] - _gx[0]) if len(_gx) > 1 else 1.0,
                 abs(_gy[1] - _gy[0]) if len(_gy) > 1 else 1.0)
     _n = int(np.clip(_total / max(_cell * 0.5, _total / 1500.0, 1e-6), 80, 1500))
-    _s = np.linspace(0.0, _total, _n)
+    _s_dense = np.linspace(0.0, _total, _n)
+    _s = _s_dense
+    _tin = None
+    if tin_xyz is not None:
+        try:
+            _tin = _xs_tin_get(*tin_xyz)
+            if _tin is not None:
+                _cross = _xs_tin_crossings(_tin, _vx, _vy, _cum)
+                _s_all = np.sort(np.concatenate([_s_dense, _cum, _cross]))
+                _keep = np.concatenate([[True], np.diff(_s_all) > max(_total * 1e-6, 1e-9)])
+                _s = _s_all[_keep]
+        except Exception:
+            _tin = None
+            _s = _s_dense
     _px = np.interp(_s, _cum, _vx)
     _py = np.interp(_s, _cum, _vy)
     _pts = np.column_stack([_px, _py])
 
     _z = _interp(grid_z, _pts)
+    if _tin is not None:
+        _zt = _tin["interp"](np.column_stack([_px - _tin["o"][0], _py - _tin["o"][1]]))
+        _zt = np.asarray(_zt, dtype=float)
+        _z = np.where(np.isfinite(_zt), _zt, _z)
     _out = {"distance": _s, "elevation": _z}
     if inside is not None:
         _ins = _interp(np.asarray(inside, dtype=float), _pts)
@@ -1281,14 +1378,17 @@ def _xs_sample_profile(vertices, grid_x, grid_y, grid_z, fields, inside=None):
         _a = _interp(_F, _pts) if _F is not None else None
         if _a is not None:
             _out[_name] = _a
-    # kemiringan lereng sepanjang profil (%): dari elevasi yg sudah dihaluskan ringan
+    # kemiringan lereng sepanjang profil (%): dihitung di grid jarak seragam (_s_dense) dari elevasi
+    # yg sudah dihaluskan ringan, lalu dipetakan balik ke titik profil (vertex TIN tetap tajam di
+    # garis elevasi; hanya kolom kemiringan utk analisis yang diperhalus).
     _zf = _z.copy()
     _okz = np.isfinite(_zf)
     if _okz.sum() >= 3:
-        _zf = np.interp(_s, _s[_okz], _zf[_okz])
+        _zd = np.interp(_s_dense, _s[_okz], _zf[_okz])
         _w = 5
-        _zs = np.convolve(np.pad(_zf, (_w // 2, _w // 2), mode="edge"), np.ones(_w) / _w, mode="valid")
-        _out["slope_pct"] = np.abs(np.gradient(_zs, _s)) * 100.0
+        _zs = np.convolve(np.pad(_zd, (_w // 2, _w // 2), mode="edge"), np.ones(_w) / _w, mode="valid")
+        _sl = np.abs(np.gradient(_zs, _s_dense)) * 100.0
+        _out["slope_pct"] = np.interp(_s, _s_dense, _sl)
     # nilai di luar batas analisis => NaN (ditampilkan abu-abu, bukan hitam)
     if _out.get("inside") is not None:
         for _k in list(_out.keys()):
@@ -3363,6 +3463,49 @@ def _render_xs_export_cutfill(section_results):
 _GAMMA_W = 9.81
 
 
+def _rdp_keep_mask(x, y, eps):
+    """Ramer-Douglas-Peucker (deviasi VERTIKAL dari garis penghubung) -> mask titik yang dipertahankan."""
+    n = len(x)
+    keep = np.zeros(n, dtype=bool)
+    keep[0] = keep[-1] = True
+    stack = [(0, n - 1)]
+    while stack:
+        i, j = stack.pop()
+        if j <= i + 1:
+            continue
+        den = x[j] - x[i]
+        t = (x[i + 1:j] - x[i]) / den if den > 0 else np.zeros(j - i - 1)
+        dev = np.abs(y[i + 1:j] - (y[i] + t * (y[j] - y[i])))
+        k = int(np.argmax(dev))
+        if dev[k] > eps:
+            m = i + 1 + k
+            keep[m] = True
+            stack.append((i, m))
+            stack.append((m, j))
+    return keep
+
+
+def _profile_simplify_indices(x, y, n_target):
+    """Indeks titik profil (<= n_target) yang MEMPERTAHANKAN patahan/kemiringan tajam (bukan
+    resample seragam yang membulatkan sudut). Toleransi dicari lewat bisection."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    n_target = int(max(n_target, 3))
+    if len(x) <= n_target:
+        return np.arange(len(x))
+    lo, hi = 0.0, float(np.ptp(y)) + 1e-9
+    best = _rdp_keep_mask(x, y, hi)
+    for _ in range(24):
+        mid = 0.5 * (lo + hi)
+        mk = _rdp_keep_mask(x, y, mid)
+        if mk.sum() > n_target:
+            lo = mid
+        else:
+            hi = mid
+            best = mk
+    return np.nonzero(best)[0]
+
+
 def fk_normalize_profile(x, z, extend_frac=1.5):
     """Urutkan x naik, cerminkan bila perlu agar lereng MENURUN ke kanan (crest kiri, toe kanan), lalu perpanjang
     datar di kedua ujung. Return (x, z, flipped, C) dgn pemetaan cermin x' = C - x."""
@@ -3926,18 +4069,24 @@ def _render_fk_tab():
             # MENGIKUTI jumlah titik penampang asli apa adanya (tanpa dihaluskan) supaya bentuknya tegas
             # sesuai mesh -- keduanya masih bisa dikurangi/dihaluskan manual kalau perhitungan terasa
             # berat atau permukaannya terlalu bergerigi utk metode irisan.
-            _np_default = int(np.clip(len(_d) if len(_d) else 60, 20, 600))
-            _np = _c2.number_input(_t("Jumlah titik", "Points"), 20, 1500, _np_default, 10, key="fk_sec_np",
-                                   help=_t("Default = jumlah titik penampang aslinya (mengikuti mesh/DXF persis, tidak dipotong/dibulatkan).",
-                                           "Default = the original cross-section's own point count (follows the mesh/DXF exactly, not cut down/rounded off)."))
+            _np_default = int(np.clip(len(_d) if len(_d) else 60, 20, 5000))
+            _np = _c2.number_input(_t("Jumlah titik", "Points"), 20, 5000, _np_default, 10, key="fk_sec_np",
+                                   help=_t("Default = SEMUA titik penampang asli (mengikuti TIN/DXF persis, sudut & patahan tetap tajam). Kalau dikurangi, titik yang dibuang dipilih otomatis dari yang paling tidak mengubah bentuk (patahan tetap dipertahankan).",
+                                           "Default = ALL points of the original section (follows the DXF TIN exactly, corners & breaks stay sharp). If reduced, the dropped points are the least significant ones (breaks are kept)."))
             _sm = _c3.number_input(_t("Haluskan (jendela)", "Smoothing window"), 1, 15, 1, 2, key="fk_sec_sm",
-                                   help=_t("1 = TIDAK dihaluskan (ikuti mesh apa adanya -- disarankan). Naikkan hanya kalau permukaannya terlalu bergerigi utk metode irisan.",
-                                           "1 = NOT smoothed (follow the mesh as-is -- recommended). Raise only if the surface is too jagged for the slice method."))
+                                   help=_t("1 = TIDAK dihaluskan (ikuti DXF apa adanya -- disarankan). Naikkan hanya kalau permukaannya terlalu bergerigi utk metode irisan.",
+                                           "1 = NOT smoothed (follow the DXF as-is -- recommended). Raise only if the surface is too jagged for the slice method."))
             if len(_d) >= 5:
-                _xg = np.linspace(_d.min(), _d.max(), int(_np))
-                _zg = np.interp(_xg, _d, _e)
                 if _sm > 1:
+                    # penghalusan butuh jarak seragam -> resample seragam dulu (hanya saat user minta)
+                    _xg = np.linspace(_d.min(), _d.max(), int(max(_np, 20)))
+                    _zg = np.interp(_xg, _d, _e)
                     _zg = np.convolve(np.pad(_zg, (_sm // 2, _sm // 2), mode="edge"), np.ones(int(_sm)) / int(_sm), mode="valid")
+                elif int(_np) >= len(_d):
+                    _xg, _zg = _d.copy(), _e.copy()  # titik asli apa adanya
+                else:
+                    _ki = _profile_simplify_indices(_d, _e, int(_np))
+                    _xg, _zg = _d[_ki], _e[_ki]
                 _x, _z = _xg, _zg
     else:
         _pts = st.data_editor(_fk_default_points(), num_rows="dynamic", hide_index=True, key="fk_pts_ed")
@@ -9626,7 +9775,8 @@ with tab1:
                     ).hexdigest()
                     _dem_cache_key = f"_dem_cache_{sid}"
                     _dem_cached = st.session_state.get(_dem_cache_key)
-                    _dem_need_compute = run_button_clicked or not _dem_cached or _dem_cached.get("sig") != _dem_sig
+                    _dem_need_compute = (run_button_clicked or not _dem_cached or _dem_cached.get("sig") != _dem_sig
+                                         or "tin_x" not in (_dem_cached.get("data") or {}))
 
                     if not _dem_need_compute:
                         _dc = _dem_cached["data"]
@@ -9637,6 +9787,7 @@ with tab1:
                             _dc["points"], _dc["tri"], _dc["valid_triangles"], _dc["surface_mask"],
                             _dc["dz_dx"], _dc["dz_dy"], _dc["slope"],
                         )
+                        _tin_x, _tin_y, _tin_z = _dc.get("tin_x"), _dc.get("tin_y"), _dc.get("tin_z")
 
                     if _dem_need_compute:
                         grid_x, grid_y = np.mgrid[
@@ -9794,6 +9945,15 @@ with tab1:
                                 sigma=smooth_sigma
                             )
 
+                        # Titik kontur DXF yang sudah dibersihkan/dipadatkan (x_in,y_in,z_in) disimpan supaya
+                        # penampang (Cross Section & FK) bisa diambil LANGSUNG dari TIN DXF, bukan dari raster
+                        # grid yang membulatkan sudut/breakline. Kalau user sengaja mengaktifkan smoothing
+                        # gaussian, TIN tidak dipakai (penampang ikut permukaan yang dihaluskan itu).
+                        if smooth_sigma <= 0:
+                            _tin_x, _tin_y, _tin_z = np.asarray(x_in, float), np.asarray(y_in, float), np.asarray(z_in, float)
+                        else:
+                            _tin_x = _tin_y = _tin_z = None
+
                         # ================= SLOPE =================
 
                         # PERBAIKAN satuan: np.gradient(grid_z) TANPA jarak sel menghasilkan m/SEL (= slope
@@ -9821,6 +9981,7 @@ with tab1:
                                 "points": points, "tri": tri, "valid_triangles": valid_triangles,
                                 "surface_mask": surface_mask, "dz_dx": dz_dx, "dz_dy": dz_dy,
                                 "slope": slope,
+                                "tin_x": _tin_x, "tin_y": _tin_y, "tin_z": _tin_z,
                             },
                         }
 
@@ -12198,6 +12359,7 @@ with tab1:
                         "grid_x": grid_x,
                         "grid_y": grid_y,
                         "grid_z": grid_z,
+                        "tin_x": _tin_x, "tin_y": _tin_y, "tin_z": _tin_z,
                         "zone_map": zone_map,
                         "sediment_map": sediment_map,
                         "boundary": boundary,
@@ -20780,8 +20942,11 @@ with tab8:
                         for _lname, _lverts in _lines_to_process.items():
                             # interpolasi bilinear (bukan nearest-neighbour) -> profil halus,
                             # nilai di luar batas analisis = NaN (abu-abu, bukan garis hitam)
+                            _tin_tuple = None
+                            if all(_active_seg.get(_k) is not None for _k in ("tin_x", "tin_y", "tin_z")):
+                                _tin_tuple = (_active_seg["tin_x"], _active_seg["tin_y"], _active_seg["tin_z"])
                             _prof = _xs_sample_profile(_lverts, grid_x, grid_y, grid_z, _xs_fields,
-                                                       inside=_xs_inside)
+                                                       inside=_xs_inside, tin_xyz=_tin_tuple)
                             _prof["vertices"] = _lverts
                             _prof["flow_depth"] = _active_seg.get("flow_depth")
                             _prof["seg_label"] = _active_seg.get("label")
