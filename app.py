@@ -9579,6 +9579,43 @@ with tab1:
                         dy = np.abs(grid_y[0, 1] - grid_y[0, 0])
                         cell_area = dx * dy
 
+                        # ---- PERBAIKAN pola "gigi gergaji"/gelombang palsu antar kontur ----
+                        # griddata(method="linear") = TIN Delaunay dari titik kontur mentah. Kalau jarak
+                        # antar titik SEPANJANG satu garis kontur jauh lebih renggang drpd jarak ANTAR
+                        # kontur (umum kalau DXF hasil simplifikasi/generalisasi garis), triangulasi bisa
+                        # menyambungkan 2 titik yang jauh pada kontur yang SAMA dgn 1 titik kontur tetangga
+                        # secara zig-zag -> permukaan jadi bergelombang/tidak tegas, TIDAK sesuai bentuk
+                        # DXF aslinya. Perbaikan: padatkan tiap polyline kontur (sisipkan titik interpolasi
+                        # linear x,y,z SEPANJANG garis) supaya jarak antar titik sepanjang kontur tidak jauh
+                        # lebih renggang drpd jarak antar kontur (median_spacing) -- triangulasi jadi
+                        # mengikuti bentuk kontur asli dgn jauh lebih presisi, elevasi TIDAK diubah/dihaluskan
+                        # sama sekali (titik sisipan cuma interpolasi LINEAR di antara 2 titik kontur yg SAMA
+                        # elevasinya, jadi nilai Z-nya tetap 100% sesuai data DXF, bukan tebakan/smoothing).
+                        # Ditaruh DI DALAM blok `_dem_need_compute` (bukan berjalan tiap rerun UI) krn ini
+                        # ikut mahal spt griddata/triangulasi di bawah -- hanya perlu dihitung ulang saat
+                        # DEM-nya sendiri benar-benar dihitung ulang.
+                        _dens_target = max(_median_spacing, 1e-3)
+                        _xd, _yd, _zd = [], [], []
+                        for _contour_d in contours:
+                            _n_cv = len(_contour_d)
+                            for _iv in range(_n_cv):
+                                _cx0, _cy0, _cz0 = _contour_d[_iv]
+                                _xd.append(_cx0); _yd.append(_cy0); _zd.append(_cz0)
+                                if _iv < _n_cv - 1:
+                                    _cx1, _cy1, _cz1 = _contour_d[_iv + 1]
+                                    _dseg = float(np.hypot(_cx1 - _cx0, _cy1 - _cy0))
+                                    if _dseg > _dens_target * 1.5:
+                                        _n_ins = int(_dseg / _dens_target)
+                                        for _ki in range(1, _n_ins):
+                                            _fr = _ki / _n_ins
+                                            _xd.append(_cx0 + _fr * (_cx1 - _cx0))
+                                            _yd.append(_cy0 + _fr * (_cy1 - _cy0))
+                                            _zd.append(_cz0 + _fr * (_cz1 - _cz0))
+                        if len(_xd) > len(x_all):
+                            x_all = np.array(_xd)
+                            y_all = np.array(_yd)
+                            z_all = np.array(_zd)
+
                         # ---- bersihkan titik blunder sebelum interpolasi/triangulasi ----
                         # SEBELUMNYA: dedup cuma di presisi 6 desimal (np.round(...,6)) -- untuk
                         # koordinat UTM itu setara ~0.000001 m, jadi PRAKTIS TIDAK MENYARING APA
