@@ -2660,10 +2660,14 @@ def _cover_strength_defaults():
     return COVER_STRENGTH_DEFAULTS
 
 
-def _render_cover_strength_editor():
+def _render_cover_strength_editor(key_prefix="cover"):
     """Fitur edit properti: nilai dasar (gamma/gamma jenuh/phi'/c') tiap jenis material cover, dipakai
     sbg titik awal baik di tabel kuat geser Cover maupun tombol 'Ambil dari desain Surface/Cover' di tab FK.
-    Tersimpan di session_state (bukan cuma di tabel per-run yg reset kalau lapisan berubah)."""
+    Tersimpan di session_state (bukan cuma di tabel per-run yg reset kalau lapisan berubah).
+    key_prefix: fungsi ini dipanggil dari DUA tab berbeda (Surface/Cover Slope & Stabilitas
+    Channel/Drainage) yang keduanya dirender tiap kali script jalan (semua tab Streamlit dieksekusi,
+    bukan cuma yg sedang aktif) -- jadi tiap pemanggil WAJIB pakai key_prefix unik supaya key widget
+    (data_editor & tombol) di bawah tidak bentrok antar tab (dulu keynya statis -> StreamlitDuplicateElementId)."""
     with st.expander(_t("⚙ Edit properti default material (γ, γ jenuh, φ', c')",
                         "⚙ Edit default material properties (γ, γ sat, φ', c')"), expanded=False):
         _ui_caption(_t(
@@ -2680,23 +2684,91 @@ def _render_cover_strength_editor():
         _cur = _cover_strength_defaults()
         _rows = [{"Jenis material": k, "γ lembab (kN/m³)": v[0], "γ jenuh (kN/m³)": v[1], "φ' (°)": v[2], "c' (kPa)": v[3]}
                  for k, v in _cur.items()]
-        _edf = st.data_editor(pd.DataFrame(_rows), hide_index=True, key="cover_strength_defaults_editor",
+        _edf = st.data_editor(pd.DataFrame(_rows), hide_index=True, key=f"{key_prefix}_strength_defaults_editor",
                               disabled=["Jenis material"],
                               column_config={"γ lembab (kN/m³)": st.column_config.NumberColumn(min_value=1.0, max_value=30.0, step=0.5),
                                              "γ jenuh (kN/m³)": st.column_config.NumberColumn(min_value=1.0, max_value=30.0, step=0.5),
                                              "φ' (°)": st.column_config.NumberColumn(min_value=0.0, max_value=50.0, step=1.0),
                                              "c' (kPa)": st.column_config.NumberColumn(min_value=0.0, max_value=100.0, step=0.5)})
         _bc1, _bc2 = st.columns(2)
-        if _bc1.button(_t("💾 Simpan sebagai default", "💾 Save as default"), key="cover_strength_save", width="stretch"):
+        if _bc1.button(_t("💾 Simpan sebagai default", "💾 Save as default"), key=f"{key_prefix}_strength_save", width="stretch"):
             _new = {}
             for _, _r in _edf.iterrows():
                 _new[str(_r["Jenis material"])] = (float(_r["γ lembab (kN/m³)"]), float(_r["γ jenuh (kN/m³)"]),
                                                     float(_r["φ' (°)"]), float(_r["c' (kPa)"]))
             st.session_state["cover_strength_defaults_custom"] = _new
             st.success(_t("Properti default disimpan untuk proyek/sesi ini.", "Default properties saved for this project/session."))
-        if _bc2.button(_t("↺ Kembalikan ke bawaan pabrik", "↺ Reset to factory defaults"), key="cover_strength_reset", width="stretch"):
+        if _bc2.button(_t("↺ Kembalikan ke bawaan pabrik", "↺ Reset to factory defaults"), key=f"{key_prefix}_strength_reset", width="stretch"):
             st.session_state.pop("cover_strength_defaults_custom", None)
             st.success(_t("Dikembalikan ke nilai bawaan.", "Reset to factory defaults."))
+
+
+# ---------- UTILITAS TERRAIN BERSAMA (dipakai Erosion Mapping & Simulasi Aliran 3D) ----------
+# ---------- UTILITAS TERRAIN BERSAMA (dipakai Erosion Mapping & Simulasi Aliran 3D) ----------
+def _grid_shift_no_wrap(arr, oy, ox, fill_value):
+    """Versi TIDAK wrap-around dari np.roll: out[i,j] = arr[i-oy, j-ox] kalau indeksnya masih
+    di dalam grid, selain itu diisi fill_value. np.roll murni membuat tepi grid seolah
+    "menyambung" ke tepi seberangnya (periodic boundary) -- utk medan lereng yg terbatas ini
+    SALAH: sel di dekat satu tepi bisa "meloncat" menerima aliran dari tepi seberang yg sama
+    sekali tidak bertetangga secara fisik, bikin pola sebarannya kelihatan acak/tidak mengikuti
+    kemiringan asli. Dipakai oleh solver debris-flow & genangan banjir di Simulasi Aliran 3D."""
+    ny_, nx_ = arr.shape
+    out = np.full_like(arr, fill_value)
+    dy0, dy1 = max(0, oy), ny_ + min(0, oy)
+    dx0, dx1 = max(0, ox), nx_ + min(0, ox)
+    sy0, sy1 = max(0, -oy), ny_ - max(0, oy)
+    sx0, sx1 = max(0, -ox), nx_ - max(0, ox)
+    if dy1 > dy0 and dx1 > dx0:
+        out[dy0:dy1, dx0:dx1] = arr[sy0:sy1, sx0:sx1]
+    return out
+
+
+def _dem_fill_depressions(grid_z, inside):
+    """Depression filling (priority-flood, Barnes dkk. 2014 -- teknik yang sama dipakai ArcGIS
+    'Fill'/WhiteboxTools/QGIS 'Fill Sinks', dan yang sama dipakai tab Erosion Mapping utk D8 routing):
+    menghilangkan SINK LOKAL PALSU (cekungan kecil hasil artefak interpolasi grid di area data
+    jarang, BUKAN cekungan asli di lapangan) dengan menaikkan elevasinya sampai setinggi "pour point"
+    (titik keluar terendah dari cekungan tsb) -- supaya aliran (D8 ATAU cellular-automaton) bisa tetap
+    MENGALIR TERUS melewatinya alih-alih berhenti/menggenang persis di dasar cekungan artefak itu.
+    Dipakai jg oleh Simulasi Aliran 3D supaya arah aliran materialnya konsisten dgn Erosion Mapping
+    (sebelumnya Simulasi Aliran 3D langsung memakai elevasi mentah tanpa fill, jadi massa gampang
+    terjebak/berhenti di cekungan artefak kecil dan kelihatan "tidak mengalir").
+
+    PENTING: hasil fungsi ini (`filled`) HANYA dipakai untuk MENENTUKAN ARAH aliran -- elevasi ASLI
+    (grid_z, tidak di-filled) tetap dipakai apa adanya untuk ditampilkan (path_z/hover/mesh 3D).
+
+    Sel di TEPI DOMAIN VALID (sel `inside` yang bertetangga langsung dengan sel `outside`/tepi
+    boundary) dianggap OUTLET ASLI dan TIDAK ikut dinaikkan -- cekungan yang genuinely terbuka ke
+    tepi area kajian tetap diperlakukan sebagai jalan keluar yang sah, bukan cekungan yang perlu diisi.
+    """
+    ny, nx = grid_z.shape
+    finite = np.isfinite(grid_z) & inside
+    core = binary_erosion(inside, structure=np.ones((3, 3), dtype=bool), border_value=0)
+    is_outlet_seed = finite & ~core
+    filled = np.where(finite, np.inf, grid_z)
+    visited = np.zeros((ny, nx), dtype=bool)
+    heap = []
+    seed_r, seed_c = np.where(is_outlet_seed)
+    for r, c in zip(seed_r, seed_c):
+        filled[r, c] = grid_z[r, c]
+        visited[r, c] = True
+        heapq.heappush(heap, (float(grid_z[r, c]), int(r), int(c)))
+    neighbor_offsets = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+    # epsilon filling ("flat area problem"): tiap menjalar ke tetangga, elevasi target dinaikkan
+    # sedikit supaya selalu ada gradien menurun yg jelas menuju outlet (bukan rata/flat).
+    _epsilon = 1e-4
+    while heap:
+        z, r, c = heapq.heappop(heap)
+        for dr, dc in neighbor_offsets:
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < ny and 0 <= nc < nx and finite[nr, nc] and not visited[nr, nc]:
+                visited[nr, nc] = True
+                new_z = max(float(grid_z[nr, nc]), z + _epsilon)
+                filled[nr, nc] = new_z
+                heapq.heappush(heap, (new_z, nr, nc))
+    unreached = finite & ~visited
+    filled[unreached] = grid_z[unreached]
+    return filled
 
 
 def stab_infinite_slope(layers, beta_deg, m=0.0, kh=0.0, gamma_w=9.81, interface=None):
@@ -3140,7 +3212,7 @@ def _render_cover_stability(layers_now, slope_deg):
         "bidang gelincir di dasar tiap lapisan (dan opsional di kontak dasar cover), rembesan sejajar lereng. Kuat geser awal INDIKATIF — isi dari uji laboratorium/geosintetik.",
         "Checks whether the cover slides off as a layer (slope-parallel failure) — a different problem from erosion. FS = [c' + (W·cosβ − u − kh·W·sinβ)·tanφ'] / [W·(sinβ + kh·cosβ)], "
         "failure plane at the base of each layer (and optionally at the cover base interface), slope-parallel seepage. Default strengths are INDICATIVE — enter lab/geosynthetic values."))
-    _render_cover_strength_editor()
+    _render_cover_strength_editor(key_prefix="cover_surf")
     if not layers_now:
         return None
     _sig = hashlib.md5(repr([(l["material"], round(l["thickness_m"], 3)) for l in layers_now]).encode()).hexdigest()[:8]
@@ -3843,7 +3915,7 @@ def _render_fk_tab():
     _mb1, _mb2 = st.columns(2)
     _mb1.button(_t("↧ Ambil dari desain Surface/Cover", "↧ Take from Surface/Cover design"), key="fk_load_cover", on_click=_fk_load_cover_cb, width="stretch")
     _mb2.button(_t("↺ Reset material", "↺ Reset materials"), key="fk_reset_mat", on_click=_fk_reset_mats_cb, args=("acads" if _src == "acads" else "generic",), width="stretch")
-    _render_cover_strength_editor()
+    _render_cover_strength_editor(key_prefix="cover_fk")
     _mat_df = st.data_editor(st.session_state["fk_mat_base"], num_rows="dynamic", hide_index=True, key=f"fk_mat_ed_{st.session_state.get('fk_mat_ver', 0)}",
                              column_config={"Tebal vertikal (m)": st.column_config.NumberColumn(min_value=0.0, help=_t("Baris TERAKHIR diabaikan (tebal tak hingga).", "The LAST row is ignored (infinite thickness).")),
                                             "γ (kN/m³)": st.column_config.NumberColumn(min_value=1.0, max_value=30.0), "γ jenuh (kN/m³)": st.column_config.NumberColumn(min_value=1.0, max_value=30.0),
@@ -3950,6 +4022,75 @@ def _render_fk_tab():
                                     "N (kN/m)": _det["N"], "S (kN/m)": _det["S"], "E (kN/m)": _det["E"][1:]}).round(3)
                 st.dataframe(_sd, hide_index=True)
                 st.download_button(_t("CSV detail irisan (M-P)", "Slice detail CSV (M-P)"), data=_sd.to_csv(index=False).encode("utf-8"), file_name="FK_detail_irisan.csv", mime="text/csv", key="fk_csv_slices")
+
+    # =====================================================================
+    # ITERASI MANUAL -- coba-coba pusat & jari-jari lingkaran sendiri, tiap
+    # percobaan dicatat di tabel riwayat (beda dgn pencarian otomatis di atas
+    # yg pakai grid + Nelder-Mead; ini murni trial-and-error yg dikendalikan user).
+    # =====================================================================
+    st.markdown("---")
+    st.markdown("**" + _t("Iterasi Manual (coba-coba pusat & jari-jari lingkaran)", "Manual Iteration (trial center & radius)") + "**")
+    _ui_caption(_t(
+        "Di luar pencarian otomatis di atas, coba-coba sendiri kombinasi pusat (x, y) dan jari-jari lingkaran R — "
+        "tiap kali klik hitung, FK-nya dicatat sbg satu baris di tabel riwayat iterasi di bawah. Berguna utk menelusuri "
+        "manual apakah bidang kritis hasil pencarian otomatis sudah benar-benar minimum (geser sedikit pusat/R lalu "
+        "bandingkan FK-nya), atau utk mengecek bidang gelincir tertentu (mis. yg cocok dgn retak/deformasi yg diamati "
+        "di lapangan) yang mungkin terlewat oleh pencarian otomatis.",
+        "Besides the automatic search above, try your own combinations of circle center (x, y) and radius R — every "
+        "time you click compute, the FS is logged as one row in the iteration history table below. Useful to manually "
+        "check whether the automatic search's critical surface is really the minimum (nudge the center/R and compare "
+        "the FS), or to check a specific surface (e.g. matching an observed field crack/deformation) that the "
+        "automatic search might have missed."))
+    _itsig = id(_R)
+    if st.session_state.get("fk_manual_sig") != _itsig:
+        st.session_state["fk_manual_sig"] = _itsig
+        st.session_state["fk_manual_trials"] = []
+    _it_def_cx = float(_fk_disp_x(_rb["cx"], _fl, _C))
+    _it_def_cy, _it_def_R = float(_rb["cy"]), float(_rb["R"])
+    _itc1, _itc2, _itc3, _itc4 = st.columns(4)
+    _itcx = _itc1.number_input(_t("Pusat x (m)", "Center x (m)"), value=_it_def_cx, step=0.5, key="fk_man_cx",
+                               help=_t("Titik awal = pusat lingkaran kritis Bishop hasil pencarian otomatis di atas.", "Starting point = the automatic search's Bishop-critical circle center."))
+    _itcy = _itc2.number_input(_t("Pusat y (m)", "Center y (m)"), value=_it_def_cy, step=0.5, key="fk_man_cy")
+    _itR = _itc3.number_input(_t("Jari-jari R (m)", "Radius R (m)"), min_value=0.1, value=_it_def_R, step=0.5, key="fk_man_R")
+    _itmethod = _itc4.selectbox(_t("Metode", "Method"), list(_FK_METHOD_LABEL), key="fk_man_method", format_func=lambda k: _FK_METHOD_LABEL[k])
+    _itb1, _itb2 = st.columns(2)
+    if _itb1.button(_t("+ Hitung & tambah ke tabel iterasi", "+ Compute & add to iteration table"), key="fk_man_add", width="stretch"):
+        _it_cx_int = float(_fk_disp_x(_itcx, _fl, _C))
+        _it_F, _it_sl = fk_eval(_prof, fk_materials(_lay), _wat, _it_cx_int, float(_itcy), float(_itR), _itmethod,
+                               n=int(_nsl), kh=_R["kh"], mp_ftype=_R["ft"])
+        if _it_sl is None or not np.isfinite(_it_F):
+            st.warning(_t("Lingkaran ini tidak menghasilkan bidang gelincir yang sah (tidak memotong profil dgn benar, atau keluar dari rentang tanah). Coba pusat/jari-jari lain.",
+                          "This circle does not produce a valid slip surface (does not cross the profile properly, or falls outside the ground range). Try another center/radius."))
+        else:
+            st.session_state["fk_manual_trials"].append({
+                "n": len(st.session_state["fk_manual_trials"]) + 1, "cx": float(_itcx), "cy": float(_itcy), "R": float(_itR),
+                "method": _FK_METHOD_LABEL[_itmethod], "fs": float(_it_F)})
+    if _itb2.button(_t("Kosongkan tabel iterasi", "Clear iteration table"), key="fk_man_clear", width="stretch"):
+        st.session_state["fk_manual_trials"] = []
+    _ittrials = st.session_state.get("fk_manual_trials", [])
+    if _ittrials:
+        _ittdf = pd.DataFrame(_ittrials)
+        _itmin_idx = int(_ittdf["fs"].idxmin())
+        _ittdisp = _ittdf.rename(columns={"n": _t("Iterasi ke", "Trial #"), "cx": _t("Pusat x", "Center x"), "cy": _t("Pusat y", "Center y"),
+                                          "R": "R", "method": _t("Metode", "Method"), "fs": "FK"}).copy()
+        _ittdisp["FK"] = _ittdisp["FK"].round(3)
+        _ittdisp[_t("Penilaian", "Assessment")] = [stab_verdict(f, _fsr_use) for f in _ittdf["fs"]]
+        st.dataframe(
+            _ittdisp.style.apply(lambda row: ["background-color: rgba(79,183,131,0.30)" if row.name == _itmin_idx else "" for _ in row], axis=1),
+            hide_index=True, width="stretch")
+        st.caption(_t(
+            f"FK minimum dari {len(_ittrials)} percobaan (baris disorot): **{_ittdf['fs'].min():.3f}** — iterasi ke-{int(_ittdf.loc[_itmin_idx, 'n'])} "
+            f"({_ittdf.loc[_itmin_idx, 'method']}). Bandingkan dgn hasil pencarian otomatis di atas; kalau nilai manual masih terus turun, "
+            "geser pusat/jari-jari ke arah itu lagi dan hitung ulang.",
+            f"Minimum FS from {len(_ittrials)} trials (highlighted row): **{_ittdf['fs'].min():.3f}** — trial #{int(_ittdf.loc[_itmin_idx, 'n'])} "
+            f"({_ittdf.loc[_itmin_idx, 'method']}). Compare with the automatic search result above; if the manual value keeps dropping, "
+            "keep nudging the center/radius that way and recompute."))
+        st.download_button(_t("CSV tabel iterasi manual", "Manual iteration table CSV"), data=_ittdf.to_csv(index=False).encode("utf-8"),
+                           file_name="FK_iterasi_manual.csv", mime="text/csv", key="fk_man_csv")
+    else:
+        st.caption(_t("Belum ada percobaan. Isi pusat/jari-jari di atas lalu klik 'Hitung & tambah ke tabel iterasi'.",
+                      "No trials yet. Enter a center/radius above then click 'Compute & add to iteration table'."))
+
     st.caption(_t(
         "Catatan validasi (uji internal): pada ACADS EX1(a) Bishop 0,985, Janbu tanpa koreksi 0,935, Morgenstern-Price 0,984 (literatur ≈ 1,0); Bishop identik dengan pyslope (0,985 vs 0,985) dan "
         "dengan air 0,628 vs 0,629 (opsi cos²α); kasus Taylor φ=0 β=45° FK 1,534 (Ns=0,181 → 1,535); irisan planar cocok dengan solusi infinite slope (kering, rembesan, pseudo-statik). "
@@ -6160,24 +6301,47 @@ if _po_msg:
     except Exception:
         pass
 
+# Urutan tab disusun mengikuti alur kerja analisis yang wajar: (1) pemetaan erosi sbg data dasar,
+# (2) buat cross section dari hasil itu, (3) desain cover di atas slope tsb, (4) rekonstruksi/desain
+# geometri channel, (5) verifikasi kestabilan lereng channel (FK), baru kemudian (6) diagnosis balik
+# (back analysis) & (7) prediksi cepat (ML) yg kasus kritisnya diverifikasi lagi ke FK, (8) simulasi
+# aliran sbg visualisasi risiko, dan (9) monitoring deviasi (admin) sbg pemantauan berkelanjutan.
+#
+# Streamlit hanya punya tab datar SATU baris (tak ada tab bertingkat/berkelompok native), jadi supaya
+# tetap kelihatan rapi & terstruktur: tiap label diberi NOMOR URUT sesuai tahapnya, dan di atas baris
+# tab dipasang legenda kelompok tahap (Data Dasar & Desain -> Verifikasi Stabilitas -> Diagnosis &
+# Prediksi -> Monitoring) supaya alurnya langsung kebaca tanpa perlu ubah struktur render.
 _tab_labels = [
-    _t("Erosion Mapping", "Erosion Mapping"),
-    _t("Back Analysis", "Back Analysis"),
-    _t("Machine Learning", "Machine Learning"),
+    "1. " + _t("Erosion Mapping", "Erosion Mapping"),
+    "2. " + _t("Cross Section", "Cross Section"),
+    "3. " + _t("Surface/Cover Slope", "Surface/Cover Slope"),
+    "4. " + _t("Rekonstruksi Desain", "Design Reconstruction"),
+    "5. " + _t("Stabilitas Channel/Drainage", "Channel/Drainage Stability"),
+    "6. " + _t("Back Analysis", "Back Analysis"),
+    "7. " + _t("Machine Learning", "Machine Learning"),
+    "8. " + _t("Simulasi Aliran 3D", "3D Flow Simulation"),
 ]
 if _is_admin:
-    _tab_labels.append(_t("Monitoring Deviation", "Monitoring Deviation"))
-_tab_labels.append(_t("Simulasi Aliran 3D", "3D Flow Simulation"))
-_tab_labels.append(_t("Rekonstruksi Desain", "Design Reconstruction"))
-_tab_labels.append(_t("Surface/Cover Slope", "Surface/Cover Slope"))
-_tab_labels.append(_t("Cross Section", "Cross Section"))
-_tab_labels.append(_t("Stabilitas Channel/Drainage", "Channel/Drainage Stability"))
+    _tab_labels.append("9. " + _t("Monitoring Deviation", "Monitoring Deviation"))
+
+_STAGE_GROUPS = [
+    ("rgba(79,183,131,0.45)", _t("1) Data Dasar &amp; Desain", "1) Base Data &amp; Design")),
+    ("rgba(64,157,155,0.45)", _t("2) Verifikasi Stabilitas", "2) Stability Verification")),
+    ("rgba(254,235,151,0.55)", _t("3) Diagnosis &amp; Prediksi", "3) Diagnosis &amp; Prediction")),
+]
+if _is_admin:
+    _STAGE_GROUPS.append(("rgba(3,69,97,0.55)", _t("4) Monitoring", "4) Monitoring")))
+_stage_html = '<span style="opacity:0.5; margin:0 2px;">→</span>'.join(
+    f'<span style="padding:2px 10px; border-radius:12px; background:{c}; border:1px solid {c}; '
+    f'font-size:12.5px; white-space:nowrap;">{lbl}</span>' for c, lbl in _STAGE_GROUPS)
+st.markdown(f'<div style="display:flex; flex-wrap:wrap; gap:4px; align-items:center; margin:2px 0 6px 0;">{_stage_html}</div>',
+           unsafe_allow_html=True)
 
 if _is_admin:
-    tab1, tab4, tab2, tab3, tab5, tab6, tab7, tab8, tab9 = st.tabs(_tab_labels)
+    tab1, tab8, tab7, tab6, tab9, tab4, tab2, tab5, tab3 = st.tabs(_tab_labels)
 else:
     # User surveyor tidak menampilkan tab "Monitoring Deviation" sama sekali.
-    tab1, tab4, tab2, tab5, tab6, tab7, tab8, tab9 = st.tabs(_tab_labels)
+    tab1, tab8, tab7, tab6, tab9, tab4, tab2, tab5 = st.tabs(_tab_labels)
     tab3 = None
 
 # (tab_hub & tab_workflow dipindah ke landing page -- lihat blok "if st.session_state.home_page:")
@@ -17612,24 +17776,15 @@ def _simulate_flood_diffusive(grid_x, grid_y, grid_z, inside, src_xy, src_radius
             S = z + h
             Q_dir, total_out = [], np.zeros_like(h)
             for (oy, ox, dist, width) in offsets:
-                S_n = np.roll(np.roll(S, oy, axis=0), ox, axis=1)
-                z_n = np.roll(np.roll(z, oy, axis=0), ox, axis=1)
-                nb_inside = np.roll(np.roll(inside, oy, axis=0), ox, axis=1).copy()
-                # PERBAIKAN BUG: np.roll() itu wraparound -- elemen yang "jatuh" di satu
-                # ujung array muncul lagi di ujung SEBERANG (baris/kolom pertama <-> terakhir).
-                # Tanpa baris di bawah ini, sel-sel di tepi grid keliru mengira sel di ujung
-                # seberang domain sebagai tetangganya sendiri -- mencemari neraca massa air
-                # dan menyebabkan simulasi jadi tidak stabil / air seperti "macet" tidak
-                # mengalir wajar. Sel di baris/kolom TERLUAR harus dianggap TIDAK PUNYA
-                # tetangga ke arah pergeseran yang bersangkutan.
-                if oy == -1:
-                    nb_inside[-1, :] = False
-                if oy == 1:
-                    nb_inside[0, :] = False
-                if ox == -1:
-                    nb_inside[:, -1] = False
-                if ox == 1:
-                    nb_inside[:, 0] = False
+                # PERBAIKAN: dipakai fungsi shift bersama (_grid_shift_no_wrap) supaya tidak
+                # wrap-around (np.roll murni membuat tepi grid seolah "menyambung" ke tepi
+                # seberangnya, yg salah utk domain terbatas -- itu yg bikin neraca massa air
+                # tercemar & aliran kelihatan "macet"/tidak wajar). Sel tetangga yg jatuh DI
+                # LUAR grid diberi S/z sangat rendah (bukan wrap) & inside=False, jadi otomatis
+                # tersaring oleh mask nb_inside di bawah (Q=0 ke arah situ).
+                S_n = _grid_shift_no_wrap(S, oy, ox, -1e9)
+                z_n = _grid_shift_no_wrap(z, oy, ox, -1e9)
+                nb_inside = _grid_shift_no_wrap(inside.astype(np.float64), oy, ox, 0.0) > 0.5
                 dS = S - S_n
                 hflow = np.clip(np.maximum(S, S_n) - np.maximum(z, z_n), 0, None)
                 slope = np.clip(dS / dist, 1e-8, None)
@@ -17647,8 +17802,15 @@ def _simulate_flood_diffusive(grid_x, grid_y, grid_z, inside, src_xy, src_radius
             for (oy, ox, dist, width), Q in zip(offsets, Q_dir):
                 Qs = Q * scale
                 vol -= Qs
-                vol += np.roll(np.roll(Qs, oy, axis=0), ox, axis=1)
-                overflow_track += np.roll(np.roll(Qs, oy, axis=0), ox, axis=1)
+                # PERBAIKAN BUG ARAH: Qs[i,j] = volume yg dikirim dari sel (i,j) ke tetangga
+                # (i-oy, j-ox) -- jadi sel yg benar2 MENERIMA itu (i+oy, j+ox), diambil dgn
+                # shift (-oy,-ox), BUKAN (oy,ox) spt kode lama. Kode lama memakai shift yg
+                # SAMA dgn arah pengiriman, jadi volume air dikreditkan ke sel yg SALAH
+                # (bukan tetangga penerima sebenarnya) -- akibatnya air tidak benar2 mengalir
+                # turun mengikuti kemiringan spt yg terlihat konsisten di tab Erosion Mapping.
+                _received_q = _grid_shift_no_wrap(Qs, -oy, -ox, 0.0)
+                vol += _received_q
+                overflow_track += _received_q
 
             vol = np.clip(vol, 0, None)
             h = vol / cell_area
@@ -17921,6 +18083,13 @@ with tab5:
                             _src_mask_sim[_iix, _iiy] = True
 
                         _z_fill = np.where(np.isnan(_grid_z), np.nanmin(_grid_z), _grid_z)
+                        # PERBAIKAN: elevasi mentah (_z_fill) sering punya cekungan kecil PALSU (artefak
+                        # interpolasi griddata di area data jarang) yg dulu bikin massa "berhenti"/menggenang
+                        # di situ alih-alih terus mengalir turun -- sekarang arah aliran dihitung dari versi
+                        # yg SUDAH di-fill (teknik priority-flood yg SAMA dipakai tab Erosion Mapping utk D8),
+                        # supaya alirannya konsisten & benar-benar menuruni lereng seperti di Erosion Mapping.
+                        # Elevasi ASLI (_z_fill) tetap dipakai apa adanya utk tampilan mesh 3D.
+                        _z_route = _dem_fill_depressions(_z_fill, _inside_sim)
 
                         _sub_steps_sim = 4
                         _h = np.zeros_like(_z_fill, dtype=float)
@@ -17935,11 +18104,14 @@ with tab5:
                         _h_frames = [_h.copy()]
                         for _f in range(_n_frames_sim):
                             for _s in range(_sub_steps_sim):
-                                _surf = _z_fill + _h
+                                _surf = _z_route + _h
                                 _weights = []
                                 _tot_w = np.zeros_like(_h)
                                 for (_oy, _ox) in _offsets_sim:
-                                    _nsurf = np.roll(np.roll(_surf, _oy, axis=0), _ox, axis=1)
+                                    # tetangga di luar grid diberi elevasi +inf (tembok, bukan wrap-around)
+                                    # supaya materi tidak "meloncat" dari tepi seberang, dan juga tidak
+                                    # dipaksa keluar dari grid krn dianggap curam ke arah yg tak ada datanya.
+                                    _nsurf = _grid_shift_no_wrap(_surf, _oy, _ox, np.inf)
                                     _dist = float(np.hypot(_oy * _dy_sim, _ox * _dx_sim))
                                     _slope_local = (_surf - _nsurf) / _dist
                                     _w = np.clip(_slope_local, 0, None)
@@ -17951,7 +18123,15 @@ with tab5:
                                 _h_new = _h * (1 - _outflow_frac)
                                 for (_oy, _ox), _w in zip(_offsets_sim, _weights):
                                     _flow = _h * _outflow_frac * (_w / _safe_tot)
-                                    _received = np.roll(np.roll(_flow, _oy, axis=0), _ox, axis=1)
+                                    # PERBAIKAN BUG ARAH: _flow[i,j] = jumlah yg dikirim dari sel (i,j) ke
+                                    # tetangga (i-_oy, j-_ox) -- jadi sel penerima yg benar itu (i+_oy,
+                                    # j+_ox), diambil dgn shift (-_oy,-_ox), BUKAN (_oy,_ox) spt kode lama.
+                                    # Kode lama memakai shift yg sama dgn arah pengiriman -> materi
+                                    # dikreditkan ke sel yg SALAH (bukan tetangga sebenarnya), sehingga
+                                    # sebarannya tidak benar2 mengikuti kemiringan turun spt yg terlihat
+                                    # di tab Erosion Mapping. Sel penerima yg tak punya pengirim sah (di
+                                    # tepi grid) diisi 0, bukan wrap-around dari tepi seberang.
+                                    _received = _grid_shift_no_wrap(_flow, -_oy, -_ox, 0.0)
                                     _h_new = _h_new + _received
                                 _h_new[~_inside_sim] = 0.0
                                 _h = _h_new
