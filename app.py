@@ -124,6 +124,12 @@ def _load_user_db():
             "salt": default_salt,
             "password_hash": _hash_password("surveyor123", default_salt),
         },
+        "Latihan": {
+            "name": "Akun Latihan",
+            "role": "trainee",
+            "salt": default_salt,
+            "password_hash": _hash_password("Latihan123", default_salt),
+        },
     }
 
 USER_DB = _load_user_db()
@@ -134,6 +140,19 @@ def _is_admin_user():
     teknis dari user surveyor supaya tampilan yang dipublikasikan tetap
     ringkas & profesional untuk pengguna lapangan."""
     return st.session_state.get("auth_role") == "admin"
+
+
+def _is_trainee_user():
+    """True hanya untuk akun latihan ('Latihan'/role='trainee'). Dipakai untuk menampilkan panduan/
+    petunjuk format DXF dan halaman Batasan & Asumsi -- panduan ekstra ini SENGAJA tidak ditampilkan
+    ke surveyor/admin biasa supaya tampilan mereka tetap ringkas."""
+    return st.session_state.get("auth_role") == "trainee"
+
+
+def _trainee_tip(text_id, text_en, icon="🧭"):
+    """Kotak panduan langkah -- HANYA tampil untuk akun latihan ('Latihan')."""
+    if _is_trainee_user():
+        st.info(f"{icon} " + _t(text_id, text_en))
 
 
 def _ui_info(*args, **kwargs):
@@ -1398,6 +1417,163 @@ def _xs_sample_profile(vertices, grid_x, grid_y, grid_z, fields, inside=None, ti
     return _out
 
 
+import base64 as _b64_mod
+import io as _io_mod
+
+
+def _field_composite_png(grid_x, grid_y, zone_map, sediment_map, boundary, satellite_basemap, inside):
+    """PNG (base64) untuk 1 segmen di Erosion Field Viewer: citra satelit (Esri World Imagery, kalau
+    tersedia di segmen ini) di paling belakang, lapisan warna risiko TARP semi-transparan di atasnya,
+    garis kontur batas potensi sedimentasi (dari sediment_map, sama seperti di laporan utama), titik
+    pusat area erosi kritis (zone_map >= 2, warna Merah) dan titik pusat area potensi sedimentasi
+    tinggi (sediment_map >= 0.85), serta garis boundary DXF.
+
+    Semua digambar dalam extent grid_x/grid_y (meter UTM) supaya PNG-nya pas dipasang di bounds_utm
+    yang sama dengan yang dikirim ke Erosion Field Viewer -- jadi tidak perlu logika layer terpisah
+    di sisi HTML, cukup satu gambar yang sudah "jadi"."""
+    import matplotlib.pyplot as _plt
+    from matplotlib.colors import ListedColormap, BoundaryNorm
+    from scipy import ndimage as _ndi
+
+    _gx, _gy = np.asarray(grid_x, float), np.asarray(grid_y, float)
+    xmin, xmax = float(np.nanmin(_gx)), float(np.nanmax(_gx))
+    ymin, ymax = float(np.nanmin(_gy)), float(np.nanmax(_gy))
+    extent = (xmin, xmax, ymin, ymax)
+    aspect_hw = (ymax - ymin) / max(xmax - xmin, 1e-6)
+    fig = _plt.figure(figsize=(7, max(7 * aspect_hw, 3)), dpi=120)
+    ax = fig.add_axes([0, 0, 1, 1]); ax.axis("off")
+    ax.set_xlim(xmin, xmax); ax.set_ylim(ymin, ymax)
+
+    if satellite_basemap is not None and satellite_basemap.get("rgb") is not None:
+        ax.imshow(satellite_basemap["rgb"], extent=satellite_basemap.get("extent", extent),
+                  origin="upper", aspect="auto", zorder=1)
+        _overlay_alpha = 0.55
+    else:
+        ax.set_facecolor("#0a1f24")
+        _overlay_alpha = 0.9
+
+    if zone_map is not None:
+        _zm = np.asarray(zone_map, dtype=float)
+        cmap = ListedColormap(["#3DBF8C", "#D3D95C", "#e08a2b", "#d8483f"])
+        norm = BoundaryNorm([0, 0.5, 1.0, 2.0, max(float(np.nanmax(_zm)) + 0.01, 2.5)], cmap.N)
+        ax.imshow(np.rot90(_zm), extent=extent, origin="upper", cmap=cmap, norm=norm,
+                  alpha=_overlay_alpha, aspect="auto", zorder=2)
+
+        # titik pusat area erosi kritis (Merah, zone_map >= 2) -- dikelompokkan per area
+        # bersambung (connected component) supaya jadi beberapa titik wakil, bukan ribuan piksel.
+        _crit_mask = (_zm >= 2.0)
+        if inside is not None:
+            _crit_mask &= np.asarray(inside, dtype=bool)
+        _lab, _n = _ndi.label(_crit_mask)
+        if _n:
+            _centers = _ndi.center_of_mass(_crit_mask, _lab, range(1, _n + 1))
+            for (_cy, _cx) in _centers:
+                _px = np.interp(_cx, [0, _zm.shape[0] - 1], [xmin, xmax])
+                _py = np.interp(_cy, [0, _zm.shape[1] - 1], [ymax, ymin])
+                ax.plot(_px, _py, marker="X", color="#ffffff", markeredgecolor="#8a0000",
+                        markersize=11, markeredgewidth=1.6, zorder=4)
+
+    if sediment_map is not None:
+        _sm = np.asarray(sediment_map, dtype=float)
+        try:
+            ax.contour(np.rot90(_sm), levels=[0.7], extent=extent, colors=["#2b7fff"],
+                       linewidths=1.6, linestyles="--", zorder=3)
+            _high = np.rot90(_sm) >= 0.85
+            _lab2, _n2 = _ndi.label(np.nan_to_num(_high, nan=0.0).astype(bool))
+            if _n2:
+                _centers2 = _ndi.center_of_mass(_high, _lab2, range(1, _n2 + 1))
+                _h, _w = _high.shape
+                for (_cy, _cx) in _centers2:
+                    _px = np.interp(_cx, [0, _w - 1], [xmin, xmax])
+                    _py = np.interp(_cy, [0, _h - 1], [ymax, ymin])
+                    ax.plot(_px, _py, marker="o", color="#2b7fff", markeredgecolor="#ffffff",
+                            markersize=9, markeredgewidth=1.3, zorder=4)
+        except Exception:
+            pass
+
+    if boundary is not None:
+        try:
+            _geoms = list(boundary.geoms) if hasattr(boundary, "geoms") else [boundary]
+            for _g in _geoms:
+                _bx, _by = _g.exterior.xy
+                ax.plot(_bx, _by, color="#ffffff", linewidth=1.4, zorder=5)
+                for _hole in _g.interiors:
+                    _hx, _hy = _hole.xy
+                    ax.plot(_hx, _hy, color="#ffffff", linewidth=1.0, linestyle=":", zorder=5)
+        except Exception:
+            pass
+
+    buf = _io_mod.BytesIO()
+    fig.savefig(buf, format="png", transparent=(satellite_basemap is None))
+    _plt.close(fig)
+    return "data:image/png;base64," + _b64_mod.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _field_package_build(seg_results, active_sid, xs_draw_lines):
+    """Susun paket data (.json) untuk Erosion Field Viewer: 1 entri per segmen berisi peta risiko
+    ter-georeferensi (UTM) + cross section yang sudah disimpan (garis 'xs_draw_lines') di segmen
+    yang sedang aktif di tab ini. Segmen lain ikut disertakan (peta risikonya saja) supaya file
+    tetap satu paket untuk semua segmen proyek."""
+    segments = []
+    for sid, s in seg_results.items():
+        gx, gy, gz = s.get("grid_x"), s.get("grid_y"), s.get("grid_z")
+        if gx is None or gy is None or gz is None:
+            continue
+        zone_map = s.get("zone_map")
+        sediment_map = s.get("sediment_map")
+        boundary = s.get("boundary")
+        satellite_basemap = s.get("satellite_basemap")
+        inside = s.get("inside")
+        png = _field_composite_png(gx, gy, zone_map, sediment_map, boundary, satellite_basemap, inside)
+        bounds = {
+            "xmin": float(np.nanmin(gx)), "xmax": float(np.nanmax(gx)),
+            "ymin": float(np.nanmin(gy)), "ymax": float(np.nanmax(gy)),
+        }
+        cross_sections = []
+        if sid == active_sid and xs_draw_lines:
+            _tin = None
+            if all(s.get(_k) is not None for _k in ("tin_x", "tin_y", "tin_z")):
+                _tin = (s["tin_x"], s["tin_y"], s["tin_z"])
+            for _name, _verts in xs_draw_lines.items():
+                try:
+                    _prof = _xs_sample_profile(list(_verts), gx, gy, gz, {}, tin_xyz=_tin)
+                    _pts = [{"d": float(d), "z": float(z)} for d, z in
+                             zip(_prof["distance"], _prof["elevation"]) if np.isfinite(z)]
+                    if len(_pts) >= 2:
+                        cross_sections.append({"name": _name, "points": _pts})
+                except Exception:
+                    continue
+        segments.append({
+            "id": sid, "label": s.get("label", sid), "image": png, "bounds_utm": bounds,
+            "legend": ([
+                {"label": "Hijau (Normal)", "color": "#3DBF8C"},
+                {"label": "Kuning (Waspada)", "color": "#D3D95C"},
+                {"label": "Oranye (Siaga)", "color": "#e08a2b"},
+                {"label": "Merah (Kritis)", "color": "#d8483f"},
+            ] if zone_map is not None else []) + ([
+                {"label": "✕ Titik erosi kritis", "color": "#8a0000"},
+            ] if zone_map is not None else []) + ([
+                {"label": "● Titik potensi sedimentasi tinggi", "color": "#2b7fff"},
+                {"label": "-- Batas potensi sedimentasi (>0.7)", "color": "#2b7fff"},
+            ] if sediment_map is not None else []),
+            "has_satellite": satellite_basemap is not None,
+            "cross_sections": cross_sections,
+        })
+    _epsg = _COORD_UTM_EPSG if "_COORD_UTM_EPSG" in globals() else "EPSG:32750"
+    _code = int(_epsg.split(":")[1])
+    if _code >= 32700:
+        _zone, _south = _code - 32700, True
+    elif _code >= 32600:
+        _zone, _south = _code - 32600, False
+    else:
+        _zone, _south = 50, True
+    return {
+        "epsg": _epsg, "utm_zone": _zone, "utm_south": _south,
+        "generated_at": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
+        "segments": segments,
+    }
+
+
 def _xs_curtain(r, key="erosion", decay=True, thick=None, nx_max=240, ny=260, n_layers=10):
     """Bangun grid 2-D 'tirai' di bawah permukaan. Mengembalikan dict array siap plot."""
     _d = np.asarray(r["distance"], dtype=float)
@@ -2465,6 +2641,64 @@ def _render_classification_registry():
 @st.dialog(_t("Dasar Klasifikasi & Referensi", "Classification Basis & References"), width="large")
 def _classification_registry_dialog():
     _render_classification_registry()
+
+
+_MODULE_LIMITATIONS = [
+    (_t("Modul 01 — Erosion Mapping", "Module 01 — Erosion Mapping"), _t(
+        "Indeks risiko erosi bersifat RELATIF (bukan laju erosi absolut); ambang Hijau/Kuning/Oranye/Merah adalah ambang internal aplikasi, bukan regulasi. "
+        "RUSLE/MUSLE/TSS/kolam pengendap perlu kalibrasi K/C/P lokal sebelum dipakai untuk keputusan.",
+        "The erosion risk index is RELATIVE (not an absolute erosion rate); Green/Yellow/Orange/Red thresholds are internal app thresholds, not a regulation. "
+        "RUSLE/MUSLE/TSS/settling pond need local K/C/P calibration before use in decisions.")),
+    (_t("Modul 02 — Back Analysis", "Module 02 — Back Analysis"), _t(
+        "Mode A hanya ranking indikatif faktor yang menyimpang, bukan pembuktian sebab-akibat. Mode B mengasumsikan parameter lain tetap; hasil hitung mundur sensitif "
+        "terhadap kualitas data ukur lapangan.",
+        "Mode A is only an indicative ranking of deviating factors, not causal proof. Mode B assumes other parameters stay fixed; back-calculated results are sensitive "
+        "to the quality of field measurement data.")),
+    (_t("Modul 03 — Machine Learning", "Module 03 — Machine Learning"), _t(
+        "Prediksi HANYA berlaku pada rentang data training (ekstrapolasi di luar rentang tidak diandalkan). Perlu >= 30 data disarankan; performa dilaporkan sebagai "
+        "R²/MAE/RMSE (regresi) atau akurasi (klasifikasi), bukan jaminan akurasi lapangan.",
+        "Predictions are ONLY valid within the training data range (extrapolation is unreliable). >= 30 data points recommended; performance is reported as "
+        "R²/MAE/RMSE (regression) or accuracy (classification), not a guarantee of field accuracy.")),
+    (_t("Modul 04 — Simulasi Aliran 3D", "Module 04 — 3D Flow Simulation"), _t(
+        "Simulasi ILUSTRATIF, belum terkalibrasi dengan kejadian aktual/model hidraulik 2D-3D penuh (mis. HEC-RAS). Jangan dipakai sendirian untuk desain "
+        "mitigasi kritis.",
+        "The simulation is ILLUSTRATIVE, not calibrated against actual events or a full 2D-3D hydraulic model (e.g. HEC-RAS). Do not use alone for critical "
+        "mitigation design.")),
+    (_t("Modul 05 — Rekonstruksi Desain", "Module 05 — Design Reconstruction"), _t(
+        "Volume cut-fill & kapasitas Manning adalah estimasi preliminari dari geometri desain sederhana (garis lurus antar elevasi rencana), bukan pengganti "
+        "gambar kerja/CAD detail.",
+        "Cut-fill volume & Manning capacity are preliminary estimates from a simplified design geometry (straight line between design elevations), not a "
+        "substitute for detailed CAD working drawings.")),
+    (_t("Modul 06 — Surface/Cover Slope", "Module 06 — Surface/Cover Slope"), _t(
+        "FK kestabilan lapisan tipis pakai infinite slope method: tidak menangkap efek ujung/kaki lereng, gempa non-pseudostatik, atau retak tarik. Properti "
+        "kuat geser bawaan bersifat INDIKATIF, bukan hasil uji laboratorium.",
+        "The thin-layer stability FS uses the infinite-slope method: it does not capture toe/crest effects, non-pseudo-static seismic loading, or tension "
+        "cracks. Default shear-strength properties are INDICATIVE, not lab test results.")),
+    (_t("Modul 07 — Cross Section", "Module 07 — Cross Section"), _t(
+        "Sejak pembaruan terakhir, profil penampang mengikuti TIN titik DXF apa adanya (sudut/patahan tetap tegas). Di luar area TIN atau kalau smoothing "
+        "diaktifkan di Erosion Mapping, profil kembali memakai raster grid yang lebih halus.",
+        "Since the latest update, the section profile follows the DXF point TIN as-is (corners/breaklines stay sharp). Outside the TIN area, or if smoothing "
+        "is enabled in Erosion Mapping, the profile falls back to the smoother raster grid.")),
+    (_t("Modul 08 — Stabilitas Channel/Drainage", "Module 08 — Channel/Drainage Stability"), _t(
+        "FK 2-D (Bishop/Janbu/Morgenstern-Price, bidang gelincir lingkaran) adalah kerangka internal aplikasi; ambang penerimaan FK minimum mengacu Kepmen "
+        "ESDM 1827 K/30/MEM/2018 & SNI 8460:2017, HARUS dibaca dari dokumen resmi. Bukan pengganti software LEM khusus (mis. Slide2) untuk laporan formal.",
+        "The 2-D FS (Bishop/Janbu/Morgenstern-Price, circular slip surfaces) is the app's internal framework; minimum-FS acceptance criteria reference Kepmen "
+        "ESDM 1827 K/30/MEM/2018 & SNI 8460:2017 and MUST be read from the official documents. Not a substitute for dedicated LEM software (e.g. Slide2) "
+        "for formal reports.")),
+]
+
+
+@st.dialog(_t("Batasan & Asumsi Aplikasi (Latihan)", "App Limitations & Assumptions (Training)"), width="large")
+def _trainee_limitations_dialog():
+    st.info(_t(
+        "Halaman ini merangkum batasan & asumsi utama tiap modul dalam satu tempat -- khusus tampil di akun Latihan supaya lebih mudah dipahami sebelum "
+        "memakai aplikasi ini dengan data proyek sungguhan. Detail rujukan & ambang klasifikasi lengkap ada di tombol 'Dasar Klasifikasi & Referensi'.",
+        "This page summarises each module's main limitations & assumptions in one place -- shown only on the Training account to make onboarding easier "
+        "before using this app on real project data. Full references & classification thresholds are in the 'Classification Basis & References' button.",
+    ))
+    for _title, _txt in _MODULE_LIMITATIONS:
+        with st.expander(_title, expanded=True):
+            st.markdown(_txt)
 
 
 _PDF_GLYPH_MAP = {"τ": "tau", "θ": "theta", "ρ": "rho", "κ": "kappa", "Σ": "Sum", "≥": ">=", "≤": "<=", "≈": "~",
@@ -4045,6 +4279,14 @@ def _render_fk_tab():
         "2-D limit-equilibrium analysis (method of slices) searching the critical CIRCULAR slip surface. Soil layers are vertical offsets from the ground surface (the last layer is infinite). "
         "Tested against the ACADS EX1(a) benchmark, Taylor's solution (φ=0), analytical infinite-slope solutions and an independent library (pyslope) — see the validation note below. "
         "NOT a replacement for Slide2/Slide3 in formal reports: no non-circular surfaces, tension cracks, reinforcement, external loads or probability of failure (PoF) yet."))
+    _trainee_tip(
+        "**Langkah tab ini:** (1) pilih sumber geometri (contoh ACADS, dari Cross Section, atau tabel manual), (2) isi lapisan material "
+        "(γ, γ jenuh, c', φ' -- bisa 'Ambil dari desain Surface/Cover'), (3) atur muka air/piezometrik, kh, dan FK minimum sesuai kriteria "
+        "yang berlaku, (4) pilih metode (Bishop/Janbu/Morgenstern-Price), (5) jalankan analisis, lalu baca tabel FK & bidang gelincir kritis.",
+        "**Steps in this tab:** (1) choose the geometry source (ACADS example, from Cross Section, or a manual table), (2) fill the material "
+        "layers (γ, γ sat, c', φ' -- or 'Take from Surface/Cover design'), (3) set the water table/piezometric level, kh, and minimum FS per "
+        "the applicable criteria, (4) choose the method (Bishop/Janbu/Morgenstern-Price), (5) run the analysis and read the FS table & critical slip surface.",
+    )
     _srcs = {"acads": _t("Contoh uji ACADS EX1(a)", "ACADS EX1(a) test example"), "xs": _t("Dari Cross Section", "From Cross Section"), "manual": _t("Manual (tabel titik)", "Manual (point table)")}
     _src = st.radio(_t("Geometri lereng", "Slope geometry"), list(_srcs), format_func=lambda k: _srcs[k], horizontal=True, key="fk_src")
     _x = _z = None
@@ -4466,7 +4708,7 @@ def _render_module_workflow():
             "4. Choose the methods (Bishop, Janbu, Morgenstern-Price) then Run FS analysis.\n5. Review the FS table, the section with the critical slip surface, the slip-surface simulation (animation) and the FS map of circle centers.\n6. For formal reports, verify with dedicated software (e.g. Slide2).")),
     ]
     for title, expanded, text in steps:
-        with st.expander(title, expanded=expanded):
+        with st.expander(title, expanded=(expanded or _is_trainee_user())):
             st.markdown(text)
 
 
@@ -5665,6 +5907,11 @@ with st.sidebar:
                  key="open_class_registry_btn", width="stretch"):
         _classification_registry_dialog()
 
+    if _is_trainee_user():
+        if st.button(_t("🧭 Batasan & Asumsi (Latihan)", "🧭 Limitations & Assumptions (Training)"),
+                     key="open_trainee_limits_btn", width="stretch"):
+            _trainee_limitations_dialog()
+
     st.markdown('<hr class="mwm-side-divider"/>', unsafe_allow_html=True)
 
     # ---- Quick tools untuk engineer geoteknik lapangan ----
@@ -6708,6 +6955,16 @@ with tab1:
                                 _t("Upload Kontur DXF", "Upload Contour DXF"),
                                 type=["dxf"],
                                 key=f"kontur_dxf_{sid}"
+                            )
+                            _trainee_tip(
+                                "**Format DXF kontur yang diterima:** LWPOLYLINE/POLYLINE (2D dgn elevasi/3D), SPLINE, 3DFACE, POINT, LINE, "
+                                "termasuk yang ada di dalam block INSERT. Tiap garis kontur HARUS punya elevasi Z (bukan 0) -- kalau DXF 2D "
+                                "per-layer (Z=0 semua), beri nama layer memuat angka elevasinya, mis. 'C-TOPO-MAJR-100' akan terbaca sbg elevasi 100. "
+                                "Satuan koordinat & elevasi HARUS meter, dan sistem koordinat kontur/boundary/orthophoto harus SAMA (jangan campur proyeksi).",
+                                "**Accepted contour DXF format:** LWPOLYLINE/POLYLINE (2D with elevation/3D), SPLINE, 3DFACE, POINT, LINE, "
+                                "including ones inside INSERT blocks. Every contour line MUST have a Z elevation (not 0) -- for 2D per-layer DXFs "
+                                "(Z=0 everywhere), name the layer with the elevation number, e.g. 'C-TOPO-MAJR-100' reads as elevation 100. "
+                                "Coordinate & elevation units MUST be metres, and contour/boundary/orthophoto must share the SAME coordinate system.",
                             )
 
                         with cold2:
@@ -9287,6 +9544,14 @@ with tab1:
                 ),
             )
 
+            _trainee_tip(
+                "**Sebelum klik RUN ANALYSIS**, pastikan: (1) Kontur DXF & Boundary DXF sudah terupload untuk tiap segmen, "
+                "(2) hidrologi-hidrolika (hujan, Manning's n, geometri channel) sudah diisi, (3) ukuran butir & parameter tambahan sudah diisi. "
+                "Tombol ini menghitung ulang seluruh peta risiko 2D/3D -- bisa memakan waktu tergantung ukuran DXF & resolusi grid.",
+                "**Before clicking RUN ANALYSIS**, make sure: (1) the Contour & Boundary DXF are uploaded for every segment, "
+                "(2) hydrology-hydraulics (rainfall, Manning's n, channel geometry) are filled in, (3) grain size & extra parameters are filled in. "
+                "This button recomputes the whole 2D/3D risk map -- it can take a while depending on the DXF size & grid resolution.",
+            )
             run_button_clicked = st.button(_t("RUN ANALYSIS", "RUN ANALYSIS"))
 
             # =================================================================
@@ -20757,6 +21022,43 @@ with tab8:
                         key="xs_draw_selected",
                     )
 
+            st.markdown("---")
+            if st.button(_t("📱 Ekspor untuk Erosion Field Viewer (.json)", "📱 Export for Erosion Field Viewer (.json)"),
+                         key="xs_field_export_btn",
+                         help=_t(
+                             "Membuat 1 file .json berisi peta risiko semua segmen (georeferensi UTM) + cross section yang "
+                             "sudah disimpan di segmen ini. File ini dimuat di app terpisah 'Erosion Field Viewer' (HTML mandiri) "
+                             "supaya bisa dicek di lapangan lewat HP, offline, dengan posisi GPS Anda ditampilkan di atas peta.",
+                             "Builds one .json file with every segment's risk map (UTM georeferenced) + the cross sections saved "
+                             "for this segment. Load it in the separate 'Erosion Field Viewer' app (self-contained HTML) to check "
+                             "it in the field on your phone, offline, with your GPS position shown on the map.",
+                         )):
+                try:
+                    _pkg = _field_package_build(_seg_res_left, _xs_options[st.session_state["xs_seg_label"]],
+                                                st.session_state.get("xs_draw_lines", {}))
+                    _pkg_bytes = json.dumps(_pkg).encode("utf-8")
+                    st.session_state["field_pkg_bytes"] = _pkg_bytes
+                    st.success(_t(f"Paket siap ({len(_pkg['segments'])} segmen, {len(_pkg_bytes)/1024:.0f} KB).",
+                                   f"Package ready ({len(_pkg['segments'])} segments, {len(_pkg_bytes)/1024:.0f} KB)."))
+                except Exception as _e_pkg:
+                    st.error(_t(f"Gagal membuat paket: {_e_pkg}", f"Failed to build package: {_e_pkg}"))
+            if st.session_state.get("field_pkg_bytes"):
+                st.download_button(
+                    _t("Download field_package.json", "Download field_package.json"),
+                    data=st.session_state["field_pkg_bytes"],
+                    file_name="field_package.json",
+                    mime="application/json",
+                    key="xs_field_export_dl",
+                )
+
+            _trainee_tip(
+                "**Langkah tab Cross Section:** (1) pastikan Erosion Mapping segmen ini sudah dijalankan, (2) pilih tipe section "
+                "(Straight Line / Polyline DXF / Gambar di Peta), (3) klik **Generate Cross Section** di bawah ini, (4) setelah muncul, "
+                "pilih parameter warna & mesh di panel hasil, lalu buka 'Ekspor & Volume Cut-Fill' untuk mengunduh CSV/PNG/DXF.",
+                "**Cross Section tab steps:** (1) make sure Erosion Mapping for this segment has been run, (2) choose the section type "
+                "(Straight Line / Polyline DXF / Draw on Map), (3) click **Generate Cross Section** below, (4) once it appears, pick the "
+                "colour parameter & mesh in the results panel, then open 'Export & Cut-Fill Volume' to download CSV/PNG/DXF.",
+            )
             if st.button(_t("Generate Cross Section", "Generate Cross Section"),
                          key="xs_generate_btn"):
                 st.session_state["xs_run"] = True
