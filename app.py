@@ -7019,12 +7019,24 @@ def _render_mini_avenza_page():
         "Load the field_package.json file (exported by admin/surveyor from the Cross Section tab) via "
         "the Info/Data tab below, then tap the GPS button on the Peta tab to enable location.",
     ))
+    # st.iframe (Streamlit >= 1.56) TIDAK punya parameter "scrolling" (beda dari
+    # components.v1.html yang lama) -- coba dgn scrolling dulu, kalau TypeError berarti versi baru,
+    # retry tanpa scrolling. Ini supaya jalan di versi Streamlit lama maupun baru.
     _render_html = getattr(st, "iframe", None)
-    if _render_html is not None:
-        _render_html(_MINI_AVENZA_HTML, height=880, scrolling=False)
-    else:
-        import streamlit.components.v1 as _components_avenza
-        _components_avenza.html(_MINI_AVENZA_HTML, height=880, scrolling=False)
+    try:
+        if _render_html is not None:
+            try:
+                _render_html(_MINI_AVENZA_HTML, height=880, scrolling=False)
+            except TypeError:
+                _render_html(_MINI_AVENZA_HTML, height=880)
+        else:
+            import streamlit.components.v1 as _components_avenza
+            _components_avenza.html(_MINI_AVENZA_HTML, height=880, scrolling=False)
+    except Exception as _e_avenza_render:
+        st.error(_t(
+            f"Gagal menampilkan Mini Avenza: {_e_avenza_render}",
+            f"Failed to display Mini Avenza: {_e_avenza_render}",
+        ))
     st.stop()
 
 
