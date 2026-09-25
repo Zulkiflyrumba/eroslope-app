@@ -1421,31 +1421,59 @@ import base64 as _b64_mod
 import io as _io_mod
 
 
-def _field_composite_png(grid_x, grid_y, zone_map, sediment_map, boundary, satellite_basemap, inside):
-    """PNG (base64) untuk 1 segmen di Erosion Field Viewer: citra satelit (Esri World Imagery, kalau
-    tersedia di segmen ini) di paling belakang, lapisan warna risiko TARP semi-transparan di atasnya,
-    garis kontur batas potensi sedimentasi (dari sediment_map, sama seperti di laporan utama), titik
-    pusat area erosi kritis (zone_map >= 2, warna Merah) dan titik pusat area potensi sedimentasi
-    tinggi (sediment_map >= 0.85), serta garis boundary DXF.
+# Konstanta transformasi Lokal(DXF) -> UTM asli -- HARUS SAMA PERSIS dengan _COORD_ALPHA/_COORD_BETA/
+# _COORD_DE/_COORD_DN/_COORD_UTM_EPSG yang didefinisikan di tab Erosion Mapping (fungsi lokal
+# _lokal_to_utm_xy tidak bisa dipanggil dari sini karena scope-nya tertutup di dalam blok render tab
+# itu). Kalau Anda pernah mengubah nilai kalibrasi itu di tab Erosion Mapping, UBAH JUGA di sini.
+_FIELD_COORD_ALPHA = 0.540773
+_FIELD_COORD_BETA = -0.841086
+_FIELD_COORD_DE = 324945.0629
+_FIELD_COORD_DN = 9755584.111
+_FIELD_COORD_UTM_EPSG = "EPSG:32750"
 
-    Semua digambar dalam extent grid_x/grid_y (meter UTM) supaya PNG-nya pas dipasang di bounds_utm
-    yang sama dengan yang dikirim ke Erosion Field Viewer -- jadi tidak perlu logika layer terpisah
-    di sisi HTML, cukup satu gambar yang sudah "jadi"."""
+
+def _field_lokal_to_utm(x_local, y_local):
+    """Grid/array Lokal (DXF, biasanya berotasi puluhan derajat thd Utara) -> Easting,Northing UTM asli.
+    Bentuk array TIDAK berubah -- cuma tiap titik dipindah ke koordinat UTM-nya, jadi zone_map/
+    sediment_map (nilai per sel) tetap dipakai apa adanya, cuma "dipasangkan" ke koordinat baru ini."""
+    e = np.asarray(x_local, dtype=float)
+    n = np.asarray(y_local, dtype=float)
+    E = _FIELD_COORD_DE + _FIELD_COORD_ALPHA * e - _FIELD_COORD_BETA * n
+    N = _FIELD_COORD_DN + _FIELD_COORD_BETA * e + _FIELD_COORD_ALPHA * n
+    return E, N
+
+
+def _field_composite_png(grid_x, grid_y, zone_map, sediment_map, boundary, satellite_basemap, inside):
+    """PNG (base64) untuk 1 segmen di Erosion Field Viewer.
+
+    PENTING: grid_x/grid_y di app ini adalah koordinat "Lokal" DXF (berotasi thd Utara asli), BUKAN
+    UTM langsung. Supaya sejajar dengan citra satelit (yang selalu "north-up"/UTM asli) dan posisi
+    GPS HP (yang juga UTM asli), semua digambar pakai pcolormesh/contour dengan koordinat (X,Y) hasil
+    _field_lokal_to_utm(grid_x, grid_y) -- BUKAN imshow+extent kotak lurus. pcolormesh/contour bisa
+    menggambar grid yang berotasi/tidak axis-aligned dengan benar, imshow tidak bisa (itu penyebab
+    hasil sebelumnya menyilang/berantakan). Layer: citra satelit (kalau ada) -> warna risiko TARP ->
+    kontur batas sedimentasi -> titik erosi kritis / sedimentasi tinggi -> garis boundary DXF."""
     import matplotlib.pyplot as _plt
     from matplotlib.colors import ListedColormap, BoundaryNorm
     from scipy import ndimage as _ndi
 
     _gx, _gy = np.asarray(grid_x, float), np.asarray(grid_y, float)
-    xmin, xmax = float(np.nanmin(_gx)), float(np.nanmax(_gx))
-    ymin, ymax = float(np.nanmin(_gy)), float(np.nanmax(_gy))
-    extent = (xmin, xmax, ymin, ymax)
+    _utm_x, _utm_y = _field_lokal_to_utm(_gx, _gy)
+
+    xmin, xmax = float(np.nanmin(_utm_x)), float(np.nanmax(_utm_x))
+    ymin, ymax = float(np.nanmin(_utm_y)), float(np.nanmax(_utm_y))
+    if satellite_basemap is not None and satellite_basemap.get("extent") is not None:
+        sxmin, sxmax, symin, symax = satellite_basemap["extent"]
+        xmin, xmax = min(xmin, sxmin), max(xmax, sxmax)
+        ymin, ymax = min(ymin, symin), max(ymax, symax)
+
     aspect_hw = (ymax - ymin) / max(xmax - xmin, 1e-6)
     fig = _plt.figure(figsize=(7, max(7 * aspect_hw, 3)), dpi=120)
     ax = fig.add_axes([0, 0, 1, 1]); ax.axis("off")
     ax.set_xlim(xmin, xmax); ax.set_ylim(ymin, ymax)
 
     if satellite_basemap is not None and satellite_basemap.get("rgb") is not None:
-        ax.imshow(satellite_basemap["rgb"], extent=satellite_basemap.get("extent", extent),
+        ax.imshow(satellite_basemap["rgb"], extent=satellite_basemap.get("extent"),
                   origin="upper", aspect="auto", zorder=1)
         _overlay_alpha = 0.55
     else:
@@ -1456,11 +1484,13 @@ def _field_composite_png(grid_x, grid_y, zone_map, sediment_map, boundary, satel
         _zm = np.asarray(zone_map, dtype=float)
         cmap = ListedColormap(["#3DBF8C", "#D3D95C", "#e08a2b", "#d8483f"])
         norm = BoundaryNorm([0, 0.5, 1.0, 2.0, max(float(np.nanmax(_zm)) + 0.01, 2.5)], cmap.N)
-        ax.imshow(np.rot90(_zm), extent=extent, origin="upper", cmap=cmap, norm=norm,
-                  alpha=_overlay_alpha, aspect="auto", zorder=2)
+        ax.pcolormesh(_utm_x, _utm_y, _zm, cmap=cmap, norm=norm, alpha=_overlay_alpha,
+                      shading="auto", zorder=2)
 
-        # titik pusat area erosi kritis (Merah, zone_map >= 2) -- dikelompokkan per area
-        # bersambung (connected component) supaya jadi beberapa titik wakil, bukan ribuan piksel.
+        # titik pusat area erosi kritis (Merah, zone_map >= 2) -- dikelompokkan per area bersambung
+        # (connected component) di grid ASLI (indeks baris/kolom), lalu posisinya diambil dari sel
+        # utm_x/utm_y terdekat (indeks yang sama) -- konsisten dengan cara app utama mengambil titik
+        # kritis (grid_x[critical_y, critical_x]).
         _crit_mask = (_zm >= 2.0)
         if inside is not None:
             _crit_mask &= np.asarray(inside, dtype=bool)
@@ -1468,45 +1498,48 @@ def _field_composite_png(grid_x, grid_y, zone_map, sediment_map, boundary, satel
         if _n:
             _centers = _ndi.center_of_mass(_crit_mask, _lab, range(1, _n + 1))
             for (_cy, _cx) in _centers:
-                _px = np.interp(_cx, [0, _zm.shape[0] - 1], [xmin, xmax])
-                _py = np.interp(_cy, [0, _zm.shape[1] - 1], [ymax, ymin])
-                ax.plot(_px, _py, marker="X", color="#ffffff", markeredgecolor="#8a0000",
-                        markersize=11, markeredgewidth=1.6, zorder=4)
+                _iy, _ix = int(round(_cy)), int(round(_cx))
+                _iy = min(max(_iy, 0), _utm_x.shape[0] - 1)
+                _ix = min(max(_ix, 0), _utm_x.shape[1] - 1)
+                ax.plot(_utm_x[_iy, _ix], _utm_y[_iy, _ix], marker="X", color="#ffffff",
+                        markeredgecolor="#8a0000", markersize=11, markeredgewidth=1.6, zorder=4)
 
     if sediment_map is not None:
         _sm = np.asarray(sediment_map, dtype=float)
         try:
-            ax.contour(np.rot90(_sm), levels=[0.7], extent=extent, colors=["#2b7fff"],
+            ax.contour(_utm_x, _utm_y, _sm, levels=[0.7], colors=["#2b7fff"],
                        linewidths=1.6, linestyles="--", zorder=3)
-            _high = np.rot90(_sm) >= 0.85
-            _lab2, _n2 = _ndi.label(np.nan_to_num(_high, nan=0.0).astype(bool))
-            if _n2:
-                _centers2 = _ndi.center_of_mass(_high, _lab2, range(1, _n2 + 1))
-                _h, _w = _high.shape
-                for (_cy, _cx) in _centers2:
-                    _px = np.interp(_cx, [0, _w - 1], [xmin, xmax])
-                    _py = np.interp(_cy, [0, _h - 1], [ymax, ymin])
-                    ax.plot(_px, _py, marker="o", color="#2b7fff", markeredgecolor="#ffffff",
-                            markersize=9, markeredgewidth=1.3, zorder=4)
         except Exception:
             pass
+        _high = np.nan_to_num(_sm, nan=0.0) >= 0.85
+        _lab2, _n2 = _ndi.label(_high)
+        if _n2:
+            _centers2 = _ndi.center_of_mass(_high, _lab2, range(1, _n2 + 1))
+            for (_cy, _cx) in _centers2:
+                _iy, _ix = int(round(_cy)), int(round(_cx))
+                _iy = min(max(_iy, 0), _utm_x.shape[0] - 1)
+                _ix = min(max(_ix, 0), _utm_x.shape[1] - 1)
+                ax.plot(_utm_x[_iy, _ix], _utm_y[_iy, _ix], marker="o", color="#2b7fff",
+                        markeredgecolor="#ffffff", markersize=9, markeredgewidth=1.3, zorder=4)
 
     if boundary is not None:
         try:
             _geoms = list(boundary.geoms) if hasattr(boundary, "geoms") else [boundary]
             for _g in _geoms:
                 _bx, _by = _g.exterior.xy
-                ax.plot(_bx, _by, color="#ffffff", linewidth=1.4, zorder=5)
+                _bE, _bN = _field_lokal_to_utm(np.asarray(_bx), np.asarray(_by))
+                ax.plot(_bE, _bN, color="#ffffff", linewidth=1.4, zorder=5)
                 for _hole in _g.interiors:
                     _hx, _hy = _hole.xy
-                    ax.plot(_hx, _hy, color="#ffffff", linewidth=1.0, linestyle=":", zorder=5)
+                    _hE, _hN = _field_lokal_to_utm(np.asarray(_hx), np.asarray(_hy))
+                    ax.plot(_hE, _hN, color="#ffffff", linewidth=1.0, linestyle=":", zorder=5)
         except Exception:
             pass
 
     buf = _io_mod.BytesIO()
     fig.savefig(buf, format="png", transparent=(satellite_basemap is None))
     _plt.close(fig)
-    return "data:image/png;base64," + _b64_mod.b64encode(buf.getvalue()).decode("ascii")
+    return "data:image/png;base64," + _b64_mod.b64encode(buf.getvalue()).decode("ascii"), (xmin, xmax, ymin, ymax)
 
 
 def _field_package_build(seg_results, active_sid, xs_draw_lines):
@@ -1524,11 +1557,9 @@ def _field_package_build(seg_results, active_sid, xs_draw_lines):
         boundary = s.get("boundary")
         satellite_basemap = s.get("satellite_basemap")
         inside = s.get("inside")
-        png = _field_composite_png(gx, gy, zone_map, sediment_map, boundary, satellite_basemap, inside)
-        bounds = {
-            "xmin": float(np.nanmin(gx)), "xmax": float(np.nanmax(gx)),
-            "ymin": float(np.nanmin(gy)), "ymax": float(np.nanmax(gy)),
-        }
+        png, (uxmin, uxmax, uymin, uymax) = _field_composite_png(
+            gx, gy, zone_map, sediment_map, boundary, satellite_basemap, inside)
+        bounds = {"xmin": uxmin, "xmax": uxmax, "ymin": uymin, "ymax": uymax}
         cross_sections = []
         if sid == active_sid and xs_draw_lines:
             _tin = None
@@ -1557,6 +1588,7 @@ def _field_package_build(seg_results, active_sid, xs_draw_lines):
                 {"label": "-- Batas potensi sedimentasi (>0.7)", "color": "#2b7fff"},
             ] if sediment_map is not None else []),
             "has_satellite": satellite_basemap is not None,
+            "coord_note": "utm_true",
             "cross_sections": cross_sections,
         })
     _epsg = _COORD_UTM_EPSG if "_COORD_UTM_EPSG" in globals() else "EPSG:32750"
