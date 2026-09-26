@@ -4952,14 +4952,29 @@ def _rep_method_paragraphs(F):
     return P
 
 
+def _safe_short(text, max_len=28):
+    """Potong teks yang berpotensi sangat panjang (label segmen custom, nama material
+    custom, dll.) sebelum masuk ke kolom tabel PDF yang sempit -- PERBAIKAN untuk bug
+    'Gagal membuat laporan: Flowable Table ... too large on page' yang muncul saat
+    salah satu isi sel (mis. label segmen atau nama material) ternyata jauh lebih
+    panjang dari perkiraan, sehingga Paragraph di sel itu ter-wrap jadi puluhan baris
+    dan tingginya melebihi 1 halaman penuh. Tabel-tabel sempit (banyak kolom, seperti
+    'DATA MASUKAN PER SEGMEN' dan 'Ringkasan Perbandingan Antar Segmen') memanggil ini
+    supaya SATU sel nakal tidak pernah bisa meledakkan tinggi seluruh tabel."""
+    s = str(text)
+    return s if len(s) <= max_len else s[:max_len - 1].rstrip() + "…"
+
+
 def _rep_input_rows(segs):
     rows = [["Segmen", "Metode", "Luas (Ha)", "D50 (mm)", "tau_c (Pa)", "M", "C limpasan", "Faktor hujan", "Cover"]]
     for sid, s in segs.items():
         ci = s.get("cover_info")
-        rows.append([s.get("label", sid), str(s.get("analysis_method", "-")).replace(" Diagram", ""), f"{float(s.get('boundary_area_ha', 0) or 0):.2f}",
+        rows.append([_safe_short(s.get("label", sid), 22),
+                     _safe_short(str(s.get("analysis_method", "-")).replace(" Diagram", ""), 20),
+                     f"{float(s.get('boundary_area_ha', 0) or 0):.2f}",
                      f"{float(s.get('grain_size_mm', 0) or 0):.3f}", f"{float(s.get('tau_critical', 0) or 0):.2f}", f"{float(s.get('erodibility_M', 0) or 0):.3f}",
                      f"{float(s.get('runoff_c_base', 0) or 0):.2f}" if s.get("runoff_c_base") else "-", f"{float(s.get('rain_factor', 1) or 1):.2f}x",
-                     (ci.get("material") if ci else "-")])
+                     _safe_short(ci.get("material") if ci else "-", 16)])
     return rows
 
 
@@ -10369,63 +10384,80 @@ with tab1:
 
             if _seg_res_left:
                 st.markdown("---")
-                # ---------------- Data Laporan (metadata halaman judul) ----------------
-                _sub_header(_t("Data Laporan", "Report Details"))
-                st.caption(_t("Tampil pada halaman judul PDF/Word (opsional).", "Shown on the PDF/Word title page (optional)."))
-                _rd1, _rd2 = st.columns(2)
-                with _rd1:
-                    st.text_input(_t("Nama proyek / pekerjaan", "Project / job name"), key="rep_project",
-                                  value=st.session_state.get("active_project_name", "") or "")
-                    st.text_input(_t("Lokasi / IUP", "Location / IUP"), key="rep_location")
-                with _rd2:
-                    st.text_input(_t("Penyusun", "Prepared by"), key="rep_author")
-                    st.text_input(_t("Jenis pekerjaan", "Type of work"), key="rep_worktype",
-                                  placeholder=_t("mis. Sekat/channel drainase tambang", "e.g. Mine drainage check-dam/channel"))
-                st.markdown("---")
-                # ---------------- Lembar Pengesahan (Reviewer) ----------------
-                _sub_header(_t("Lembar Pengesahan (Reviewer)", "Approval Sheet (Reviewer)"))
-                st.caption(_t(
-                    "Opsional -- isi data reviewer dan unggah gambar tanda tangan (PNG/JPG, sebaiknya "
-                    "latar transparan) untuk disertakan di halaman pengesahan laporan PDF, sebelum diunduh.",
-                    "Optional -- fill in reviewer details and upload a signature image (PNG/JPG, preferably "
-                    "transparent background) to include on the PDF report approval page before downloading."
-                ))
-                if "reviewer_date" not in st.session_state:
-                    st.session_state["reviewer_date"] = pd.Timestamp.now()
-                _sg1, _sg2 = st.columns(2)
-                with _sg1:
-                    st.text_input(_t("Nama Reviewer", "Reviewer Name"), key="reviewer_name")
-                    st.text_input(_t("Jabatan / Peran", "Position / Role"), key="reviewer_role",
-                                  placeholder="mis. Ahli Geoteknik Bersertifikat")
-                with _sg2:
-                    st.date_input("Tanggal Review", key="reviewer_date")
-                    st.file_uploader(
-                        _t("Unggah Tanda Tangan (PNG/JPG)", "Upload Signature (PNG/JPG)"),
-                        type=["png", "jpg", "jpeg"], key="reviewer_signature_file",
-                    )
-                if st.session_state.get("reviewer_signature_file") is not None:
-                    st.image(st.session_state["reviewer_signature_file"],
-                             caption=_t("Pratinjau tanda tangan", "Signature preview"), width=200)
+                # PERBAIKAN "isi Data Laporan/Lembar Pengesahan lalu hilang & harus klik
+                # ulang di panel hasil": text_input/date_input/file_uploader di LUAR
+                # st.form men-trigger st.rerun() SETIAP kali user mengetik/pindah fokus.
+                # Karena blok output di panel kanan me-reset lalu menghitung ULANG SELURUH
+                # segment_results setiap kali analysis_done=True (lihat catatan di panel
+                # kanan), rerun sekecil apa pun di sini memicu recompute berat itu lagi --
+                # dan kalau recompute itu sempat gagal/exception di tengah jalan,
+                # segment_results tertinggal kosong ({}) sehingga blok ini (yang bergantung
+                # pada _seg_res_left) berhenti dirender sampai user klik kontrol lain di
+                # panel hasil untuk memicu ulang. Dibungkus st.form supaya SEMUA input di
+                # sini (Data Laporan, Lembar Pengesahan, Gaya Laporan) TIDAK memicu rerun
+                # sama sekali selagi diisi -- hanya commit & rerun SATU KALI saat tombol
+                # submit (GENERATE EXECUTIVE REPORT) diklik.
+                with st.form("report_meta_form", clear_on_submit=False):
+                    # ---------------- Data Laporan (metadata halaman judul) ----------------
+                    _sub_header(_t("Data Laporan", "Report Details"))
+                    st.caption(_t("Tampil pada halaman judul PDF/Word (opsional).", "Shown on the PDF/Word title page (optional)."))
+                    _rd1, _rd2 = st.columns(2)
+                    with _rd1:
+                        st.text_input(_t("Nama proyek / pekerjaan", "Project / job name"), key="rep_project",
+                                      value=st.session_state.get("active_project_name", "") or "")
+                        st.text_input(_t("Lokasi / IUP", "Location / IUP"), key="rep_location")
+                    with _rd2:
+                        st.text_input(_t("Penyusun", "Prepared by"), key="rep_author")
+                        st.text_input(_t("Jenis pekerjaan", "Type of work"), key="rep_worktype",
+                                      placeholder=_t("mis. Sekat/channel drainase tambang", "e.g. Mine drainage check-dam/channel"))
+                    st.markdown("---")
+                    # ---------------- Lembar Pengesahan (Reviewer) ----------------
+                    _sub_header(_t("Lembar Pengesahan (Reviewer)", "Approval Sheet (Reviewer)"))
+                    st.caption(_t(
+                        "Opsional -- isi data reviewer dan unggah gambar tanda tangan (PNG/JPG, sebaiknya "
+                        "latar transparan) untuk disertakan di halaman pengesahan laporan PDF, sebelum diunduh.",
+                        "Optional -- fill in reviewer details and upload a signature image (PNG/JPG, preferably "
+                        "transparent background) to include on the PDF report approval page before downloading."
+                    ))
+                    if "reviewer_date" not in st.session_state:
+                        st.session_state["reviewer_date"] = pd.Timestamp.now()
+                    _sg1, _sg2 = st.columns(2)
+                    with _sg1:
+                        st.text_input(_t("Nama Reviewer", "Reviewer Name"), key="reviewer_name")
+                        st.text_input(_t("Jabatan / Peran", "Position / Role"), key="reviewer_role",
+                                      placeholder="mis. Ahli Geoteknik Bersertifikat")
+                    with _sg2:
+                        st.date_input("Tanggal Review", key="reviewer_date")
+                        st.file_uploader(
+                            _t("Unggah Tanda Tangan (PNG/JPG)", "Upload Signature (PNG/JPG)"),
+                            type=["png", "jpg", "jpeg"], key="reviewer_signature_file",
+                        )
+                    if st.session_state.get("reviewer_signature_file") is not None:
+                        st.image(st.session_state["reviewer_signature_file"],
+                                 caption=_t("Pratinjau tanda tangan", "Signature preview"), width=200)
 
-                st.markdown("---")
-                # Mode laporan: ringkas (langsung ke inti, visual tetap lengkap) vs
-                # lengkap (menyertakan bab metodologi, formula, dan referensi).
-                st.radio(
-                    _t("Gaya Laporan", "Report Style"),
-                    [_t("Ringkas — langsung ke inti", "Concise — straight to the point"),
-                     _t("Lengkap — dengan metodologi & referensi", "Full — with methodology & references")],
-                    key="report_style",
-                    help=_t(
-                        "Ringkas: temuan, lokasi, dan rekomendasi saja — seluruh visual (peta, 3D, "
-                        "penampang) tetap dilampirkan lengkap. Lengkap: ditambah uraian metodologi, "
-                        "turunan formula, dan daftar referensi.",
-                        "Concise: findings, locations, and recommendations only — all visuals (maps, 3D, "
-                        "sections) are still attached in full. Full: adds methodology, formula derivations, "
-                        "and reference list.",
-                    ),
-                )
-                if st.button(_t("GENERATE EXECUTIVE REPORT", "GENERATE EXECUTIVE REPORT"),
-                             key="gen_report_btn", type="primary"):
+                    st.markdown("---")
+                    # Mode laporan: ringkas (langsung ke inti, visual tetap lengkap) vs
+                    # lengkap (menyertakan bab metodologi, formula, dan referensi).
+                    st.radio(
+                        _t("Gaya Laporan", "Report Style"),
+                        [_t("Ringkas — langsung ke inti", "Concise — straight to the point"),
+                         _t("Lengkap — dengan metodologi & referensi", "Full — with methodology & references")],
+                        key="report_style",
+                        help=_t(
+                            "Ringkas: temuan, lokasi, dan rekomendasi saja — seluruh visual (peta, 3D, "
+                            "penampang) tetap dilampirkan lengkap. Lengkap: ditambah uraian metodologi, "
+                            "turunan formula, dan daftar referensi.",
+                            "Concise: findings, locations, and recommendations only — all visuals (maps, 3D, "
+                            "sections) are still attached in full. Full: adds methodology, formula derivations, "
+                            "and reference list.",
+                        ),
+                    )
+                    _report_submitted = st.form_submit_button(
+                        _t("GENERATE EXECUTIVE REPORT", "GENERATE EXECUTIVE REPORT"),
+                        type="primary",
+                    )
+                if _report_submitted:
                     st.session_state["gen_report_run"] = True
 
             elif st.session_state.get("analysis_done", False):
@@ -15162,7 +15194,7 @@ with tab1:
                                 elif sid in _low_priority_skip:
                                     _label_disp += " (ringkas — risiko rendah, lihat catatan)"
                                 summary_rows.append([
-                                    _label_disp, seg["analysis_method"],
+                                    _safe_short(_label_disp, 34), _safe_short(seg["analysis_method"], 22),
                                     f"{seg['erosion_area']:.2f}", f"{seg['sedimentation_area']:.2f}",
                                     f"{seg['max_zone']:.2f}", level_name
                                 ])
