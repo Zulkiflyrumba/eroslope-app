@@ -1559,6 +1559,11 @@ def _field_composite_layers(grid_x, grid_y, zone_map, sediment_map, boundary, sa
                 sediment_points.append({"x": float(_utm_x[_iy, _ix]), "y": float(_utm_y[_iy, _ix])})
 
     # ---- boundary DXF: SELALU tampil (referensi orientasi), tidak ada di legenda ----
+    # PERBAIKAN: selain digambar sbg raster PNG (utk ditampilkan), garis boundary ini SEKARANG
+    # juga diekspor sbg data VEKTOR (boundary_rings, dlm meter UTM) -- supaya viewer lapangan bisa
+    # menghitung jarak sebenarnya dari posisi GPS/titik yang diketuk user ke TEPI desain (bukan cuma
+    # ke rectangle bounds_utm), dan tahu pasti user ada di DALAM atau LUAR area desain.
+    boundary_rings = []
     if boundary is not None:
         fig, ax = _new_ax()
         try:
@@ -1567,6 +1572,7 @@ def _field_composite_layers(grid_x, grid_y, zone_map, sediment_map, boundary, sa
                 _bx, _by = _g.exterior.xy
                 _bE, _bN = _field_lokal_to_utm(np.asarray(_bx), np.asarray(_by))
                 ax.plot(_bE, _bN, color="#ffffff", linewidth=1.4)
+                boundary_rings.append([{"x": float(_ex), "y": float(_ey)} for _ex, _ey in zip(_bE, _bN)])
                 for _hole in _g.interiors:
                     _hx, _hy = _hole.xy
                     _hE, _hN = _field_lokal_to_utm(np.asarray(_hx), np.asarray(_hy))
@@ -1575,7 +1581,7 @@ def _field_composite_layers(grid_x, grid_y, zone_map, sediment_map, boundary, sa
             pass
         layers["boundary"] = _field_savefig_datauri(fig, transparent=True)
 
-    return layers, critical_points, sediment_points, (xmin, xmax, ymin, ymax)
+    return layers, critical_points, sediment_points, (xmin, xmax, ymin, ymax), boundary_rings
 
 
 def _field_package_build(seg_results, active_sid, xs_draw_lines):
@@ -1593,7 +1599,7 @@ def _field_package_build(seg_results, active_sid, xs_draw_lines):
         boundary = s.get("boundary")
         satellite_basemap = s.get("satellite_basemap")
         inside = s.get("inside")
-        layers, critical_pts, sediment_pts, (uxmin, uxmax, uymin, uymax) = _field_composite_layers(
+        layers, critical_pts, sediment_pts, (uxmin, uxmax, uymin, uymax), boundary_rings = _field_composite_layers(
             gx, gy, zone_map, sediment_map, boundary, satellite_basemap, inside)
         bounds = {"xmin": uxmin, "xmax": uxmax, "ymin": uymin, "ymax": uymax}
         cross_sections = []
@@ -1632,6 +1638,7 @@ def _field_package_build(seg_results, active_sid, xs_draw_lines):
             "legend": legend,
             "critical_points": critical_pts,
             "sediment_points": sediment_pts,
+            "boundary_points": boundary_rings,
             "has_satellite": satellite_basemap is not None,
             "coord_note": "utm_true",
             "cross_sections": cross_sections,
@@ -5624,7 +5631,15 @@ _MINI_AVENZA_HTML = """<!DOCTYPE html>
   .badge b{color:var(--txt); font-weight:650;}
   .zoomctl{position:absolute; right:10px; bottom:92px; display:flex; flex-direction:column; gap:6px;}
   .zoomctl button{width:40px; height:40px; font-size:19px; border-radius:10px;}
-  .fitbtn{position:absolute; left:10px; bottom:92px;}
+  .leftctl{position:absolute; left:10px; bottom:92px; display:flex; flex-direction:column; gap:6px;}
+  .iconbtn.on{background:var(--teal); border-color:var(--teal);}
+
+  .designbadge{position:absolute; left:10px; right:10px; top:54px; background:rgba(10,31,36,0.9);
+    border:1px solid var(--line); border-radius:9px; padding:7px 10px; font-size:12px; color:var(--sub);
+    line-height:1.55; display:none;}
+  .designbadge b{color:var(--txt);}
+  .designbadge .in{color:var(--green); font-weight:650;}
+  .designbadge .out{color:var(--orange); font-weight:650;}
 
   .legend{position:absolute; left:10px; bottom:92px; right:60px; display:none;}
   .legend .row{display:flex; align-items:center; gap:8px; background:rgba(10,31,36,0.85); border:1px solid var(--line);
@@ -5674,11 +5689,16 @@ _MINI_AVENZA_HTML = """<!DOCTYPE html>
         <button class="badge" id="gpsBadge" style="cursor:pointer;">📍 Ketuk utk aktifkan GPS</button>
         <div class="badge" id="coordBadge">—</div>
       </div>
+      <div class="designbadge" id="designBadge"></div>
       <div class="zoomctl">
         <button id="zoomIn">+</button>
         <button id="zoomOut">−</button>
       </div>
-      <button class="iconbtn fitbtn" id="fitBtn" title="Fit ke area">⤢</button>
+      <div class="leftctl">
+        <button class="iconbtn" id="fitBtn" title="Fit ke seluruh area">⤢</button>
+        <button class="iconbtn" id="meBtn" title="Pusatkan peta ke lokasi GPS saya">🎯</button>
+        <button class="iconbtn" id="measureBtn" title="Mode ukur jarak -- ketuk peta utk taruh target">📏</button>
+      </div>
       <div class="legend" id="legendBox"></div>
       <div class="empty" id="mapEmpty" style="display:none;">
         Belum ada data proyek dimuat.<br>Buka tab <b>Info / Data</b> untuk memuat file proyek (.json).
@@ -5713,6 +5733,31 @@ _MINI_AVENZA_HTML = """<!DOCTYPE html>
             <button id="clearDataBtn">Hapus data tersimpan</button>
           </div>
           <div class="status" id="loadStatus"></div>
+        </div>
+
+        <div class="card">
+          <h3>Plot koordinat &amp; ukur jarak ke desain</h3>
+          <p>Cek jarak dari suatu koordinat (GPS live, titik yang diketuk di peta, atau koordinat yang
+             diketik manual di sini) ke batas desain / titik risiko terdekat -- tanpa harus berdiri
+             persis di lokasinya. Tekan tombol 📏 di peta lalu ketuk peta utk taruh target dgn cepat,
+             atau ketik koordinatnya di sini.</p>
+          <select id="coordFormat" style="width:100%; margin-bottom:8px;">
+            <option value="latlon">Lat, Lon (WGS84) -- disalin dari Google Maps/GPS lain</option>
+            <option value="utm">UTM X (Timur), Y (Utara) -- meter, zona sama dgn proyek</option>
+          </select>
+          <div class="rowbtns">
+            <input type="text" id="coordInput1" placeholder="Lat  (mis. -2.123456)"
+                   style="flex:1; min-width:130px; background:var(--panel2); color:var(--txt);
+                          border:1px solid var(--line); border-radius:8px; padding:7px 10px; font-size:13.5px;">
+            <input type="text" id="coordInput2" placeholder="Lon  (mis. 113.987654)"
+                   style="flex:1; min-width:130px; background:var(--panel2); color:var(--txt);
+                          border:1px solid var(--line); border-radius:8px; padding:7px 10px; font-size:13.5px;">
+          </div>
+          <div class="rowbtns">
+            <button id="plotCoordBtn">📌 Plot ke peta</button>
+            <button id="clearTargetBtn">Hapus target</button>
+          </div>
+          <div class="status" id="coordStatus"></div>
         </div>
 
         <div class="card">
@@ -5771,6 +5816,10 @@ _MINI_AVENZA_HTML = """<!DOCTYPE html>
                    {"key":"critical_points","type":"points","label":"✕ Titik erosi kritis","color":"#8a0000"}, ...],
         "critical_points": [{"x":..,"y":..}, ...],   // titik VEKTOR (bukan raster) -- tajam di zoom apa pun
         "sediment_points": [{"x":..,"y":..}, ...],
+        "boundary_points": [[{"x":..,"y":..}, ...], ...],  // poligon desain (per ring), dipakai fitur
+                                                             // "jarak ke desain" (📍/🎯 badge) -- paket
+                                                             // lama tanpa field ini masih jalan, cuma
+                                                             // info jarak-ke-batas tidak ditampilkan.
         "cross_sections": [{"name":"XS-1","points":[{"d":0,"z":65.2}, ...]}]
      }]
    }
@@ -5841,11 +5890,89 @@ function latLonToUTM(lat, lon, zone, southHemi){
   return {x, y};
 }
 
+/* PERBAIKAN fitur "jarak ke desain": kebalikan dari latLonToUTM, dipakai utk plot koordinat
+   UTM manual balik ke lat/lon (tidak dipakai langsung utk kalkulasi jarak -- kalkulasi jarak
+   selalu di UTM meter yg lurus/tidak perlu trig -- tapi berguna utk validasi/tampilan). */
+function utmToLatLon(x, y, zone, southHemi){
+  const a = 6378137.0, e = 0.081819191, k0 = 0.9996;
+  const e2 = e*e, ep2 = e2/(1-e2);
+  const e1 = (1-Math.sqrt(1-e2))/(1+Math.sqrt(1-e2));
+  let yy = southHemi ? y - 10000000 : y;
+  const xx = x - 500000;
+  const M = yy/k0;
+  const mu = M/(a*(1-e2/4-3*e2*e2/64-5*e2**3/256));
+  const phi1 = mu + (3*e1/2-27*e1**3/32)*Math.sin(2*mu) + (21*e1*e1/16-55*e1**4/32)*Math.sin(4*mu)
+    + (151*e1**3/96)*Math.sin(6*mu) + (1097*e1**4/512)*Math.sin(8*mu);
+  const N1 = a/Math.sqrt(1-e2*Math.sin(phi1)**2);
+  const T1 = Math.tan(phi1)**2;
+  const C1 = ep2*Math.cos(phi1)**2;
+  const R1 = a*(1-e2)/Math.pow(1-e2*Math.sin(phi1)**2, 1.5);
+  const D = xx/(N1*k0);
+  const lat = phi1 - (N1*Math.tan(phi1)/R1)*(D*D/2
+    - (5+3*T1+10*C1-4*C1*C1-9*ep2)*D**4/24
+    + (61+90*T1+298*C1+45*T1*T1-252*ep2-3*C1*C1)*D**6/720);
+  const lon0 = ((zone-1)*6-180+3)*Math.PI/180;
+  const lon = lon0 + (D-(1+2*T1+C1)*D**3/6
+    + (5-2*C1+28*T1-3*C1*C1+8*ep2+24*T1*T1)*D**5/120)/Math.cos(phi1);
+  return {lat: lat*180/Math.PI, lon: lon*180/Math.PI};
+}
+
+function projZoneSouth(){
+  let zone = 50, south = true;
+  if(PKG && PKG.utm_zone){ zone = PKG.utm_zone; south = !!PKG.utm_south; }
+  return {zone, south};
+}
+
+/* ---------------- geometri: titik-vs-poligon desain (boundary_points), utk fitur
+   "jarak saya/target ke desain" -- semua dlm meter UTM (bidang datar, tanpa trig) ---------------- */
+function pointInRing(pt, ring){
+  let inside = false;
+  for(let i=0, j=ring.length-1; i<ring.length; j=i++){
+    const xi=ring[i].x, yi=ring[i].y, xj=ring[j].x, yj=ring[j].y;
+    const hit = ((yi>pt.y)!==(yj>pt.y)) && (pt.x < (xj-xi)*(pt.y-yi)/((yj-yi)||1e-12)+xi);
+    if(hit) inside = !inside;
+  }
+  return inside;
+}
+function distPointToSeg(p, a, b){
+  const dx=b.x-a.x, dy=b.y-a.y;
+  const len2 = dx*dx+dy*dy;
+  let t = len2>0 ? ((p.x-a.x)*dx+(p.y-a.y)*dy)/len2 : 0;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(p.x-(a.x+t*dx), p.y-(a.y+t*dy));
+}
+function distToRing(pt, ring){
+  let min = Infinity;
+  for(let i=0;i<ring.length;i++) min = Math.min(min, distPointToSeg(pt, ring[i], ring[(i+1)%ring.length]));
+  return min;
+}
+function designInfo(pt, seg){
+  // {insideAny, distBoundary, nearestKind, nearestDist} -- distBoundary null kalau proyek belum
+  // punya data boundary_points vektor (paket lama), supaya UI tahu harus sembunyikan info itu.
+  let insideAny = false, distBoundary = null;
+  const rings = (seg.boundary_points||[]).filter(r=>r && r.length>=3);
+  if(rings.length){
+    distBoundary = Infinity;
+    rings.forEach(ring=>{ if(pointInRing(pt, ring)) insideAny = true;
+      distBoundary = Math.min(distBoundary, distToRing(pt, ring)); });
+  }
+  let nearestKind = null, nearestDist = Infinity;
+  (seg.critical_points||[]).forEach(p=>{ const d=Math.hypot(pt.x-p.x, pt.y-p.y);
+    if(d<nearestDist){ nearestDist=d; nearestKind="titik erosi kritis"; } });
+  (seg.sediment_points||[]).forEach(p=>{ const d=Math.hypot(pt.x-p.x, pt.y-p.y);
+    if(d<nearestDist){ nearestDist=d; nearestKind="titik sedimentasi tinggi"; } });
+  if(!isFinite(nearestDist)){ nearestDist=null; nearestKind=null; }
+  return {insideAny, distBoundary, nearestKind, nearestDist};
+}
+function fmtDist(n){ if(n==null || !isFinite(n)) return "-"; return n>=1000 ? (n/1000).toFixed(2)+" km" : n.toFixed(1)+" m"; }
+
 /* ============================ STATE ============================ */
 let PKG = null;          // paket data yang sedang aktif
 let curSegIdx = 0;
 let view = {ox:0, oy:0, scale:1};   // transform kanvas (world meter -> px)
 let gpsUTM = null, gpsAcc = null;
+let targetPt = null;      // {x,y} -- target manual/ketuk-peta, utk cek jarak ke desain
+let measureMode = false;  // saat aktif, ketuk peta menaruh/menggeser targetPt
 
 const els = {
   mapCanvas: document.getElementById("mapCanvas"),
@@ -5853,6 +5980,15 @@ const els = {
   segTitle: document.getElementById("segTitle"),
   gpsBadge: document.getElementById("gpsBadge"),
   coordBadge: document.getElementById("coordBadge"),
+  designBadge: document.getElementById("designBadge"),
+  meBtn: document.getElementById("meBtn"),
+  measureBtn: document.getElementById("measureBtn"),
+  coordFormat: document.getElementById("coordFormat"),
+  coordInput1: document.getElementById("coordInput1"),
+  coordInput2: document.getElementById("coordInput2"),
+  plotCoordBtn: document.getElementById("plotCoordBtn"),
+  clearTargetBtn: document.getElementById("clearTargetBtn"),
+  coordStatus: document.getElementById("coordStatus"),
   legendBox: document.getElementById("legendBox"),
   mapEmpty: document.getElementById("mapEmpty"),
   xsSelect: document.getElementById("xsSelect"),
@@ -5896,6 +6032,9 @@ function fitToSeg(){
 
 function worldToPx(x, y){
   return {px: x*view.scale + view.ox, py: view.oy - y*view.scale};
+}
+function pxToWorld(px, py){
+  return {x: (px-view.ox)/view.scale, y: (view.oy-py)/view.scale};
 }
 
 function loadImg(dataUri){
@@ -5986,21 +6125,87 @@ function drawMap(){
     ctx.fillStyle = "#3DBF8C"; ctx.fill();
     ctx.lineWidth = 2.5*devicePixelRatio; ctx.strokeStyle = "#fff"; ctx.stroke();
   }
+
+  // titik TARGET (ketuk peta / plot manual) -- garis putus2 ke GPS kalau GPS aktif, supaya
+  // jarak antara posisi Anda dan target terlihat langsung di peta, bukan cuma di badge angka.
+  if(targetPt){
+    const p = worldToPx(targetPt.x, targetPt.y);
+    if(gpsUTM){
+      const g = worldToPx(gpsUTM.x, gpsUTM.y);
+      ctx.setLineDash([6*devicePixelRatio, 5*devicePixelRatio]);
+      ctx.lineWidth = 2*devicePixelRatio; ctx.strokeStyle = "#D3D95C";
+      ctx.beginPath(); ctx.moveTo(g.px, g.py); ctx.lineTo(p.px, p.py); ctx.stroke();
+      ctx.setLineDash([]);
+      const mx = (g.px+p.px)/2, my = (g.py+p.py)/2;
+      const label = fmtDist(Math.hypot(gpsUTM.x-targetPt.x, gpsUTM.y-targetPt.y));
+      ctx.font = `${12*devicePixelRatio}px -apple-system,sans-serif`;
+      const tw = ctx.measureText(label).width;
+      ctx.fillStyle = "rgba(10,31,36,0.9)";
+      ctx.fillRect(mx-tw/2-5*devicePixelRatio, my-9*devicePixelRatio, tw+10*devicePixelRatio, 18*devicePixelRatio);
+      ctx.fillStyle = "#D3D95C"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText(label, mx, my);
+      ctx.textAlign = "left";
+    }
+    ctx.beginPath(); ctx.arc(p.px, p.py, 7.5*devicePixelRatio, 0, 7);
+    ctx.fillStyle = "#D3D95C"; ctx.fill();
+    ctx.lineWidth = 2.5*devicePixelRatio; ctx.strokeStyle = "#00151a"; ctx.stroke();
+  }
+
+  updateDesignBadge();
+}
+
+function updateDesignBadge(){
+  const s = curSeg();
+  if(!s || (!gpsUTM && !targetPt)){ els.designBadge.style.display = "none"; return; }
+  const lines = [];
+  if(gpsUTM){
+    const info = designInfo(gpsUTM, s);
+    let l = "📍 Anda: ";
+    l += info.distBoundary==null ? "(paket lama, belum ada data batas desain)"
+       : (info.insideAny ? '<span class="in">DI DALAM area desain</span>'
+                          : `<span class="out">DI LUAR desain — ${fmtDist(info.distBoundary)} dari batas</span>`);
+    if(info.nearestKind) l += ` · terdekat ke <b>${info.nearestKind}</b>: <b>${fmtDist(info.nearestDist)}</b>`;
+    lines.push(l);
+  }
+  if(targetPt){
+    const info = designInfo(targetPt, s);
+    let l = "🎯 Target: ";
+    l += info.distBoundary==null ? "(paket lama, belum ada data batas desain)"
+       : (info.insideAny ? '<span class="in">DI DALAM area desain</span>'
+                          : `<span class="out">DI LUAR desain — ${fmtDist(info.distBoundary)} dari batas</span>`);
+    if(info.nearestKind) l += ` · terdekat ke <b>${info.nearestKind}</b>: <b>${fmtDist(info.nearestDist)}</b>`;
+    lines.push(l);
+  }
+  els.designBadge.innerHTML = lines.join("<br>");
+  els.designBadge.style.display = "block";
 }
 
 /* ---------------- pan / pinch-zoom sentuhan ---------------- */
 (function(){
-  let dragging=false, lastX=0, lastY=0, pinchDist=0, pinchScale=1;
+  let dragging=false, lastX=0, lastY=0, downX=0, downY=0, moved=false, pinchDist=0, pinchScale=1;
   const cv = els.mapCanvas;
   function pos(e){ const t=e.touches?e.touches[0]:e; const r=cv.getBoundingClientRect();
     return {x:(t.clientX-r.left)*devicePixelRatio, y:(t.clientY-r.top)*devicePixelRatio}; }
-  cv.addEventListener("pointerdown", e=>{ dragging=true; lastX=e.clientX; lastY=e.clientY; cv.setPointerCapture(e.pointerId); });
+  cv.addEventListener("pointerdown", e=>{
+    dragging=true; moved=false; lastX=e.clientX; lastY=e.clientY; downX=e.clientX; downY=e.clientY;
+    cv.setPointerCapture(e.pointerId);
+  });
   cv.addEventListener("pointermove", e=>{
     if(!dragging) return;
+    if(Math.abs(e.clientX-downX)>6 || Math.abs(e.clientY-downY)>6) moved=true;
     view.ox += (e.clientX-lastX)*devicePixelRatio; view.oy += (e.clientY-lastY)*devicePixelRatio;
     lastX=e.clientX; lastY=e.clientY; drawMap();
   });
-  cv.addEventListener("pointerup", ()=>dragging=false);
+  cv.addEventListener("pointerup", e=>{
+    dragging=false;
+    // PERBAIKAN fitur ukur jarak: ketuk singkat (bukan geser peta) saat mode 📏 aktif -> taruh/
+    // geser target ke titik yg diketuk, langsung terlihat jaraknya ke GPS & ke desain terdekat.
+    if(!moved && measureMode && curSeg()){
+      const p = pos(e);
+      targetPt = pxToWorld(p.x, p.y);
+      drawMap();
+    }
+  });
   cv.addEventListener("pointercancel", ()=>dragging=false);
   cv.addEventListener("wheel", e=>{
     e.preventDefault();
@@ -6029,6 +6234,57 @@ function drawMap(){
 document.getElementById("zoomIn").onclick = ()=>{ view.scale*=1.3; drawMap(); };
 document.getElementById("zoomOut").onclick = ()=>{ view.scale*=0.77; drawMap(); };
 document.getElementById("fitBtn").onclick = fitToSeg;
+
+/* ---------------- "Pusatkan ke lokasi saya" & mode ukur jarak ---------------- */
+els.meBtn.onclick = ()=>{
+  if(!gpsUTM){ startGPS(); return; }
+  const w = els.mapCanvas.width, h = els.mapCanvas.height;
+  if(view.scale < 2) view.scale = 2;   // kalau belum pernah zoom/fit, mulai dari skala yg wajar
+  view.ox = w/2 - gpsUTM.x*view.scale;
+  view.oy = h/2 + gpsUTM.y*view.scale;
+  drawMap();
+};
+els.measureBtn.onclick = ()=>{
+  measureMode = !measureMode;
+  els.measureBtn.classList.toggle("on", measureMode);
+};
+
+/* ---------------- plot koordinat manual (Lat/Lon atau UTM) dari tab Info/Data ---------------- */
+const COORD_PLACEHOLDERS = {
+  latlon: ["Lat  (mis. -2.123456)", "Lon  (mis. 113.987654)"],
+  utm: ["UTM X / Timur (meter)", "UTM Y / Utara (meter)"],
+};
+els.coordFormat.addEventListener("change", ()=>{
+  const [ph1, ph2] = COORD_PLACEHOLDERS[els.coordFormat.value];
+  els.coordInput1.placeholder = ph1; els.coordInput2.placeholder = ph2;
+});
+els.plotCoordBtn.onclick = ()=>{
+  if(!curSeg()){ els.coordStatus.textContent = "Muat data proyek dulu di tab ini."; els.coordStatus.className = "status err"; return; }
+  const v1 = parseFloat(els.coordInput1.value), v2 = parseFloat(els.coordInput2.value);
+  if(!isFinite(v1) || !isFinite(v2)){
+    els.coordStatus.textContent = "Isi kedua kolom koordinat dgn angka yg valid.";
+    els.coordStatus.className = "status err"; return;
+  }
+  if(els.coordFormat.value === "latlon"){
+    const {zone, south} = projZoneSouth();
+    targetPt = latLonToUTM(v1, v2, zone, south);
+  } else {
+    targetPt = {x: v1, y: v2};
+  }
+  els.coordStatus.textContent = `Target diplot di E ${targetPt.x.toFixed(1)} / N ${targetPt.y.toFixed(1)}.`;
+  els.coordStatus.className = "status ok";
+  document.querySelectorAll("nav button")[0].click();  // pindah ke tab Peta supaya langsung terlihat
+  const w = els.mapCanvas.width, h = els.mapCanvas.height;
+  if(view.scale < 2) view.scale = 2;
+  view.ox = w/2 - targetPt.x*view.scale;
+  view.oy = h/2 + targetPt.y*view.scale;
+  drawMap();
+};
+els.clearTargetBtn.onclick = ()=>{
+  targetPt = null; els.coordInput1.value = ""; els.coordInput2.value = "";
+  els.coordStatus.textContent = "Target dihapus."; els.coordStatus.className = "status";
+  drawMap();
+};
 
 /* ============================ GPS ============================ */
 let gpsWatchId = null;
@@ -6233,6 +6489,10 @@ function sampleData(){
                 {key:"sediment_points",type:"points",label:"● Titik sedimentasi tinggi (contoh)",color:"#2b7fff"}],
         critical_points:[{x:500150,y:9500085},{x:500210,y:9500060}],
         sediment_points:[{x:500090,y:9500110},{x:500170,y:9500040},{x:500240,y:9500095}],
+        // contoh boundary_points (poligon desain, vektor) -- dipakai fitur "jarak ke desain":
+        // ketuk peta / aktifkan GPS lalu lihat badge di atas peta.
+        boundary_points:[[{x:500040,y:9500020},{x:500260,y:9500010},{x:500280,y:9500150},
+                           {x:500060,y:9500160},{x:500040,y:9500020}]],
         cross_sections:[
           { name:"XS-1 (contoh)", points:[
             {d:-30,z:65},{d:12,z:65},{d:20,z:61.7},{d:26,z:62.2},{d:35,z:58},{d:40,z:58.3},
@@ -13044,6 +13304,29 @@ with tab1:
                         key=f"show_sat_overlay_{sid}",
                     )
                     if show_sat_overlay:
+                        # PERBAIKAN "background Mini Avenza tidak mencakup seluruh area": sebelumnya
+                        # citra satelit yg diambil cuma dipepet 6% dari batas DXF, jadi begitu user di
+                        # lapangan geser peta sedikit keluar boundary, layarnya gelap tak ada citra.
+                        # Slider ini menentukan seberapa jauh citra satelit online (Esri World Imagery,
+                        # basis GIS asli, geo-referenced UTM) ditarik keluar dari boundary desain --
+                        # makin besar makin luas area yg "ke-cover" saat dipakai offline di HP, dgn
+                        # trade-off resolusi per pixel sedikit lebih kasar utk area yg sama.
+                        _sat_pad_pct = st.slider(
+                            _t("Perluasan citra satelit di sekitar desain (%)",
+                               "Satellite image padding around the design (%)"),
+                            min_value=6, max_value=300, value=60, step=2,
+                            key=f"sat_pad_pct_{sid}",
+                            help=_t(
+                                "Menentukan seberapa luas area DI LUAR boundary desain yang ikut "
+                                "terekam sbg citra satelit latar -- supaya saat dipakai offline di "
+                                "Mini Avenza lapangan, background peta tetap ada meski posisi Anda "
+                                "agak jauh dari desain, tidak langsung gelap begitu keluar boundary.",
+                                "Sets how much area OUTSIDE the design boundary is captured as the "
+                                "satellite background -- so the offline Mini Avenza field viewer "
+                                "still shows a basemap even when you are a bit outside the design, "
+                                "instead of going dark right at the boundary.",
+                            ),
+                        )
                         with st.spinner(f"[{seg_label}] Transformasi koordinat Lokal -> UTM & mengambil citra satelit..."):
                             utm_x_all, utm_y_all = _lokal_to_utm_xy(x_all, y_all)
                             utm_extent_bbox = (
@@ -13051,14 +13334,19 @@ with tab1:
                                 float(np.nanmin(utm_y_all)), float(np.nanmax(utm_y_all)),
                             )
 
-                            # cache per-segmen supaya tidak fetch ulang tiap rerun kalau extent-nya sama
+                            # cache per-segmen supaya tidak fetch ulang tiap rerun kalau extent/pad-nya sama
                             _sat_cache_key = f"sat_basemap_{sid}"
-                            _sat_sig = tuple(round(v, 1) for v in utm_extent_bbox)
+                            _sat_sig = tuple(round(v, 1) for v in utm_extent_bbox) + (_sat_pad_pct,)
                             _cached_sat = st.session_state.get(_sat_cache_key)
                             if _cached_sat is not None and _cached_sat.get("sig") == _sat_sig:
                                 utm_satellite_data = _cached_sat.get("data")
                             else:
-                                utm_satellite_data = _fetch_satellite_basemap_utm(utm_extent_bbox)
+                                # out_size ikut dinaikkan mengikuti padding, supaya resolusi per meter
+                                # di sekitar desain tidak jadi terlalu kasar saat area yg dicover melebar.
+                                _sat_out_size = int(np.clip(1024 * (1 + _sat_pad_pct / 200.0), 1024, 2048))
+                                utm_satellite_data = _fetch_satellite_basemap_utm(
+                                    utm_extent_bbox, out_size=_sat_out_size, pad_frac=_sat_pad_pct / 100.0
+                                )
                                 st.session_state[_sat_cache_key] = {"sig": _sat_sig, "data": utm_satellite_data}
 
                             utm_contours = _contours_lokal_to_utm(contours)
