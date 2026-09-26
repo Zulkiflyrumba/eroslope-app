@@ -4952,14 +4952,29 @@ def _rep_method_paragraphs(F):
     return P
 
 
+def _safe_short(text, max_len=28):
+    """Potong teks yang berpotensi sangat panjang (label segmen custom, nama material
+    custom, dll.) sebelum masuk ke kolom tabel PDF yang sempit -- PERBAIKAN untuk bug
+    'Gagal membuat laporan: Flowable Table ... too large on page' yang muncul saat
+    salah satu isi sel (mis. label segmen atau nama material) ternyata jauh lebih
+    panjang dari perkiraan, sehingga Paragraph di sel itu ter-wrap jadi puluhan baris
+    dan tingginya melebihi 1 halaman penuh. Tabel-tabel sempit (banyak kolom, seperti
+    'DATA MASUKAN PER SEGMEN' dan 'Ringkasan Perbandingan Antar Segmen') memanggil ini
+    supaya SATU sel nakal tidak pernah bisa meledakkan tinggi seluruh tabel."""
+    s = str(text)
+    return s if len(s) <= max_len else s[:max_len - 1].rstrip() + "…"
+
+
 def _rep_input_rows(segs):
     rows = [["Segmen", "Metode", "Luas (Ha)", "D50 (mm)", "tau_c (Pa)", "M", "C limpasan", "Faktor hujan", "Cover"]]
     for sid, s in segs.items():
         ci = s.get("cover_info")
-        rows.append([s.get("label", sid), str(s.get("analysis_method", "-")).replace(" Diagram", ""), f"{float(s.get('boundary_area_ha', 0) or 0):.2f}",
+        rows.append([_safe_short(s.get("label", sid), 22),
+                     _safe_short(str(s.get("analysis_method", "-")).replace(" Diagram", ""), 20),
+                     f"{float(s.get('boundary_area_ha', 0) or 0):.2f}",
                      f"{float(s.get('grain_size_mm', 0) or 0):.3f}", f"{float(s.get('tau_critical', 0) or 0):.2f}", f"{float(s.get('erodibility_M', 0) or 0):.3f}",
                      f"{float(s.get('runoff_c_base', 0) or 0):.2f}" if s.get("runoff_c_base") else "-", f"{float(s.get('rain_factor', 1) or 1):.2f}x",
-                     (ci.get("material") if ci else "-")])
+                     _safe_short(ci.get("material") if ci else "-", 16)])
     return rows
 
 
@@ -15162,7 +15177,7 @@ with tab1:
                                 elif sid in _low_priority_skip:
                                     _label_disp += " (ringkas — risiko rendah, lihat catatan)"
                                 summary_rows.append([
-                                    _label_disp, seg["analysis_method"],
+                                    _safe_short(_label_disp, 34), _safe_short(seg["analysis_method"], 22),
                                     f"{seg['erosion_area']:.2f}", f"{seg['sedimentation_area']:.2f}",
                                     f"{seg['max_zone']:.2f}", level_name
                                 ])
