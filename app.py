@@ -131,7 +131,7 @@ def _load_user_db():
             "password_hash": _hash_password("Latihan123", default_salt),
         },
         "avenza": {
-            "name": "Mini Avenza (Field Viewer)",
+            "name": "Eromaps (Field Viewer)",
             "role": "avenza",
             "salt": default_salt,
             "password_hash": _hash_password("avenza123", default_salt),
@@ -1602,20 +1602,9 @@ def _field_package_build(seg_results, active_sid, xs_draw_lines):
         layers, critical_pts, sediment_pts, (uxmin, uxmax, uymin, uymax), boundary_rings = _field_composite_layers(
             gx, gy, zone_map, sediment_map, boundary, satellite_basemap, inside)
         bounds = {"xmin": uxmin, "xmax": uxmax, "ymin": uymin, "ymax": uymax}
-        cross_sections = []
-        if sid == active_sid and xs_draw_lines:
-            _tin = None
-            if all(s.get(_k) is not None for _k in ("tin_x", "tin_y", "tin_z")):
-                _tin = (s["tin_x"], s["tin_y"], s["tin_z"])
-            for _name, _verts in xs_draw_lines.items():
-                try:
-                    _prof = _xs_sample_profile(list(_verts), gx, gy, gz, {}, tin_xyz=_tin)
-                    _pts = [{"d": float(d), "z": float(z)} for d, z in
-                             zip(_prof["distance"], _prof["elevation"]) if np.isfinite(z)]
-                    if len(_pts) >= 2:
-                        cross_sections.append({"name": _name, "points": _pts})
-                except Exception:
-                    continue
+        # NB: fitur cross section sudah DIHAPUS dari Eromaps (field viewer) atas permintaan --
+        # jadi paket data ini sengaja tidak lagi menyertakan "cross_sections" (parameter xs_draw_lines
+        # di atas jadi tidak terpakai lagi, dibiarkan saja di signature supaya pemanggilnya tak perlu diubah).
         # legend: tiap baris punya "key" yg cocok dgn nama layer PNG (type "layer") atau daftar titik
         # vektor (type "points") -- inilah yg dipakai viewer utk toggle tampil/sembunyi per kategori.
         # "base"/"boundary" SENGAJA tidak dimasukkan ke legenda (selalu tampil, bukan simbol yg
@@ -1627,12 +1616,12 @@ def _field_package_build(seg_results, active_sid, xs_draw_lines):
                 if _key in layers:
                     legend.append({"key": _key, "type": "layer", "label": _lbl, "color": _color})
             if critical_pts:
-                legend.append({"key": "critical_points", "type": "points", "label": "✕ Titik erosi kritis", "color": "#8a0000"})
+                legend.append({"key": "critical_points", "type": "points", "label": "Titik erosi kritis", "color": "#8a0000"})
         if sediment_map is not None:
             if sediment_pts:
-                legend.append({"key": "sediment_points", "type": "points", "label": "● Titik potensi sedimentasi tinggi", "color": "#2b7fff"})
+                legend.append({"key": "sediment_points", "type": "points", "label": "Titik potensi sedimentasi tinggi", "color": "#2b7fff"})
             if "sediment_line" in layers:
-                legend.append({"key": "sediment_line", "type": "layer", "label": "-- Batas potensi sedimentasi (>0.7)", "color": "#2b7fff"})
+                legend.append({"key": "sediment_line", "type": "layer", "label": "Batas potensi sedimentasi (>0.7)", "color": "#2b7fff"})
         segments.append({
             "id": sid, "label": s.get("label", sid), "layers": layers, "bounds_utm": bounds,
             "legend": legend,
@@ -1641,7 +1630,6 @@ def _field_package_build(seg_results, active_sid, xs_draw_lines):
             "boundary_points": boundary_rings,
             "has_satellite": satellite_basemap is not None,
             "coord_note": "utm_true",
-            "cross_sections": cross_sections,
         })
     _epsg = _COORD_UTM_EPSG if "_COORD_UTM_EPSG" in globals() else "EPSG:32750"
     _code = int(_epsg.split(":")[1])
@@ -5594,7 +5582,7 @@ _MINI_AVENZA_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-<title>Erosion Field Viewer</title>
+<title>Eromaps — Erosion Field Viewer</title>
 <style>
   :root{
     --bg:#00151a; --bg2:#02111d; --panel:#0a1f24; --panel2:#0e262c;
@@ -5619,8 +5607,8 @@ _MINI_AVENZA_HTML = """<!DOCTYPE html>
   .iconbtn{width:38px; height:38px; padding:0; display:flex; align-items:center; justify-content:center; font-size:17px;}
 
   main{flex:1 1 auto; position:relative; overflow:hidden; background:#001014;}
-  #mapView, #xsView, #infoView{position:absolute; inset:0; display:none;}
-  #mapView.active, #xsView.active, #infoView.active{display:block;}
+  #mapView, #infoView{position:absolute; inset:0; display:none;}
+  #mapView.active, #infoView.active{display:block;}
 
   canvas{display:block; touch-action:none;}
 
@@ -5641,13 +5629,14 @@ _MINI_AVENZA_HTML = """<!DOCTYPE html>
   .designbadge .in{color:var(--green); font-weight:650;}
   .designbadge .out{color:var(--orange); font-weight:650;}
 
-  .legend{position:absolute; left:10px; bottom:92px; right:60px; display:none;}
+  .legend{position:absolute; left:60px; bottom:92px; right:60px; display:none;}
   .legend .row{display:flex; align-items:center; gap:8px; background:rgba(10,31,36,0.85); border:1px solid var(--line);
     border-radius:9px; padding:6px 10px; font-size:11.5px; margin-bottom:0; cursor:pointer; user-select:none;
     transition:opacity .15s;}
   .legend .row:active{opacity:0.7;}
   .legend .row.off{opacity:0.4; text-decoration:line-through;}
   .sw{width:12px; height:12px; border-radius:3px; flex:0 0 auto;}
+  .legend .row[data-type="points"] .sw{border-radius:50%;}
 
   nav{flex:0 0 auto; display:flex; background:var(--bg2); border-top:1px solid var(--line);}
   nav button{flex:1; background:transparent; border:none; border-radius:0; padding:10px 4px 8px;
@@ -5664,8 +5653,6 @@ _MINI_AVENZA_HTML = """<!DOCTYPE html>
   .drop b{color:var(--txt);}
   input[type=file]{display:none;}
   .rowbtns{display:flex; gap:8px; margin-top:10px; flex-wrap:wrap;}
-  .xschart{position:absolute; inset:0; padding:14px; padding-bottom:8px;}
-  .xspicker{position:absolute; left:10px; top:10px; right:10px;}
   .status{font-size:11.5px; color:var(--sub); margin-top:8px;}
   .status.ok{color:var(--green);}
   .status.err{color:var(--red);}
@@ -5702,18 +5689,6 @@ _MINI_AVENZA_HTML = """<!DOCTYPE html>
       <div class="legend" id="legendBox"></div>
       <div class="empty" id="mapEmpty" style="display:none;">
         Belum ada data proyek dimuat.<br>Buka tab <b>Info / Data</b> untuk memuat file proyek (.json).
-      </div>
-    </div>
-
-    <div id="xsView">
-      <div class="xspicker">
-        <select id="xsSelect" style="width:100%;"></select>
-      </div>
-      <div class="xschart">
-        <svg id="xsSvg" width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none"></svg>
-      </div>
-      <div class="empty" id="xsEmpty" style="display:none;">
-        Segmen ini belum punya data cross section.
       </div>
     </div>
 
@@ -5783,7 +5758,6 @@ _MINI_AVENZA_HTML = """<!DOCTYPE html>
 
   <nav>
     <button class="active" data-view="mapView"><span class="ic">🗺️</span>Peta</button>
-    <button data-view="xsView"><span class="ic">📈</span>Cross Section</button>
     <button data-view="infoView"><span class="ic">ℹ️</span>Info / Data</button>
   </nav>
 
@@ -5813,14 +5787,15 @@ _MINI_AVENZA_HTML = """<!DOCTYPE html>
         // "key"+"type" dipakai viewer utk tombol toggle tampil/sembunyi per baris legenda:
         // type "layer" -> sembunyikan/tampilkan layers[key]; type "points" -> filter titik vektor.
         "legend": [{"key":"zone_3","type":"layer","label":"Merah (Kritis)","color":"#d8483f"},
-                   {"key":"critical_points","type":"points","label":"✕ Titik erosi kritis","color":"#8a0000"}, ...],
+                   {"key":"critical_points","type":"points","label":"Titik erosi kritis","color":"#8a0000"}, ...],
         "critical_points": [{"x":..,"y":..}, ...],   // titik VEKTOR (bukan raster) -- tajam di zoom apa pun
         "sediment_points": [{"x":..,"y":..}, ...],
-        "boundary_points": [[{"x":..,"y":..}, ...], ...],  // poligon desain (per ring), dipakai fitur
+        "boundary_points": [[{"x":..,"y":..}, ...], ...]   // poligon desain (per ring), dipakai fitur
                                                              // "jarak ke desain" (📍/🎯 badge) -- paket
                                                              // lama tanpa field ini masih jalan, cuma
                                                              // info jarak-ke-batas tidak ditampilkan.
-        "cross_sections": [{"name":"XS-1","points":[{"d":0,"z":65.2}, ...]}]
+        // (fitur "cross_sections" sudah DIHAPUS dari Eromaps -- field lama di paket .json lama
+        // diabaikan begitu saja kalau masih ada, tidak masalah)
      }]
    }
    ===================================================================== */
@@ -5991,9 +5966,6 @@ const els = {
   coordStatus: document.getElementById("coordStatus"),
   legendBox: document.getElementById("legendBox"),
   mapEmpty: document.getElementById("mapEmpty"),
-  xsSelect: document.getElementById("xsSelect"),
-  xsSvg: document.getElementById("xsSvg"),
-  xsEmpty: document.getElementById("xsEmpty"),
   fileInput: document.getElementById("fileInput"),
   loadStatus: document.getElementById("loadStatus"),
   dataInfo: document.getElementById("dataInfo"),
@@ -6309,7 +6281,7 @@ function startGPS(){
   if(problem){
     els.gpsBadge.textContent = "⚠️ GPS tidak bisa diaktifkan";
     setStatus(problem, "err");
-    document.querySelectorAll("nav button")[2].click(); // pindah ke tab Info/Data supaya pesan kelihatan
+    document.querySelectorAll("nav button")[1].click(); // pindah ke tab Info/Data supaya pesan kelihatan
     return;
   }
   els.gpsBadge.textContent = "GPS: meminta izin…";
@@ -6344,7 +6316,6 @@ function onSegChange(){
   const s = curSeg();
   els.segTitle.textContent = s ? s.label : "Erosion Field Viewer";
   renderLegend();
-  renderXsSelect();
   fitToSeg();
 }
 
@@ -6356,6 +6327,7 @@ function renderLegend(){
   s.legend.forEach(l=>{
     const row=document.createElement("div");
     row.className = "row" + (l.key && hiddenKeys.has(l.key) ? " off" : "");
+    row.dataset.type = l.type || "";
     row.innerHTML = `<span class="sw" style="background:${l.color}"></span>${l.label}`;
     if(l.key){
       // klik baris legenda -> toggle tampil/sembunyi kategori itu di peta (klik lagi -> tampil lagi)
@@ -6372,51 +6344,6 @@ function renderLegend(){
   });
 }
 
-/* ============================ Cross section ============================ */
-function renderXsSelect(){
-  const s = curSeg();
-  els.xsSelect.innerHTML = "";
-  const list = s?.cross_sections || [];
-  list.forEach((xs,i)=>{
-    const o=document.createElement("option"); o.value=i; o.textContent=xs.name; els.xsSelect.appendChild(o);
-  });
-  els.xsEmpty.style.display = list.length ? "none" : "flex";
-  drawXs();
-}
-els.xsSelect.onchange = drawXs;
-
-function drawXs(){
-  const s = curSeg(); const list = s?.cross_sections || [];
-  const i = +els.xsSelect.value || 0;
-  const xs = list[i];
-  els.xsSvg.innerHTML = "";
-  if(!xs || !xs.points || !xs.points.length) return;
-  const pts = xs.points;
-  const dMin=Math.min(...pts.map(p=>p.d)), dMax=Math.max(...pts.map(p=>p.d));
-  const zMin=Math.min(...pts.map(p=>p.z)), zMax=Math.max(...pts.map(p=>p.z));
-  const padZ=(zMax-zMin)*0.12 || 1;
-  const X0=6,X1=98,Y0=8,Y1=92;
-  const sx = d => X0 + (d-dMin)/((dMax-dMin)||1)*(X1-X0);
-  const sy = z => Y1 - (z-(zMin-padZ))/(((zMax+padZ)-(zMin-padZ))||1)*(Y1-Y0);
-  const path = pts.map((p,idx)=> (idx===0?"M":"L") + sx(p.d).toFixed(2) + " " + sy(p.z).toFixed(2)).join(" ");
-  const areaPath = path + ` L ${sx(pts[pts.length-1].d).toFixed(2)} ${Y1} L ${sx(pts[0].d).toFixed(2)} ${Y1} Z`;
-  const ns = "http://www.w3.org/2000/svg";
-  const mkEl = (tag, attrs) => { const e=document.createElementNS(ns,tag); for(const k in attrs) e.setAttribute(k,attrs[k]); return e; };
-  els.xsSvg.setAttribute("viewBox","0 0 100 100");
-  els.xsSvg.appendChild(mkEl("path",{d:areaPath, fill:"rgba(23,140,156,0.22)", stroke:"none"}));
-  els.xsSvg.appendChild(mkEl("path",{d:path, fill:"none", stroke:"#3DBF8C", "stroke-width":"0.9", "vector-effect":"non-scaling-stroke"}));
-  // sumbu sederhana
-  els.xsSvg.appendChild(mkEl("line",{x1:X0,y1:Y1,x2:X1,y2:Y1, stroke:"rgba(255,255,255,0.25)", "stroke-width":"0.3"}));
-  [zMin, (zMin+zMax)/2, zMax].forEach(z=>{
-    const t = mkEl("text", {x:1, y:sy(z), "font-size":"3.2", fill:"#9fb8b3"});
-    t.textContent = z.toFixed(1); els.xsSvg.appendChild(t);
-  });
-  const lastP = pts[pts.length-1];
-  const t2 = mkEl("text", {x:X1-6, y:Y0+4, "font-size":"3.2", fill:"#9fb8b3"});
-  t2.textContent = `jarak: 0–${lastP.d.toFixed(0)} m`;
-  els.xsSvg.appendChild(t2);
-}
-
 /* ============================ Navigasi bawah ============================ */
 document.querySelectorAll("nav button").forEach(btn=>{
   btn.onclick = ()=>{
@@ -6425,7 +6352,6 @@ document.querySelectorAll("nav button").forEach(btn=>{
     document.querySelectorAll("main > div").forEach(v=>v.classList.remove("active"));
     document.getElementById(btn.dataset.view).classList.add("active");
     if(btn.dataset.view==="mapView") resizeCanvas();
-    if(btn.dataset.view==="xsView") drawXs();
   };
 });
 
@@ -6439,8 +6365,7 @@ function applyPackage(pkg, persist){
   PKG = pkg; curSegIdx = 0;
   renderSegSelect(); onSegChange();
   const nSeg = pkg.segments?.length||0;
-  const nXs = (pkg.segments||[]).reduce((a,s)=>a+(s.cross_sections?.length||0),0);
-  els.dataInfo.textContent = `${nSeg} segmen, ${nXs} cross section dimuat.` +
+  els.dataInfo.textContent = `${nSeg} segmen dimuat.` +
     (pkg.generated_at ? ` Diekspor: ${pkg.generated_at}.` : "");
   if(persist) idbSet("last_package", pkg);
 }
@@ -6485,20 +6410,14 @@ function sampleData(){
         // "sediment_points" DIBERI titik contoh supaya fitur toggle-nya tetap bisa dicoba dari sini.
         legend:[{label:"Hijau (Normal)",color:"#3DBF8C"},{label:"Kuning (Waspada)",color:"#D3D95C"},
                 {label:"Oranye (Siaga)",color:"#e08a2b"},{label:"Merah (Kritis)",color:"#d8483f"},
-                {key:"critical_points",type:"points",label:"✕ Titik erosi kritis (contoh)",color:"#8a0000"},
-                {key:"sediment_points",type:"points",label:"● Titik sedimentasi tinggi (contoh)",color:"#2b7fff"}],
+                {key:"critical_points",type:"points",label:"Titik erosi kritis (contoh)",color:"#8a0000"},
+                {key:"sediment_points",type:"points",label:"Titik sedimentasi tinggi (contoh)",color:"#2b7fff"}],
         critical_points:[{x:500150,y:9500085},{x:500210,y:9500060}],
         sediment_points:[{x:500090,y:9500110},{x:500170,y:9500040},{x:500240,y:9500095}],
         // contoh boundary_points (poligon desain, vektor) -- dipakai fitur "jarak ke desain":
         // ketuk peta / aktifkan GPS lalu lihat badge di atas peta.
         boundary_points:[[{x:500040,y:9500020},{x:500260,y:9500010},{x:500280,y:9500150},
-                           {x:500060,y:9500160},{x:500040,y:9500020}]],
-        cross_sections:[
-          { name:"XS-1 (contoh)", points:[
-            {d:-30,z:65},{d:12,z:65},{d:20,z:61.7},{d:26,z:62.2},{d:35,z:58},{d:40,z:58.3},
-            {d:47,z:54},{d:54,z:54},{d:62,z:58.2},{d:67,z:58.7},{d:80,z:62.7},{d:88,z:63.7},{d:120,z:64}
-          ]}
-        ]
+                           {x:500060,y:9500160},{x:500040,y:9500020}]]
       }
     ]
   };
@@ -6531,7 +6450,7 @@ def _render_mini_avenza_page():
     tidak didukung Geolocation API)."""
     _c1, _c2 = st.columns([5, 1])
     with _c1:
-        st.markdown("### 🗺️ Mini Avenza — Erosion Field Viewer")
+        st.markdown("### 🗺️ Eromaps — Erosion Field Viewer")
     with _c2:
         if st.button("Logout", key="avenza_logout_btn", width="stretch"):
             st.session_state["authenticated"] = False
@@ -6557,8 +6476,8 @@ def _render_mini_avenza_page():
             _components_avenza.html(_MINI_AVENZA_HTML, height=880, scrolling=False)
     except Exception as _e_avenza_render:
         st.error(_t(
-            f"Gagal menampilkan Mini Avenza: {_e_avenza_render}",
-            f"Failed to display Mini Avenza: {_e_avenza_render}",
+            f"Gagal menampilkan Eromaps: {_e_avenza_render}",
+            f"Failed to display Eromaps: {_e_avenza_render}",
         ))
     st.stop()
 
