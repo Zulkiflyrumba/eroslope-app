@@ -1455,18 +1455,23 @@ def _field_lokal_to_utm(x_local, y_local):
     return E, N
 
 
-def _field_composite_png(grid_x, grid_y, zone_map, sediment_map, boundary, satellite_basemap, inside):
-    """PNG (base64) untuk 1 segmen di Erosion Field Viewer.
+def _field_savefig_datauri(fig, transparent=True):
+    buf = _io_mod.BytesIO()
+    fig.savefig(buf, format="png", transparent=transparent)
+    _plt.close(fig)
+    return "data:image/png;base64," + _b64_mod.b64encode(buf.getvalue()).decode("ascii")
 
-    PENTING: grid_x/grid_y di app ini adalah koordinat "Lokal" DXF (berotasi thd Utara asli), BUKAN
-    UTM langsung. Supaya sejajar dengan citra satelit (yang selalu "north-up"/UTM asli) dan posisi
-    GPS HP (yang juga UTM asli), semua digambar pakai pcolormesh/contour dengan koordinat (X,Y) hasil
-    _field_lokal_to_utm(grid_x, grid_y) -- BUKAN imshow+extent kotak lurus. pcolormesh/contour bisa
-    menggambar grid yang berotasi/tidak axis-aligned dengan benar, imshow tidak bisa (itu penyebab
-    hasil sebelumnya menyilang/berantakan). Layer: citra satelit (kalau ada) -> warna risiko TARP ->
-    kontur batas sedimentasi -> titik erosi kritis / sedimentasi tinggi -> garis boundary DXF."""
+
+def _field_composite_layers(grid_x, grid_y, zone_map, sediment_map, boundary, satellite_basemap, inside):
+    """Susun peta risiko utk Mini Avenza sbg BEBERAPA LAYER PNG TRANSPARAN TERPISAH (bukan 1 gambar
+    gepeng spt sebelumnya) + titik kritis/sedimentasi sbg data VEKTOR (bukan digambar ke raster) --
+    supaya tiap kategori di legenda viewer bisa ditampilkan/disembunyikan sendiri2 (mis. sembunyikan
+    kelas 'Merah (Kritis)' saja saat banyak simbol/warna saling menumpuk di satu area), tanpa perlu
+    render ulang gambar apa pun -- viewer offline tinggal tampilkan/sembunyikan layer & filter titik.
+    'base' (citra satelit/latar) dan 'boundary' (garis batas DXF) SELALU tampil, tidak ada di legenda
+    (bukan "simbol" yg perlu ditoggle, tapi konteks orientasi peta)."""
     import matplotlib.pyplot as _plt
-    from matplotlib.colors import ListedColormap, BoundaryNorm
+    from matplotlib.colors import ListedColormap
     from scipy import ndimage as _ndi
 
     _gx, _gy = np.asarray(grid_x, float), np.asarray(grid_y, float)
@@ -1478,80 +1483,94 @@ def _field_composite_png(grid_x, grid_y, zone_map, sediment_map, boundary, satel
         sxmin, sxmax, symin, symax = satellite_basemap["extent"]
         xmin, xmax = min(xmin, sxmin), max(xmax, sxmax)
         ymin, ymax = min(ymin, symin), max(ymax, symax)
-
     aspect_hw = (ymax - ymin) / max(xmax - xmin, 1e-6)
-    fig = _plt.figure(figsize=(7, max(7 * aspect_hw, 3)), dpi=120)
-    ax = fig.add_axes([0, 0, 1, 1]); ax.axis("off")
-    ax.set_xlim(xmin, xmax); ax.set_ylim(ymin, ymax)
 
+    def _new_ax():
+        fig = _plt.figure(figsize=(7, max(7 * aspect_hw, 3)), dpi=120)
+        ax = fig.add_axes([0, 0, 1, 1]); ax.axis("off")
+        ax.set_xlim(xmin, xmax); ax.set_ylim(ymin, ymax)
+        return fig, ax
+
+    layers = {}
+
+    # ---- base: citra satelit (kalau ada) -- SELALU tampil ----
+    fig, ax = _new_ax()
     if satellite_basemap is not None and satellite_basemap.get("rgb") is not None:
         ax.imshow(satellite_basemap["rgb"], extent=satellite_basemap.get("extent"),
-                  origin="upper", aspect="auto", zorder=1)
+                  origin="upper", aspect="auto")
         _overlay_alpha = 0.55
     else:
         ax.set_facecolor("#0a1f24")
         _overlay_alpha = 0.9
+    layers["base"] = _field_savefig_datauri(fig, transparent=False)
 
+    # ---- zona risiko TARP: 1 PNG transparan TERPISAH per kelas warna -> tiap kelas bisa ditoggle
+    # sendiri2 dari legenda (mis. sembunyikan "Merah (Kritis)" saja) ----
+    critical_points = []
     if zone_map is not None:
         _zm = np.asarray(zone_map, dtype=float)
-        cmap = ListedColormap(["#3DBF8C", "#D3D95C", "#e08a2b", "#d8483f"])
-        norm = BoundaryNorm([0, 0.5, 1.0, 2.0, max(float(np.nanmax(_zm)) + 0.01, 2.5)], cmap.N)
-        ax.pcolormesh(_utm_x, _utm_y, _zm, cmap=cmap, norm=norm, alpha=_overlay_alpha,
-                      shading="auto", zorder=2)
+        _zmax = float(np.nanmax(_zm)) if np.isfinite(np.nanmax(_zm)) else 3.0
+        _classes = [("zone_0", "#3DBF8C", 0.0, 0.5), ("zone_1", "#D3D95C", 0.5, 1.0),
+                    ("zone_2", "#e08a2b", 1.0, 2.0), ("zone_3", "#d8483f", 2.0, max(_zmax + 0.01, 2.5))]
+        for _key, _color, _lo, _hi in _classes:
+            _mask = (_zm >= _lo) & (_zm <= _hi if _key == "zone_3" else _zm < _hi)
+            if not _mask.any():
+                continue
+            fig, ax = _new_ax()
+            _zmc = np.where(_mask, 1.0, np.nan)
+            ax.pcolormesh(_utm_x, _utm_y, _zmc, cmap=ListedColormap([_color]), vmin=0, vmax=1,
+                         alpha=_overlay_alpha, shading="auto")
+            layers[_key] = _field_savefig_datauri(fig, transparent=True)
 
-        # titik pusat area erosi kritis (Merah, zone_map >= 2) -- dikelompokkan per area bersambung
-        # (connected component) di grid ASLI (indeks baris/kolom), lalu posisinya diambil dari sel
-        # utm_x/utm_y terdekat (indeks yang sama) -- konsisten dengan cara app utama mengambil titik
-        # kritis (grid_x[critical_y, critical_x]).
+        # titik pusat area erosi kritis (zone_map >= 2, Oranye+Merah) -- disimpan sbg titik VEKTOR
+        # (bukan digambar ke raster) supaya bisa ditoggle & tetap tajam di zoom berapa pun
         _crit_mask = (_zm >= 2.0)
         if inside is not None:
             _crit_mask &= np.asarray(inside, dtype=bool)
         _lab, _n = _ndi.label(_crit_mask)
         if _n:
-            _centers = _ndi.center_of_mass(_crit_mask, _lab, range(1, _n + 1))
-            for (_cy, _cx) in _centers:
-                _iy, _ix = int(round(_cy)), int(round(_cx))
-                _iy = min(max(_iy, 0), _utm_x.shape[0] - 1)
-                _ix = min(max(_ix, 0), _utm_x.shape[1] - 1)
-                ax.plot(_utm_x[_iy, _ix], _utm_y[_iy, _ix], marker="X", color="#ffffff",
-                        markeredgecolor="#8a0000", markersize=11, markeredgewidth=1.6, zorder=4)
+            for (_cy, _cx) in _ndi.center_of_mass(_crit_mask, _lab, range(1, _n + 1)):
+                _iy = min(max(int(round(_cy)), 0), _utm_x.shape[0] - 1)
+                _ix = min(max(int(round(_cx)), 0), _utm_x.shape[1] - 1)
+                critical_points.append({"x": float(_utm_x[_iy, _ix]), "y": float(_utm_y[_iy, _ix])})
 
+    # ---- sedimentasi: garis ambang batas sbg layer togglable, titik tinggi sbg titik vektor ----
+    sediment_points = []
     if sediment_map is not None:
         _sm = np.asarray(sediment_map, dtype=float)
+        fig, ax = _new_ax()
         try:
-            ax.contour(_utm_x, _utm_y, _sm, levels=[0.7], colors=["#2b7fff"],
-                       linewidths=1.6, linestyles="--", zorder=3)
+            ax.contour(_utm_x, _utm_y, _sm, levels=[0.7], colors=["#2b7fff"], linewidths=1.6, linestyles="--")
         except Exception:
             pass
+        layers["sediment_line"] = _field_savefig_datauri(fig, transparent=True)
+
         _high = np.nan_to_num(_sm, nan=0.0) >= 0.85
         _lab2, _n2 = _ndi.label(_high)
         if _n2:
-            _centers2 = _ndi.center_of_mass(_high, _lab2, range(1, _n2 + 1))
-            for (_cy, _cx) in _centers2:
-                _iy, _ix = int(round(_cy)), int(round(_cx))
-                _iy = min(max(_iy, 0), _utm_x.shape[0] - 1)
-                _ix = min(max(_ix, 0), _utm_x.shape[1] - 1)
-                ax.plot(_utm_x[_iy, _ix], _utm_y[_iy, _ix], marker="o", color="#2b7fff",
-                        markeredgecolor="#ffffff", markersize=9, markeredgewidth=1.3, zorder=4)
+            for (_cy, _cx) in _ndi.center_of_mass(_high, _lab2, range(1, _n2 + 1)):
+                _iy = min(max(int(round(_cy)), 0), _utm_x.shape[0] - 1)
+                _ix = min(max(int(round(_cx)), 0), _utm_x.shape[1] - 1)
+                sediment_points.append({"x": float(_utm_x[_iy, _ix]), "y": float(_utm_y[_iy, _ix])})
 
+    # ---- boundary DXF: SELALU tampil (referensi orientasi), tidak ada di legenda ----
     if boundary is not None:
+        fig, ax = _new_ax()
         try:
             _geoms = list(boundary.geoms) if hasattr(boundary, "geoms") else [boundary]
             for _g in _geoms:
                 _bx, _by = _g.exterior.xy
                 _bE, _bN = _field_lokal_to_utm(np.asarray(_bx), np.asarray(_by))
-                ax.plot(_bE, _bN, color="#ffffff", linewidth=1.4, zorder=5)
+                ax.plot(_bE, _bN, color="#ffffff", linewidth=1.4)
                 for _hole in _g.interiors:
                     _hx, _hy = _hole.xy
                     _hE, _hN = _field_lokal_to_utm(np.asarray(_hx), np.asarray(_hy))
-                    ax.plot(_hE, _hN, color="#ffffff", linewidth=1.0, linestyle=":", zorder=5)
+                    ax.plot(_hE, _hN, color="#ffffff", linewidth=1.0, linestyle=":")
         except Exception:
             pass
+        layers["boundary"] = _field_savefig_datauri(fig, transparent=True)
 
-    buf = _io_mod.BytesIO()
-    fig.savefig(buf, format="png", transparent=(satellite_basemap is None))
-    _plt.close(fig)
-    return "data:image/png;base64," + _b64_mod.b64encode(buf.getvalue()).decode("ascii"), (xmin, xmax, ymin, ymax)
+    return layers, critical_points, sediment_points, (xmin, xmax, ymin, ymax)
 
 
 def _field_package_build(seg_results, active_sid, xs_draw_lines):
@@ -1569,7 +1588,7 @@ def _field_package_build(seg_results, active_sid, xs_draw_lines):
         boundary = s.get("boundary")
         satellite_basemap = s.get("satellite_basemap")
         inside = s.get("inside")
-        png, (uxmin, uxmax, uymin, uymax) = _field_composite_png(
+        layers, critical_pts, sediment_pts, (uxmin, uxmax, uymin, uymax) = _field_composite_layers(
             gx, gy, zone_map, sediment_map, boundary, satellite_basemap, inside)
         bounds = {"xmin": uxmin, "xmax": uxmax, "ymin": uymin, "ymax": uymax}
         cross_sections = []
@@ -1586,19 +1605,28 @@ def _field_package_build(seg_results, active_sid, xs_draw_lines):
                         cross_sections.append({"name": _name, "points": _pts})
                 except Exception:
                     continue
+        # legend: tiap baris punya "key" yg cocok dgn nama layer PNG (type "layer") atau daftar titik
+        # vektor (type "points") -- inilah yg dipakai viewer utk toggle tampil/sembunyi per kategori.
+        # "base"/"boundary" SENGAJA tidak dimasukkan ke legenda (selalu tampil, bukan simbol yg
+        # perlu ditoggle -- lihat catatan di _field_composite_layers).
+        legend = []
+        if zone_map is not None:
+            for _key, _lbl, _color in [("zone_0", "Hijau (Normal)", "#3DBF8C"), ("zone_1", "Kuning (Waspada)", "#D3D95C"),
+                                        ("zone_2", "Oranye (Siaga)", "#e08a2b"), ("zone_3", "Merah (Kritis)", "#d8483f")]:
+                if _key in layers:
+                    legend.append({"key": _key, "type": "layer", "label": _lbl, "color": _color})
+            if critical_pts:
+                legend.append({"key": "critical_points", "type": "points", "label": "✕ Titik erosi kritis", "color": "#8a0000"})
+        if sediment_map is not None:
+            if sediment_pts:
+                legend.append({"key": "sediment_points", "type": "points", "label": "● Titik potensi sedimentasi tinggi", "color": "#2b7fff"})
+            if "sediment_line" in layers:
+                legend.append({"key": "sediment_line", "type": "layer", "label": "-- Batas potensi sedimentasi (>0.7)", "color": "#2b7fff"})
         segments.append({
-            "id": sid, "label": s.get("label", sid), "image": png, "bounds_utm": bounds,
-            "legend": ([
-                {"label": "Hijau (Normal)", "color": "#3DBF8C"},
-                {"label": "Kuning (Waspada)", "color": "#D3D95C"},
-                {"label": "Oranye (Siaga)", "color": "#e08a2b"},
-                {"label": "Merah (Kritis)", "color": "#d8483f"},
-            ] if zone_map is not None else []) + ([
-                {"label": "✕ Titik erosi kritis", "color": "#8a0000"},
-            ] if zone_map is not None else []) + ([
-                {"label": "● Titik potensi sedimentasi tinggi", "color": "#2b7fff"},
-                {"label": "-- Batas potensi sedimentasi (>0.7)", "color": "#2b7fff"},
-            ] if sediment_map is not None else []),
+            "id": sid, "label": s.get("label", sid), "layers": layers, "bounds_utm": bounds,
+            "legend": legend,
+            "critical_points": critical_pts,
+            "sediment_points": sediment_pts,
             "has_satellite": satellite_basemap is not None,
             "coord_note": "utm_true",
             "cross_sections": cross_sections,
@@ -5534,6 +5562,730 @@ if not st.session_state["authenticated"]:
 
     st.stop()
 
+_MINI_AVENZA_HTML = """<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Erosion Field Viewer</title>
+<style>
+  :root{
+    --bg:#00151a; --bg2:#02111d; --panel:#0a1f24; --panel2:#0e262c;
+    --line:rgba(255,255,255,0.12); --txt:#eaf4f2; --sub:#9fb8b3;
+    --teal:#178C9C; --green:#3DBF8C; --yellow:#D3D95C; --orange:#e08a2b; --red:#d8483f;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{height:100%; margin:0; background:var(--bg); color:var(--txt);
+    font:15px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,sans-serif;
+    overscroll-behavior:none;}
+  #app{display:flex; flex-direction:column; height:100%; height:100dvh;
+    padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);}
+
+  header{flex:0 0 auto; padding:10px 14px; background:var(--bg2); border-bottom:1px solid var(--line);
+    display:flex; align-items:center; gap:10px;}
+  header h1{font-size:15px; margin:0; font-weight:650; letter-spacing:.2px; flex:1;}
+  select{background:var(--panel2); color:var(--txt); border:1px solid var(--line); border-radius:8px;
+    padding:7px 10px; font-size:13.5px; max-width:44vw;}
+  button{background:var(--panel2); color:var(--txt); border:1px solid var(--line); border-radius:8px;
+    padding:7px 11px; font-size:13.5px; cursor:pointer;}
+  button:active{background:var(--teal);}
+  .iconbtn{width:38px; height:38px; padding:0; display:flex; align-items:center; justify-content:center; font-size:17px;}
+
+  main{flex:1 1 auto; position:relative; overflow:hidden; background:#001014;}
+  #mapView, #xsView, #infoView{position:absolute; inset:0; display:none;}
+  #mapView.active, #xsView.active, #infoView.active{display:block;}
+
+  canvas{display:block; touch-action:none;}
+
+  .hud{position:absolute; left:10px; top:10px; right:10px; display:flex; justify-content:space-between;
+    gap:8px; pointer-events:none;}
+  .badge{pointer-events:auto; background:rgba(10,31,36,0.85); border:1px solid var(--line); border-radius:9px;
+    padding:6px 10px; font-size:12px; color:var(--sub);}
+  .badge b{color:var(--txt); font-weight:650;}
+  .zoomctl{position:absolute; right:10px; bottom:92px; display:flex; flex-direction:column; gap:6px;}
+  .zoomctl button{width:40px; height:40px; font-size:19px; border-radius:10px;}
+  .fitbtn{position:absolute; left:10px; bottom:92px;}
+
+  .legend{position:absolute; left:10px; bottom:92px; right:60px; display:none;}
+  .legend .row{display:flex; align-items:center; gap:8px; background:rgba(10,31,36,0.85); border:1px solid var(--line);
+    border-radius:9px; padding:6px 10px; font-size:11.5px; margin-bottom:0; cursor:pointer; user-select:none;
+    transition:opacity .15s;}
+  .legend .row:active{opacity:0.7;}
+  .legend .row.off{opacity:0.4; text-decoration:line-through;}
+  .sw{width:12px; height:12px; border-radius:3px; flex:0 0 auto;}
+
+  nav{flex:0 0 auto; display:flex; background:var(--bg2); border-top:1px solid var(--line);}
+  nav button{flex:1; background:transparent; border:none; border-radius:0; padding:10px 4px 8px;
+    font-size:11.5px; color:var(--sub); display:flex; flex-direction:column; align-items:center; gap:3px;}
+  nav button .ic{font-size:19px;}
+  nav button.active{color:var(--teal);}
+
+  .panel{position:absolute; inset:0; overflow:auto; padding:14px; background:var(--bg);}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px; margin-bottom:12px;}
+  .card h3{margin:0 0 8px; font-size:13.5px; color:var(--teal);}
+  .card p{margin:0 0 6px; color:var(--sub); font-size:13px;}
+  .drop{border:1.5px dashed var(--line); border-radius:12px; padding:22px 14px; text-align:center; color:var(--sub);
+    font-size:13px;}
+  .drop b{color:var(--txt);}
+  input[type=file]{display:none;}
+  .rowbtns{display:flex; gap:8px; margin-top:10px; flex-wrap:wrap;}
+  .xschart{position:absolute; inset:0; padding:14px; padding-bottom:8px;}
+  .xspicker{position:absolute; left:10px; top:10px; right:10px;}
+  .status{font-size:11.5px; color:var(--sub); margin-top:8px;}
+  .status.ok{color:var(--green);}
+  .status.err{color:var(--red);}
+  .empty{position:absolute; inset:0; display:flex; align-items:center; justify-content:center; text-align:center;
+    color:var(--sub); font-size:13px; padding:30px;}
+</style>
+</head>
+<body>
+<div id="app">
+
+  <header>
+    <h1 id="segTitle">Erosion Field Viewer</h1>
+    <select id="segSelect"></select>
+  </header>
+
+  <main>
+
+    <div id="mapView" class="active">
+      <canvas id="mapCanvas"></canvas>
+      <div class="hud">
+        <button class="badge" id="gpsBadge" style="cursor:pointer;">📍 Ketuk utk aktifkan GPS</button>
+        <div class="badge" id="coordBadge">—</div>
+      </div>
+      <div class="zoomctl">
+        <button id="zoomIn">+</button>
+        <button id="zoomOut">−</button>
+      </div>
+      <button class="iconbtn fitbtn" id="fitBtn" title="Fit ke area">⤢</button>
+      <div class="legend" id="legendBox"></div>
+      <div class="empty" id="mapEmpty" style="display:none;">
+        Belum ada data proyek dimuat.<br>Buka tab <b>Info / Data</b> untuk memuat file proyek (.json).
+      </div>
+    </div>
+
+    <div id="xsView">
+      <div class="xspicker">
+        <select id="xsSelect" style="width:100%;"></select>
+      </div>
+      <div class="xschart">
+        <svg id="xsSvg" width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none"></svg>
+      </div>
+      <div class="empty" id="xsEmpty" style="display:none;">
+        Segmen ini belum punya data cross section.
+      </div>
+    </div>
+
+    <div id="infoView">
+      <div class="panel">
+
+        <div class="card">
+          <h3>Muat data proyek</h3>
+          <p>Muat file paket lapangan (.json) yang diekspor dari aplikasi Erosion Mapping utama. Sekali dimuat, data
+             tersimpan di HP ini (offline) — tidak perlu sinyal lagi setelahnya.</p>
+          <label class="drop" for="fileInput">
+            <b>Ketuk untuk pilih file .json</b><br>atau tarik &amp; taruh di sini
+          </label>
+          <input type="file" id="fileInput" accept=".json,application/json">
+          <div class="rowbtns">
+            <button id="loadSampleBtn">Muat contoh data</button>
+            <button id="clearDataBtn">Hapus data tersimpan</button>
+          </div>
+          <div class="status" id="loadStatus"></div>
+        </div>
+
+        <div class="card">
+          <h3>Tentang app ini</h3>
+          <p>Satu file HTML mandiri — tidak butuh server, tidak butuh instal dari Play Store/App Store. Setelah
+             dibuka sekali, semua data proyek yang sudah dimuat tersimpan di penyimpanan browser HP (IndexedDB),
+             jadi bisa dibuka lagi tanpa sinyal.</p>
+          <p><b>Cara pasang di HP (Android/Chrome):</b> buka file ini di Chrome → menu titik tiga → "Add to Home
+             screen" / "Tambahkan ke layar utama" — jadi ada ikonnya seperti app biasa.</p>
+          <p><b>Posisi GPS</b> dibaca dari browser (izin lokasi HP), dikonversi ke koordinat UTM proyek secara lokal
+             di HP — tidak mengirim data ke server manapun.</p>
+        </div>
+
+        <div class="card">
+          <h3>Status data</h3>
+          <p id="dataInfo">Belum ada data.</p>
+        </div>
+
+      </div>
+    </div>
+
+  </main>
+
+  <nav>
+    <button class="active" data-view="mapView"><span class="ic">🗺️</span>Peta</button>
+    <button data-view="xsView"><span class="ic">📈</span>Cross Section</button>
+    <button data-view="infoView"><span class="ic">ℹ️</span>Info / Data</button>
+  </nav>
+
+</div>
+
+<script>
+"use strict";
+
+/* =====================================================================
+   SKEMA PAKET DATA (.json) yang dimuat app ini -- lihat catatan di bawah
+   untuk format lengkap yang akan diekspor dari app Erosion Mapping utama.
+   {
+     "epsg": "EPSG:32750",
+     "utm_zone": 50, "utm_south": true,
+     "segments": [{
+        "id": "seg1", "label": "Channel A",
+        "layers": {                                    // PNG transparan terpisah per kategori --
+          "base": "data:image/png;base64,....",         // citra satelit/latar, SELALU tampil
+          "boundary": "data:image/png;base64,....",     // garis batas DXF, SELALU tampil
+          "zone_0": "...", "zone_1": "...",              // tiap kelas TARP layer sendiri2 --
+          "zone_2": "...", "zone_3": "...",              // bisa ditoggle lewat legenda (key cocok)
+          "sediment_line": "..."                         // garis ambang sedimentasi, bisa ditoggle
+        },
+        // format LAMA "image": "data:..." (1 gambar gepeng) masih didukung sbg fallback (semua
+        // digambar sbg layer "base", tidak ada yg bisa ditoggle) -- utk file lama yg sudah tersimpan.
+        "bounds_utm": {"xmin":..,"xmax":..,"ymin":..,"ymax":..},
+        // "key"+"type" dipakai viewer utk tombol toggle tampil/sembunyi per baris legenda:
+        // type "layer" -> sembunyikan/tampilkan layers[key]; type "points" -> filter titik vektor.
+        "legend": [{"key":"zone_3","type":"layer","label":"Merah (Kritis)","color":"#d8483f"},
+                   {"key":"critical_points","type":"points","label":"✕ Titik erosi kritis","color":"#8a0000"}, ...],
+        "critical_points": [{"x":..,"y":..}, ...],   // titik VEKTOR (bukan raster) -- tajam di zoom apa pun
+        "sediment_points": [{"x":..,"y":..}, ...],
+        "cross_sections": [{"name":"XS-1","points":[{"d":0,"z":65.2}, ...]}]
+     }]
+   }
+   ===================================================================== */
+
+const DB_NAME = "erosion_field_viewer";
+const STORE = "kv";
+
+function idbOpen(){
+  return new Promise((res, rej) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(STORE);
+    req.onsuccess = () => res(req.result);
+    req.onerror = () => rej(req.error);
+  });
+}
+async function idbSet(key, val){
+  try{
+    const db = await idbOpen();
+    return new Promise((res, rej) => {
+      const tx = db.transaction(STORE, "readwrite");
+      tx.objectStore(STORE).put(val, key);
+      tx.oncomplete = () => res(true);
+      tx.onerror = () => rej(tx.error);
+    });
+  }catch(e){ console.error(e); return false; }
+}
+async function idbGet(key){
+  try{
+    const db = await idbOpen();
+    return new Promise((res, rej) => {
+      const tx = db.transaction(STORE, "readonly");
+      const r = tx.objectStore(STORE).get(key);
+      r.onsuccess = () => res(r.result || null);
+      r.onerror = () => rej(r.error);
+    });
+  }catch(e){ console.error(e); return null; }
+}
+async function idbDel(key){
+  try{
+    const db = await idbOpen();
+    return new Promise((res) => {
+      const tx = db.transaction(STORE, "readwrite");
+      tx.objectStore(STORE).delete(key);
+      tx.oncomplete = () => res(true);
+    });
+  }catch(e){ return false; }
+}
+
+/* ---------------- konversi lat/lon (WGS84) <-> UTM, tanpa library ------ */
+function latLonToUTM(lat, lon, zone, southHemi){
+  const a = 6378137.0, e = 0.081819191, k0 = 0.9996;
+  const e2 = e*e, ep2 = e2/(1-e2);
+  const latR = lat*Math.PI/180, lonR = lon*Math.PI/180;
+  const lon0 = ((zone-1)*6 - 180 + 3) * Math.PI/180;
+  const N = a/Math.sqrt(1-e2*Math.sin(latR)*Math.sin(latR));
+  const T = Math.tan(latR)*Math.tan(latR);
+  const C = ep2*Math.cos(latR)*Math.cos(latR);
+  const Ad = Math.cos(latR)*(lonR-lon0);
+  const M = a*((1-e2/4-3*e2*e2/64-5*e2*e2*e2/256)*latR
+    -(3*e2/8+3*e2*e2/32+45*e2*e2*e2/1024)*Math.sin(2*latR)
+    +(15*e2*e2/256+45*e2*e2*e2/1024)*Math.sin(4*latR)
+    -(35*e2*e2*e2/3072)*Math.sin(6*latR));
+  let x = k0*N*(Ad+(1-T+C)*Ad**3/6+(5-18*T+T*T+72*C-58*ep2)*Ad**5/120)+500000;
+  let y = k0*(M+N*Math.tan(latR)*(Ad*Ad/2+(5-T+9*C+4*C*C)*Ad**4/24
+    +(61-58*T+T*T+600*C-330*ep2)*Ad**6/720));
+  if(southHemi) y += 10000000;
+  return {x, y};
+}
+
+/* ============================ STATE ============================ */
+let PKG = null;          // paket data yang sedang aktif
+let curSegIdx = 0;
+let view = {ox:0, oy:0, scale:1};   // transform kanvas (world meter -> px)
+let gpsUTM = null, gpsAcc = null;
+
+const els = {
+  mapCanvas: document.getElementById("mapCanvas"),
+  segSelect: document.getElementById("segSelect"),
+  segTitle: document.getElementById("segTitle"),
+  gpsBadge: document.getElementById("gpsBadge"),
+  coordBadge: document.getElementById("coordBadge"),
+  legendBox: document.getElementById("legendBox"),
+  mapEmpty: document.getElementById("mapEmpty"),
+  xsSelect: document.getElementById("xsSelect"),
+  xsSvg: document.getElementById("xsSvg"),
+  xsEmpty: document.getElementById("xsEmpty"),
+  fileInput: document.getElementById("fileInput"),
+  loadStatus: document.getElementById("loadStatus"),
+  dataInfo: document.getElementById("dataInfo"),
+};
+
+const ctx = els.mapCanvas.getContext("2d");
+const imgCache = {};
+// kategori legenda yg disembunyikan (per "key" layer/titik) -- klik baris legenda utk toggle,
+// disimpan lintas ganti segmen supaya preferensi "sembunyikan Merah" mis. tetap konsisten.
+const hiddenKeys = new Set();
+
+function resizeCanvas(){
+  const r = els.mapCanvas.parentElement.getBoundingClientRect();
+  els.mapCanvas.width = r.width * devicePixelRatio;
+  els.mapCanvas.height = r.height * devicePixelRatio;
+  els.mapCanvas.style.width = r.width+"px";
+  els.mapCanvas.style.height = r.height+"px";
+  drawMap();
+}
+window.addEventListener("resize", resizeCanvas);
+
+function curSeg(){ return PKG && PKG.segments ? PKG.segments[curSegIdx] : null; }
+
+function fitToSeg(){
+  const s = curSeg(); if(!s) return;
+  const b = s.bounds_utm;
+  const w = els.mapCanvas.width, h = els.mapCanvas.height;
+  const bw = b.xmax-b.xmin, bh = b.ymax-b.ymin;
+  const pad = 0.92;
+  const sc = Math.min(w/bw, h/bh) * pad;
+  view.scale = sc;
+  view.ox = w/2 - (b.xmin+bw/2)*sc;
+  view.oy = h/2 + (b.ymin+bh/2)*sc;   // y dibalik (utara ke atas)
+  drawMap();
+}
+
+function worldToPx(x, y){
+  return {px: x*view.scale + view.ox, py: view.oy - y*view.scale};
+}
+
+function loadImg(dataUri){
+  if(!dataUri) return null;
+  if(imgCache[dataUri]) return imgCache[dataUri];
+  const im = new Image(); im.src = dataUri;
+  im.onload = drawMap;
+  imgCache[dataUri] = im;
+  return im;
+}
+
+function drawLayerImg(dataUri, tl, br){
+  const im = loadImg(dataUri);
+  if(!im) return;
+  if(im.complete && im.naturalWidth){
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(im, tl.px, tl.py, br.px-tl.px, br.py-tl.py);
+  }
+}
+
+function drawCriticalMarker(p){
+  // "X" putih dgn tepi merah tua -- titik erosi kritis
+  const r = 7*devicePixelRatio;
+  ctx.lineCap = "round";
+  ctx.lineWidth = 4*devicePixelRatio; ctx.strokeStyle = "#8a0000";
+  ctx.beginPath(); ctx.moveTo(p.px-r,p.py-r); ctx.lineTo(p.px+r,p.py+r);
+  ctx.moveTo(p.px+r,p.py-r); ctx.lineTo(p.px-r,p.py+r); ctx.stroke();
+  ctx.lineWidth = 1.8*devicePixelRatio; ctx.strokeStyle = "#ffffff";
+  ctx.beginPath(); ctx.moveTo(p.px-r,p.py-r); ctx.lineTo(p.px+r,p.py+r);
+  ctx.moveTo(p.px+r,p.py-r); ctx.lineTo(p.px-r,p.py+r); ctx.stroke();
+}
+
+function drawSedimentMarker(p){
+  // bulat biru dgn tepi putih -- titik potensi sedimentasi tinggi
+  ctx.beginPath(); ctx.arc(p.px, p.py, 6.5*devicePixelRatio, 0, 7);
+  ctx.fillStyle = "#2b7fff"; ctx.fill();
+  ctx.lineWidth = 1.6*devicePixelRatio; ctx.strokeStyle = "#ffffff"; ctx.stroke();
+}
+
+function drawMap(){
+  const w = els.mapCanvas.width, h = els.mapCanvas.height;
+  ctx.clearRect(0,0,w,h);
+  ctx.fillStyle = "#001014"; ctx.fillRect(0,0,w,h);
+  const s = curSeg();
+  els.mapEmpty.style.display = s ? "none" : "flex";
+  if(!s) return;
+
+  const b = s.bounds_utm;
+  const tl = worldToPx(b.xmin, b.ymax);
+  const br = worldToPx(b.xmax, b.ymin);
+  const layers = s.layers || (s.image ? {base: s.image} : {});  // "image" = paket format lama, tetap didukung
+
+  // "base" (citra satelit/latar) SELALU tampil -- tidak ada di legenda, bukan simbol yg ditoggle
+  if(layers.base) drawLayerImg(layers.base, tl, br);
+  else { ctx.fillStyle = "rgba(255,255,255,0.06)"; ctx.fillRect(tl.px, tl.py, br.px-tl.px, br.py-tl.py); }
+
+  // layer2 lain yg PUNYA baris di legenda -> hormati toggle hiddenKeys; layer tanpa baris legenda
+  // (mis. paket lama yg cuma py "image") ikut selalu tampil.
+  const legendKeys = new Set((s.legend||[]).map(l=>l.key));
+  Object.keys(layers).forEach(k=>{
+    if(k === "base" || k === "boundary") return;
+    if(legendKeys.has(k) && hiddenKeys.has(k)) return;
+    drawLayerImg(layers[k], tl, br);
+  });
+  // "boundary" (garis batas DXF) SELALU tampil paling atas dari semua layer raster -- referensi orientasi
+  if(layers.boundary) drawLayerImg(layers.boundary, tl, br);
+
+  ctx.strokeStyle = "rgba(255,255,255,0.35)"; ctx.lineWidth = 1.5*devicePixelRatio;
+  ctx.strokeRect(tl.px, tl.py, br.px-tl.px, br.py-tl.py);
+
+  // titik vektor (bukan raster) -- tetap tajam di zoom berapa pun, & bisa ditoggle per kategori
+  if(!hiddenKeys.has("critical_points")){
+    (s.critical_points||[]).forEach(pt=>drawCriticalMarker(worldToPx(pt.x, pt.y)));
+  }
+  if(!hiddenKeys.has("sediment_points")){
+    (s.sediment_points||[]).forEach(pt=>drawSedimentMarker(worldToPx(pt.x, pt.y)));
+  }
+
+  // titik GPS
+  if(gpsUTM){
+    const p = worldToPx(gpsUTM.x, gpsUTM.y);
+    if(gpsAcc){
+      const rpx = gpsAcc*view.scale;
+      ctx.beginPath(); ctx.arc(p.px, p.py, Math.max(rpx,4), 0, 7);
+      ctx.fillStyle = "rgba(61,191,140,0.18)"; ctx.fill();
+    }
+    ctx.beginPath(); ctx.arc(p.px, p.py, 8*devicePixelRatio, 0, 7);
+    ctx.fillStyle = "#3DBF8C"; ctx.fill();
+    ctx.lineWidth = 2.5*devicePixelRatio; ctx.strokeStyle = "#fff"; ctx.stroke();
+  }
+}
+
+/* ---------------- pan / pinch-zoom sentuhan ---------------- */
+(function(){
+  let dragging=false, lastX=0, lastY=0, pinchDist=0, pinchScale=1;
+  const cv = els.mapCanvas;
+  function pos(e){ const t=e.touches?e.touches[0]:e; const r=cv.getBoundingClientRect();
+    return {x:(t.clientX-r.left)*devicePixelRatio, y:(t.clientY-r.top)*devicePixelRatio}; }
+  cv.addEventListener("pointerdown", e=>{ dragging=true; lastX=e.clientX; lastY=e.clientY; cv.setPointerCapture(e.pointerId); });
+  cv.addEventListener("pointermove", e=>{
+    if(!dragging) return;
+    view.ox += (e.clientX-lastX)*devicePixelRatio; view.oy += (e.clientY-lastY)*devicePixelRatio;
+    lastX=e.clientX; lastY=e.clientY; drawMap();
+  });
+  cv.addEventListener("pointerup", ()=>dragging=false);
+  cv.addEventListener("pointercancel", ()=>dragging=false);
+  cv.addEventListener("wheel", e=>{
+    e.preventDefault();
+    const p = pos(e); const f = e.deltaY<0?1.12:0.89;
+    view.ox = p.x - (p.x-view.ox)*f; view.oy = p.y - (p.y-view.oy)*f;
+    view.scale *= f; drawMap();
+  }, {passive:false});
+  let touches=[];
+  cv.addEventListener("touchstart", e=>{ touches=[...e.touches]; if(touches.length===2){
+    pinchDist=Math.hypot(touches[0].clientX-touches[1].clientX, touches[0].clientY-touches[1].clientY);
+  }}, {passive:true});
+  cv.addEventListener("touchmove", e=>{
+    if(e.touches.length===2){
+      const d = Math.hypot(e.touches[0].clientX-e.touches[1].clientX, e.touches[0].clientY-e.touches[1].clientY);
+      if(pinchDist>0){
+        const f = d/pinchDist; const r=cv.getBoundingClientRect();
+        const cx=((e.touches[0].clientX+e.touches[1].clientX)/2-r.left)*devicePixelRatio;
+        const cy=((e.touches[0].clientY+e.touches[1].clientY)/2-r.top)*devicePixelRatio;
+        view.ox = cx-(cx-view.ox)*f; view.oy = cy-(cy-view.oy)*f; view.scale *= f; drawMap();
+      }
+      pinchDist = d;
+    }
+  }, {passive:true});
+})();
+
+document.getElementById("zoomIn").onclick = ()=>{ view.scale*=1.3; drawMap(); };
+document.getElementById("zoomOut").onclick = ()=>{ view.scale*=0.77; drawMap(); };
+document.getElementById("fitBtn").onclick = fitToSeg;
+
+/* ============================ GPS ============================ */
+let gpsWatchId = null;
+
+function gpsOriginProblem(){
+  // Geolocation API browser HANYA jalan di "secure context": https://, atau file:// di sebagian
+  // browser. content:// (dibuka lewat viewer galeri/Downloads Android) SELALU ditolak browser
+  // secara diam-diam (tanpa dialog izin sama sekali) -- ini batasan browser, bukan app ini.
+  const proto = location.protocol;
+  if(window.isSecureContext === false){
+    if(proto === "content:") return "Dibuka lewat viewer file (content://) -- browser TIDAK PERNAH menampilkan dialog izin di sini. Buka file ini langsung di Chrome (bukan lewat app Files/Galeri), atau host di https://.";
+    return `Origin "${proto}" tidak didukung GPS browser. Buka lewat https:// atau lewat Chrome langsung (bukan aplikasi lain yang membuka file ini).`;
+  }
+  return null;
+}
+
+function startGPS(){
+  if(!("geolocation" in navigator)){
+    els.gpsBadge.textContent = "GPS tidak didukung browser ini"; return;
+  }
+  const problem = gpsOriginProblem();
+  if(problem){
+    els.gpsBadge.textContent = "⚠️ GPS tidak bisa diaktifkan";
+    setStatus(problem, "err");
+    document.querySelectorAll("nav button")[2].click(); // pindah ke tab Info/Data supaya pesan kelihatan
+    return;
+  }
+  els.gpsBadge.textContent = "GPS: meminta izin…";
+  if(gpsWatchId !== null) navigator.geolocation.clearWatch(gpsWatchId);
+  gpsWatchId = navigator.geolocation.watchPosition(pos=>{
+    const {latitude, longitude, accuracy} = pos.coords;
+    let zone = 50, south = true;
+    if(PKG && PKG.utm_zone){ zone = PKG.utm_zone; south = !!PKG.utm_south; }
+    gpsUTM = latLonToUTM(latitude, longitude, zone, south);
+    gpsAcc = accuracy;
+    els.gpsBadge.innerHTML = `GPS: <b>±${accuracy.toFixed(0)} m</b>`;
+    els.coordBadge.textContent = `E ${gpsUTM.x.toFixed(1)}  N ${gpsUTM.y.toFixed(1)}`;
+    drawMap();
+  }, err=>{
+    const msgs = {1:"izin lokasi ditolak (ketuk lagi utk minta izin ulang)", 2:"sinyal GPS tidak ditemukan", 3:"waktu habis mencari sinyal"};
+    els.gpsBadge.textContent = "📍 GPS: " + (msgs[err.code] || err.message) ;
+  }, {enableHighAccuracy:true, maximumAge:2000, timeout:15000});
+}
+els.gpsBadge.addEventListener("click", startGPS);
+
+/* ============================ Segmen & legenda ============================ */
+function renderSegSelect(){
+  els.segSelect.innerHTML = "";
+  (PKG?.segments||[]).forEach((s,i)=>{
+    const o = document.createElement("option"); o.value=i; o.textContent=s.label||s.id; els.segSelect.appendChild(o);
+  });
+  els.segSelect.value = curSegIdx;
+}
+els.segSelect.onchange = ()=>{ curSegIdx = +els.segSelect.value; onSegChange(); };
+
+function onSegChange(){
+  const s = curSeg();
+  els.segTitle.textContent = s ? s.label : "Erosion Field Viewer";
+  renderLegend();
+  renderXsSelect();
+  fitToSeg();
+}
+
+function renderLegend(){
+  const s = curSeg();
+  els.legendBox.innerHTML = "";
+  if(!s || !s.legend || !s.legend.length){ els.legendBox.style.display="none"; return; }
+  els.legendBox.style.display = "flex"; els.legendBox.style.flexDirection="column"; els.legendBox.style.gap="4px";
+  s.legend.forEach(l=>{
+    const row=document.createElement("div");
+    row.className = "row" + (l.key && hiddenKeys.has(l.key) ? " off" : "");
+    row.innerHTML = `<span class="sw" style="background:${l.color}"></span>${l.label}`;
+    if(l.key){
+      // klik baris legenda -> toggle tampil/sembunyi kategori itu di peta (klik lagi -> tampil lagi)
+      row.title = hiddenKeys.has(l.key)
+        ? "Ketuk untuk menampilkan lagi"
+        : "Ketuk untuk menyembunyikan dari peta";
+      row.addEventListener("click", ()=>{
+        if(hiddenKeys.has(l.key)) hiddenKeys.delete(l.key); else hiddenKeys.add(l.key);
+        renderLegend();
+        drawMap();
+      });
+    }
+    els.legendBox.appendChild(row);
+  });
+}
+
+/* ============================ Cross section ============================ */
+function renderXsSelect(){
+  const s = curSeg();
+  els.xsSelect.innerHTML = "";
+  const list = s?.cross_sections || [];
+  list.forEach((xs,i)=>{
+    const o=document.createElement("option"); o.value=i; o.textContent=xs.name; els.xsSelect.appendChild(o);
+  });
+  els.xsEmpty.style.display = list.length ? "none" : "flex";
+  drawXs();
+}
+els.xsSelect.onchange = drawXs;
+
+function drawXs(){
+  const s = curSeg(); const list = s?.cross_sections || [];
+  const i = +els.xsSelect.value || 0;
+  const xs = list[i];
+  els.xsSvg.innerHTML = "";
+  if(!xs || !xs.points || !xs.points.length) return;
+  const pts = xs.points;
+  const dMin=Math.min(...pts.map(p=>p.d)), dMax=Math.max(...pts.map(p=>p.d));
+  const zMin=Math.min(...pts.map(p=>p.z)), zMax=Math.max(...pts.map(p=>p.z));
+  const padZ=(zMax-zMin)*0.12 || 1;
+  const X0=6,X1=98,Y0=8,Y1=92;
+  const sx = d => X0 + (d-dMin)/((dMax-dMin)||1)*(X1-X0);
+  const sy = z => Y1 - (z-(zMin-padZ))/(((zMax+padZ)-(zMin-padZ))||1)*(Y1-Y0);
+  const path = pts.map((p,idx)=> (idx===0?"M":"L") + sx(p.d).toFixed(2) + " " + sy(p.z).toFixed(2)).join(" ");
+  const areaPath = path + ` L ${sx(pts[pts.length-1].d).toFixed(2)} ${Y1} L ${sx(pts[0].d).toFixed(2)} ${Y1} Z`;
+  const ns = "http://www.w3.org/2000/svg";
+  const mkEl = (tag, attrs) => { const e=document.createElementNS(ns,tag); for(const k in attrs) e.setAttribute(k,attrs[k]); return e; };
+  els.xsSvg.setAttribute("viewBox","0 0 100 100");
+  els.xsSvg.appendChild(mkEl("path",{d:areaPath, fill:"rgba(23,140,156,0.22)", stroke:"none"}));
+  els.xsSvg.appendChild(mkEl("path",{d:path, fill:"none", stroke:"#3DBF8C", "stroke-width":"0.9", "vector-effect":"non-scaling-stroke"}));
+  // sumbu sederhana
+  els.xsSvg.appendChild(mkEl("line",{x1:X0,y1:Y1,x2:X1,y2:Y1, stroke:"rgba(255,255,255,0.25)", "stroke-width":"0.3"}));
+  [zMin, (zMin+zMax)/2, zMax].forEach(z=>{
+    const t = mkEl("text", {x:1, y:sy(z), "font-size":"3.2", fill:"#9fb8b3"});
+    t.textContent = z.toFixed(1); els.xsSvg.appendChild(t);
+  });
+  const lastP = pts[pts.length-1];
+  const t2 = mkEl("text", {x:X1-6, y:Y0+4, "font-size":"3.2", fill:"#9fb8b3"});
+  t2.textContent = `jarak: 0–${lastP.d.toFixed(0)} m`;
+  els.xsSvg.appendChild(t2);
+}
+
+/* ============================ Navigasi bawah ============================ */
+document.querySelectorAll("nav button").forEach(btn=>{
+  btn.onclick = ()=>{
+    document.querySelectorAll("nav button").forEach(b=>b.classList.remove("active"));
+    btn.classList.add("active");
+    document.querySelectorAll("main > div").forEach(v=>v.classList.remove("active"));
+    document.getElementById(btn.dataset.view).classList.add("active");
+    if(btn.dataset.view==="mapView") resizeCanvas();
+    if(btn.dataset.view==="xsView") drawXs();
+  };
+});
+
+/* ============================ Load data ============================ */
+function setStatus(msg, cls){
+  els.loadStatus.textContent = msg;
+  els.loadStatus.className = "status" + (cls?(" "+cls):"");
+}
+
+function applyPackage(pkg, persist){
+  PKG = pkg; curSegIdx = 0;
+  renderSegSelect(); onSegChange();
+  const nSeg = pkg.segments?.length||0;
+  const nXs = (pkg.segments||[]).reduce((a,s)=>a+(s.cross_sections?.length||0),0);
+  els.dataInfo.textContent = `${nSeg} segmen, ${nXs} cross section dimuat.` +
+    (pkg.generated_at ? ` Diekspor: ${pkg.generated_at}.` : "");
+  if(persist) idbSet("last_package", pkg);
+}
+
+els.fileInput.onchange = async (e)=>{
+  const f = e.target.files[0]; if(!f) return;
+  try{
+    const txt = await f.text();
+    const pkg = JSON.parse(txt);
+    if(!pkg.segments || !pkg.segments.length) throw new Error("File tidak punya field 'segments'.");
+    applyPackage(pkg, true);
+    setStatus("Berhasil dimuat & disimpan offline di HP ini.", "ok");
+  }catch(err){
+    setStatus("Gagal memuat file: " + err.message, "err");
+  }
+};
+
+document.getElementById("clearDataBtn").onclick = async ()=>{
+  await idbDel("last_package");
+  PKG = null; renderSegSelect(); onSegChange();
+  els.dataInfo.textContent = "Belum ada data.";
+  setStatus("Data tersimpan sudah dihapus.", "");
+};
+
+function sampleData(){
+  const w=300, h=170;
+  const c = document.createElement("canvas"); c.width=w; c.height=h;
+  const g = c.getContext("2d");
+  const grad = g.createLinearGradient(0,0,w,h);
+  grad.addColorStop(0,"#3DBF8C"); grad.addColorStop(0.55,"#D3D95C"); grad.addColorStop(1,"#d8483f");
+  g.fillStyle=grad; g.fillRect(0,0,w,h);
+  g.strokeStyle="rgba(0,0,0,0.25)"; g.lineWidth=2;
+  for(let i=0;i<6;i++){ g.beginPath(); g.moveTo(0, 20+i*26); g.bezierCurveTo(w*0.3,10+i*26,w*0.7,40+i*26,w,15+i*26); g.stroke(); }
+  return {
+    epsg: "EPSG:32750", utm_zone: 50, utm_south: true,
+    generated_at: "contoh",
+    segments: [
+      { id:"seg1", label:"Channel A (contoh)", layers:{base:c.toDataURL("image/png")},
+        bounds_utm:{xmin:500000, xmax:500300, ymin:9500000, ymax:9500170},
+        // catatan: krn contoh ini cuma 1 gambar gepeng (bukan layer per-kelas spt hasil ekspor asli),
+        // baris warna zona di sini TIDAK punya "key" (bukan yg ditoggle) -- tapi "critical_points" &
+        // "sediment_points" DIBERI titik contoh supaya fitur toggle-nya tetap bisa dicoba dari sini.
+        legend:[{label:"Hijau (Normal)",color:"#3DBF8C"},{label:"Kuning (Waspada)",color:"#D3D95C"},
+                {label:"Oranye (Siaga)",color:"#e08a2b"},{label:"Merah (Kritis)",color:"#d8483f"},
+                {key:"critical_points",type:"points",label:"✕ Titik erosi kritis (contoh)",color:"#8a0000"},
+                {key:"sediment_points",type:"points",label:"● Titik sedimentasi tinggi (contoh)",color:"#2b7fff"}],
+        critical_points:[{x:500150,y:9500085},{x:500210,y:9500060}],
+        sediment_points:[{x:500090,y:9500110},{x:500170,y:9500040},{x:500240,y:9500095}],
+        cross_sections:[
+          { name:"XS-1 (contoh)", points:[
+            {d:-30,z:65},{d:12,z:65},{d:20,z:61.7},{d:26,z:62.2},{d:35,z:58},{d:40,z:58.3},
+            {d:47,z:54},{d:54,z:54},{d:62,z:58.2},{d:67,z:58.7},{d:80,z:62.7},{d:88,z:63.7},{d:120,z:64}
+          ]}
+        ]
+      }
+    ]
+  };
+}
+document.getElementById("loadSampleBtn").onclick = ()=>{
+  applyPackage(sampleData(), false);
+  setStatus("Contoh data dimuat (tidak disimpan).", "ok");
+};
+
+/* ============================ Init ============================ */
+(async function init(){
+  resizeCanvas();
+  const problem = gpsOriginProblem();
+  if(problem) els.gpsBadge.textContent = "⚠️ GPS tidak bisa diaktifkan (ketuk utk detail)";
+  const saved = await idbGet("last_package");
+  if(saved){ applyPackage(saved, false); setStatus("Memuat data tersimpan sebelumnya.", "ok"); }
+  else { applyPackage(sampleData(), false); setStatus("Belum ada data proyek — ini contoh tampilan.", ""); }
+})();
+</script>
+</body>
+</html>
+"""
+
+
+def _render_mini_avenza_page():
+    """Halaman khusus akun 'avenza': mengambil-alih SELURUH tampilan (bukan tab tambahan di app
+    utama) -- peta risiko+satelit+GPS+cross section offline, sama seperti erosion_field_viewer.html
+    yang berdiri sendiri, tapi dijalankan di dalam Streamlit (https) supaya izin GPS browser berjalan
+    normal -- ini yang gagal kalau file HTML-nya dibuka lepas lewat viewer file di HP (origin content://
+    tidak didukung Geolocation API)."""
+    _c1, _c2 = st.columns([5, 1])
+    with _c1:
+        st.markdown("### 🗺️ Mini Avenza — Erosion Field Viewer")
+    with _c2:
+        if st.button("Logout", key="avenza_logout_btn", width="stretch"):
+            st.session_state["authenticated"] = False
+            st.rerun()
+    st.caption(_t(
+        "Muat file field_package.json (diekspor admin/surveyor dari tab Cross Section) lewat tab "
+        "Info/Data di bawah, lalu ketuk tombol GPS di tab Peta untuk mengaktifkan lokasi.",
+        "Load the field_package.json file (exported by admin/surveyor from the Cross Section tab) via "
+        "the Info/Data tab below, then tap the GPS button on the Peta tab to enable location.",
+    ))
+    # st.iframe (Streamlit >= 1.56) TIDAK punya parameter "scrolling" (beda dari
+    # components.v1.html yang lama) -- coba dgn scrolling dulu, kalau TypeError berarti versi baru,
+    # retry tanpa scrolling. Ini supaya jalan di versi Streamlit lama maupun baru.
+    _render_html = getattr(st, "iframe", None)
+    try:
+        if _render_html is not None:
+            try:
+                _render_html(_MINI_AVENZA_HTML, height=880, scrolling=False)
+            except TypeError:
+                _render_html(_MINI_AVENZA_HTML, height=880)
+        else:
+            import streamlit.components.v1 as _components_avenza
+            _components_avenza.html(_MINI_AVENZA_HTML, height=880, scrolling=False)
+    except Exception as _e_avenza_render:
+        st.error(_t(
+            f"Gagal menampilkan Mini Avenza: {_e_avenza_render}",
+            f"Failed to display Mini Avenza: {_e_avenza_render}",
+        ))
+    st.stop()
+
+
+if _is_avenza_user():
+    _render_mini_avenza_page()
+
 # ================= HELPER: safe image loader =================
 import os as _os_header
 
@@ -6402,646 +7154,6 @@ if st.session_state.home_page:
             st.rerun()
 
     st.stop()
-
-_MINI_AVENZA_HTML = """<!DOCTYPE html>
-<html lang="id">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-<title>Erosion Field Viewer</title>
-<style>
-  :root{
-    --bg:#00151a; --bg2:#02111d; --panel:#0a1f24; --panel2:#0e262c;
-    --line:rgba(255,255,255,0.12); --txt:#eaf4f2; --sub:#9fb8b3;
-    --teal:#178C9C; --green:#3DBF8C; --yellow:#D3D95C; --orange:#e08a2b; --red:#d8483f;
-  }
-  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
-  html,body{height:100%; margin:0; background:var(--bg); color:var(--txt);
-    font:15px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,sans-serif;
-    overscroll-behavior:none;}
-  #app{display:flex; flex-direction:column; height:100%; height:100dvh;
-    padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);}
-
-  header{flex:0 0 auto; padding:10px 14px; background:var(--bg2); border-bottom:1px solid var(--line);
-    display:flex; align-items:center; gap:10px;}
-  header h1{font-size:15px; margin:0; font-weight:650; letter-spacing:.2px; flex:1;}
-  select{background:var(--panel2); color:var(--txt); border:1px solid var(--line); border-radius:8px;
-    padding:7px 10px; font-size:13.5px; max-width:44vw;}
-  button{background:var(--panel2); color:var(--txt); border:1px solid var(--line); border-radius:8px;
-    padding:7px 11px; font-size:13.5px; cursor:pointer;}
-  button:active{background:var(--teal);}
-  .iconbtn{width:38px; height:38px; padding:0; display:flex; align-items:center; justify-content:center; font-size:17px;}
-
-  main{flex:1 1 auto; position:relative; overflow:hidden; background:#001014;}
-  #mapView, #xsView, #infoView{position:absolute; inset:0; display:none;}
-  #mapView.active, #xsView.active, #infoView.active{display:block;}
-
-  canvas{display:block; touch-action:none;}
-
-  .hud{position:absolute; left:10px; top:10px; right:10px; display:flex; justify-content:space-between;
-    gap:8px; pointer-events:none;}
-  .badge{pointer-events:auto; background:rgba(10,31,36,0.85); border:1px solid var(--line); border-radius:9px;
-    padding:6px 10px; font-size:12px; color:var(--sub);}
-  .badge b{color:var(--txt); font-weight:650;}
-  .zoomctl{position:absolute; right:10px; bottom:92px; display:flex; flex-direction:column; gap:6px;}
-  .zoomctl button{width:40px; height:40px; font-size:19px; border-radius:10px;}
-  .fitbtn{position:absolute; left:10px; bottom:92px;}
-
-  .legend{position:absolute; left:10px; bottom:92px; right:60px; display:none;}
-  .legend .row{display:flex; align-items:center; gap:8px; background:rgba(10,31,36,0.85); border:1px solid var(--line);
-    border-radius:9px; padding:6px 10px; font-size:11.5px; margin-bottom:0;}
-  .sw{width:12px; height:12px; border-radius:3px; flex:0 0 auto;}
-
-  nav{flex:0 0 auto; display:flex; background:var(--bg2); border-top:1px solid var(--line);}
-  nav button{flex:1; background:transparent; border:none; border-radius:0; padding:10px 4px 8px;
-    font-size:11.5px; color:var(--sub); display:flex; flex-direction:column; align-items:center; gap:3px;}
-  nav button .ic{font-size:19px;}
-  nav button.active{color:var(--teal);}
-
-  .panel{position:absolute; inset:0; overflow:auto; padding:14px; background:var(--bg);}
-  .card{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px; margin-bottom:12px;}
-  .card h3{margin:0 0 8px; font-size:13.5px; color:var(--teal);}
-  .card p{margin:0 0 6px; color:var(--sub); font-size:13px;}
-  .drop{border:1.5px dashed var(--line); border-radius:12px; padding:22px 14px; text-align:center; color:var(--sub);
-    font-size:13px;}
-  .drop b{color:var(--txt);}
-  input[type=file]{display:none;}
-  .rowbtns{display:flex; gap:8px; margin-top:10px; flex-wrap:wrap;}
-  .xschart{position:absolute; inset:0; padding:14px; padding-bottom:8px;}
-  .xspicker{position:absolute; left:10px; top:10px; right:10px;}
-  .status{font-size:11.5px; color:var(--sub); margin-top:8px;}
-  .status.ok{color:var(--green);}
-  .status.err{color:var(--red);}
-  .empty{position:absolute; inset:0; display:flex; align-items:center; justify-content:center; text-align:center;
-    color:var(--sub); font-size:13px; padding:30px;}
-</style>
-</head>
-<body>
-<div id="app">
-
-  <header>
-    <h1 id="segTitle">Erosion Field Viewer</h1>
-    <select id="segSelect"></select>
-  </header>
-
-  <main>
-
-    <div id="mapView" class="active">
-      <canvas id="mapCanvas"></canvas>
-      <div class="hud">
-        <button class="badge" id="gpsBadge" style="cursor:pointer;">📍 Ketuk utk aktifkan GPS</button>
-        <div class="badge" id="coordBadge">—</div>
-      </div>
-      <div class="zoomctl">
-        <button id="zoomIn">+</button>
-        <button id="zoomOut">−</button>
-      </div>
-      <button class="iconbtn fitbtn" id="fitBtn" title="Fit ke area">⤢</button>
-      <div class="legend" id="legendBox"></div>
-      <div class="empty" id="mapEmpty" style="display:none;">
-        Belum ada data proyek dimuat.<br>Buka tab <b>Info / Data</b> untuk memuat file proyek (.json).
-      </div>
-    </div>
-
-    <div id="xsView">
-      <div class="xspicker">
-        <select id="xsSelect" style="width:100%;"></select>
-      </div>
-      <div class="xschart">
-        <svg id="xsSvg" width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none"></svg>
-      </div>
-      <div class="empty" id="xsEmpty" style="display:none;">
-        Segmen ini belum punya data cross section.
-      </div>
-    </div>
-
-    <div id="infoView">
-      <div class="panel">
-
-        <div class="card">
-          <h3>Muat data proyek</h3>
-          <p>Muat file paket lapangan (.json) yang diekspor dari aplikasi Erosion Mapping utama. Sekali dimuat, data
-             tersimpan di HP ini (offline) — tidak perlu sinyal lagi setelahnya.</p>
-          <label class="drop" for="fileInput">
-            <b>Ketuk untuk pilih file .json</b><br>atau tarik &amp; taruh di sini
-          </label>
-          <input type="file" id="fileInput" accept=".json,application/json">
-          <div class="rowbtns">
-            <button id="loadSampleBtn">Muat contoh data</button>
-            <button id="clearDataBtn">Hapus data tersimpan</button>
-          </div>
-          <div class="status" id="loadStatus"></div>
-        </div>
-
-        <div class="card">
-          <h3>Tentang app ini</h3>
-          <p>Satu file HTML mandiri — tidak butuh server, tidak butuh instal dari Play Store/App Store. Setelah
-             dibuka sekali, semua data proyek yang sudah dimuat tersimpan di penyimpanan browser HP (IndexedDB),
-             jadi bisa dibuka lagi tanpa sinyal.</p>
-          <p><b>Cara pasang di HP (Android/Chrome):</b> buka file ini di Chrome → menu titik tiga → "Add to Home
-             screen" / "Tambahkan ke layar utama" — jadi ada ikonnya seperti app biasa.</p>
-          <p><b>Posisi GPS</b> dibaca dari browser (izin lokasi HP), dikonversi ke koordinat UTM proyek secara lokal
-             di HP — tidak mengirim data ke server manapun.</p>
-        </div>
-
-        <div class="card">
-          <h3>Status data</h3>
-          <p id="dataInfo">Belum ada data.</p>
-        </div>
-
-      </div>
-    </div>
-
-  </main>
-
-  <nav>
-    <button class="active" data-view="mapView"><span class="ic">🗺️</span>Peta</button>
-    <button data-view="xsView"><span class="ic">📈</span>Cross Section</button>
-    <button data-view="infoView"><span class="ic">ℹ️</span>Info / Data</button>
-  </nav>
-
-</div>
-
-<script>
-"use strict";
-
-/* =====================================================================
-   SKEMA PAKET DATA (.json) yang dimuat app ini -- lihat catatan di bawah
-   untuk format lengkap yang akan diekspor dari app Erosion Mapping utama.
-   {
-     "epsg": "EPSG:32750",
-     "utm_zone": 50, "utm_south": true,
-     "segments": [{
-        "id": "seg1", "label": "Channel A",
-        "image": "data:image/png;base64,....",   // peta risiko / DEM segmen ini
-        "bounds_utm": {"xmin":..,"xmax":..,"ymin":..,"ymax":..},
-        "legend": [{"label":"Hijau (Normal)","color":"#3DBF8C"}, ...],
-        "cross_sections": [{"name":"XS-1","points":[{"d":0,"z":65.2}, ...]}]
-     }]
-   }
-   ===================================================================== */
-
-const DB_NAME = "erosion_field_viewer";
-const STORE = "kv";
-
-function idbOpen(){
-  return new Promise((res, rej) => {
-    const req = indexedDB.open(DB_NAME, 1);
-    req.onupgradeneeded = () => req.result.createObjectStore(STORE);
-    req.onsuccess = () => res(req.result);
-    req.onerror = () => rej(req.error);
-  });
-}
-async function idbSet(key, val){
-  try{
-    const db = await idbOpen();
-    return new Promise((res, rej) => {
-      const tx = db.transaction(STORE, "readwrite");
-      tx.objectStore(STORE).put(val, key);
-      tx.oncomplete = () => res(true);
-      tx.onerror = () => rej(tx.error);
-    });
-  }catch(e){ console.error(e); return false; }
-}
-async function idbGet(key){
-  try{
-    const db = await idbOpen();
-    return new Promise((res, rej) => {
-      const tx = db.transaction(STORE, "readonly");
-      const r = tx.objectStore(STORE).get(key);
-      r.onsuccess = () => res(r.result || null);
-      r.onerror = () => rej(r.error);
-    });
-  }catch(e){ console.error(e); return null; }
-}
-async function idbDel(key){
-  try{
-    const db = await idbOpen();
-    return new Promise((res) => {
-      const tx = db.transaction(STORE, "readwrite");
-      tx.objectStore(STORE).delete(key);
-      tx.oncomplete = () => res(true);
-    });
-  }catch(e){ return false; }
-}
-
-/* ---------------- konversi lat/lon (WGS84) <-> UTM, tanpa library ------ */
-function latLonToUTM(lat, lon, zone, southHemi){
-  const a = 6378137.0, e = 0.081819191, k0 = 0.9996;
-  const e2 = e*e, ep2 = e2/(1-e2);
-  const latR = lat*Math.PI/180, lonR = lon*Math.PI/180;
-  const lon0 = ((zone-1)*6 - 180 + 3) * Math.PI/180;
-  const N = a/Math.sqrt(1-e2*Math.sin(latR)*Math.sin(latR));
-  const T = Math.tan(latR)*Math.tan(latR);
-  const C = ep2*Math.cos(latR)*Math.cos(latR);
-  const Ad = Math.cos(latR)*(lonR-lon0);
-  const M = a*((1-e2/4-3*e2*e2/64-5*e2*e2*e2/256)*latR
-    -(3*e2/8+3*e2*e2/32+45*e2*e2*e2/1024)*Math.sin(2*latR)
-    +(15*e2*e2/256+45*e2*e2*e2/1024)*Math.sin(4*latR)
-    -(35*e2*e2*e2/3072)*Math.sin(6*latR));
-  let x = k0*N*(Ad+(1-T+C)*Ad**3/6+(5-18*T+T*T+72*C-58*ep2)*Ad**5/120)+500000;
-  let y = k0*(M+N*Math.tan(latR)*(Ad*Ad/2+(5-T+9*C+4*C*C)*Ad**4/24
-    +(61-58*T+T*T+600*C-330*ep2)*Ad**6/720));
-  if(southHemi) y += 10000000;
-  return {x, y};
-}
-
-/* ============================ STATE ============================ */
-let PKG = null;          // paket data yang sedang aktif
-let curSegIdx = 0;
-let view = {ox:0, oy:0, scale:1};   // transform kanvas (world meter -> px)
-let gpsUTM = null, gpsAcc = null;
-
-const els = {
-  mapCanvas: document.getElementById("mapCanvas"),
-  segSelect: document.getElementById("segSelect"),
-  segTitle: document.getElementById("segTitle"),
-  gpsBadge: document.getElementById("gpsBadge"),
-  coordBadge: document.getElementById("coordBadge"),
-  legendBox: document.getElementById("legendBox"),
-  mapEmpty: document.getElementById("mapEmpty"),
-  xsSelect: document.getElementById("xsSelect"),
-  xsSvg: document.getElementById("xsSvg"),
-  xsEmpty: document.getElementById("xsEmpty"),
-  fileInput: document.getElementById("fileInput"),
-  loadStatus: document.getElementById("loadStatus"),
-  dataInfo: document.getElementById("dataInfo"),
-};
-
-const ctx = els.mapCanvas.getContext("2d");
-const imgCache = {};
-
-function resizeCanvas(){
-  const r = els.mapCanvas.parentElement.getBoundingClientRect();
-  els.mapCanvas.width = r.width * devicePixelRatio;
-  els.mapCanvas.height = r.height * devicePixelRatio;
-  els.mapCanvas.style.width = r.width+"px";
-  els.mapCanvas.style.height = r.height+"px";
-  drawMap();
-}
-window.addEventListener("resize", resizeCanvas);
-
-function curSeg(){ return PKG && PKG.segments ? PKG.segments[curSegIdx] : null; }
-
-function fitToSeg(){
-  const s = curSeg(); if(!s) return;
-  const b = s.bounds_utm;
-  const w = els.mapCanvas.width, h = els.mapCanvas.height;
-  const bw = b.xmax-b.xmin, bh = b.ymax-b.ymin;
-  const pad = 0.92;
-  const sc = Math.min(w/bw, h/bh) * pad;
-  view.scale = sc;
-  view.ox = w/2 - (b.xmin+bw/2)*sc;
-  view.oy = h/2 + (b.ymin+bh/2)*sc;   // y dibalik (utara ke atas)
-  drawMap();
-}
-
-function worldToPx(x, y){
-  return {px: x*view.scale + view.ox, py: view.oy - y*view.scale};
-}
-
-function loadImg(dataUri){
-  if(imgCache[dataUri]) return imgCache[dataUri];
-  const im = new Image(); im.src = dataUri;
-  imgCache[dataUri] = im;
-  return im;
-}
-
-function drawMap(){
-  const w = els.mapCanvas.width, h = els.mapCanvas.height;
-  ctx.clearRect(0,0,w,h);
-  ctx.fillStyle = "#001014"; ctx.fillRect(0,0,w,h);
-  const s = curSeg();
-  els.mapEmpty.style.display = s ? "none" : "flex";
-  if(!s) return;
-
-  const b = s.bounds_utm;
-  const im = loadImg(s.image);
-  const tl = worldToPx(b.xmin, b.ymax);
-  const br = worldToPx(b.xmax, b.ymin);
-  if(im.complete && im.naturalWidth){
-    ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(im, tl.px, tl.py, br.px-tl.px, br.py-tl.py);
-  } else {
-    im.onload = drawMap;
-    ctx.fillStyle = "rgba(255,255,255,0.06)";
-    ctx.fillRect(tl.px, tl.py, br.px-tl.px, br.py-tl.py);
-  }
-  ctx.strokeStyle = "rgba(255,255,255,0.35)"; ctx.lineWidth = 1.5*devicePixelRatio;
-  ctx.strokeRect(tl.px, tl.py, br.px-tl.px, br.py-tl.py);
-
-  // titik GPS
-  if(gpsUTM){
-    const p = worldToPx(gpsUTM.x, gpsUTM.y);
-    if(gpsAcc){
-      const rpx = gpsAcc*view.scale;
-      ctx.beginPath(); ctx.arc(p.px, p.py, Math.max(rpx,4), 0, 7);
-      ctx.fillStyle = "rgba(61,191,140,0.18)"; ctx.fill();
-    }
-    ctx.beginPath(); ctx.arc(p.px, p.py, 8*devicePixelRatio, 0, 7);
-    ctx.fillStyle = "#3DBF8C"; ctx.fill();
-    ctx.lineWidth = 2.5*devicePixelRatio; ctx.strokeStyle = "#fff"; ctx.stroke();
-  }
-}
-
-/* ---------------- pan / pinch-zoom sentuhan ---------------- */
-(function(){
-  let dragging=false, lastX=0, lastY=0, pinchDist=0, pinchScale=1;
-  const cv = els.mapCanvas;
-  function pos(e){ const t=e.touches?e.touches[0]:e; const r=cv.getBoundingClientRect();
-    return {x:(t.clientX-r.left)*devicePixelRatio, y:(t.clientY-r.top)*devicePixelRatio}; }
-  cv.addEventListener("pointerdown", e=>{ dragging=true; lastX=e.clientX; lastY=e.clientY; cv.setPointerCapture(e.pointerId); });
-  cv.addEventListener("pointermove", e=>{
-    if(!dragging) return;
-    view.ox += (e.clientX-lastX)*devicePixelRatio; view.oy += (e.clientY-lastY)*devicePixelRatio;
-    lastX=e.clientX; lastY=e.clientY; drawMap();
-  });
-  cv.addEventListener("pointerup", ()=>dragging=false);
-  cv.addEventListener("pointercancel", ()=>dragging=false);
-  cv.addEventListener("wheel", e=>{
-    e.preventDefault();
-    const p = pos(e); const f = e.deltaY<0?1.12:0.89;
-    view.ox = p.x - (p.x-view.ox)*f; view.oy = p.y - (p.y-view.oy)*f;
-    view.scale *= f; drawMap();
-  }, {passive:false});
-  let touches=[];
-  cv.addEventListener("touchstart", e=>{ touches=[...e.touches]; if(touches.length===2){
-    pinchDist=Math.hypot(touches[0].clientX-touches[1].clientX, touches[0].clientY-touches[1].clientY);
-  }}, {passive:true});
-  cv.addEventListener("touchmove", e=>{
-    if(e.touches.length===2){
-      const d = Math.hypot(e.touches[0].clientX-e.touches[1].clientX, e.touches[0].clientY-e.touches[1].clientY);
-      if(pinchDist>0){
-        const f = d/pinchDist; const r=cv.getBoundingClientRect();
-        const cx=((e.touches[0].clientX+e.touches[1].clientX)/2-r.left)*devicePixelRatio;
-        const cy=((e.touches[0].clientY+e.touches[1].clientY)/2-r.top)*devicePixelRatio;
-        view.ox = cx-(cx-view.ox)*f; view.oy = cy-(cy-view.oy)*f; view.scale *= f; drawMap();
-      }
-      pinchDist = d;
-    }
-  }, {passive:true});
-})();
-
-document.getElementById("zoomIn").onclick = ()=>{ view.scale*=1.3; drawMap(); };
-document.getElementById("zoomOut").onclick = ()=>{ view.scale*=0.77; drawMap(); };
-document.getElementById("fitBtn").onclick = fitToSeg;
-
-/* ============================ GPS ============================ */
-let gpsWatchId = null;
-
-function gpsOriginProblem(){
-  // Geolocation API browser HANYA jalan di "secure context": https://, atau file:// di sebagian
-  // browser. content:// (dibuka lewat viewer galeri/Downloads Android) SELALU ditolak browser
-  // secara diam-diam (tanpa dialog izin sama sekali) -- ini batasan browser, bukan app ini.
-  const proto = location.protocol;
-  if(window.isSecureContext === false){
-    if(proto === "content:") return "Dibuka lewat viewer file (content://) -- browser TIDAK PERNAH menampilkan dialog izin di sini. Buka file ini langsung di Chrome (bukan lewat app Files/Galeri), atau host di https://.";
-    return `Origin "${proto}" tidak didukung GPS browser. Buka lewat https:// atau lewat Chrome langsung (bukan aplikasi lain yang membuka file ini).`;
-  }
-  return null;
-}
-
-function startGPS(){
-  if(!("geolocation" in navigator)){
-    els.gpsBadge.textContent = "GPS tidak didukung browser ini"; return;
-  }
-  const problem = gpsOriginProblem();
-  if(problem){
-    els.gpsBadge.textContent = "⚠️ GPS tidak bisa diaktifkan";
-    setStatus(problem, "err");
-    document.querySelectorAll("nav button")[2].click(); // pindah ke tab Info/Data supaya pesan kelihatan
-    return;
-  }
-  els.gpsBadge.textContent = "GPS: meminta izin…";
-  if(gpsWatchId !== null) navigator.geolocation.clearWatch(gpsWatchId);
-  gpsWatchId = navigator.geolocation.watchPosition(pos=>{
-    const {latitude, longitude, accuracy} = pos.coords;
-    let zone = 50, south = true;
-    if(PKG && PKG.utm_zone){ zone = PKG.utm_zone; south = !!PKG.utm_south; }
-    gpsUTM = latLonToUTM(latitude, longitude, zone, south);
-    gpsAcc = accuracy;
-    els.gpsBadge.innerHTML = `GPS: <b>±${accuracy.toFixed(0)} m</b>`;
-    els.coordBadge.textContent = `E ${gpsUTM.x.toFixed(1)}  N ${gpsUTM.y.toFixed(1)}`;
-    drawMap();
-  }, err=>{
-    const msgs = {1:"izin lokasi ditolak (ketuk lagi utk minta izin ulang)", 2:"sinyal GPS tidak ditemukan", 3:"waktu habis mencari sinyal"};
-    els.gpsBadge.textContent = "📍 GPS: " + (msgs[err.code] || err.message) ;
-  }, {enableHighAccuracy:true, maximumAge:2000, timeout:15000});
-}
-els.gpsBadge.addEventListener("click", startGPS);
-
-/* ============================ Segmen & legenda ============================ */
-function renderSegSelect(){
-  els.segSelect.innerHTML = "";
-  (PKG?.segments||[]).forEach((s,i)=>{
-    const o = document.createElement("option"); o.value=i; o.textContent=s.label||s.id; els.segSelect.appendChild(o);
-  });
-  els.segSelect.value = curSegIdx;
-}
-els.segSelect.onchange = ()=>{ curSegIdx = +els.segSelect.value; onSegChange(); };
-
-function onSegChange(){
-  const s = curSeg();
-  els.segTitle.textContent = s ? s.label : "Erosion Field Viewer";
-  renderLegend();
-  renderXsSelect();
-  fitToSeg();
-}
-
-function renderLegend(){
-  const s = curSeg();
-  els.legendBox.innerHTML = "";
-  if(!s || !s.legend || !s.legend.length){ els.legendBox.style.display="none"; return; }
-  els.legendBox.style.display = "flex"; els.legendBox.style.flexDirection="column"; els.legendBox.style.gap="4px";
-  s.legend.forEach(l=>{
-    const row=document.createElement("div"); row.className="row";
-    row.innerHTML = `<span class="sw" style="background:${l.color}"></span>${l.label}`;
-    els.legendBox.appendChild(row);
-  });
-}
-
-/* ============================ Cross section ============================ */
-function renderXsSelect(){
-  const s = curSeg();
-  els.xsSelect.innerHTML = "";
-  const list = s?.cross_sections || [];
-  list.forEach((xs,i)=>{
-    const o=document.createElement("option"); o.value=i; o.textContent=xs.name; els.xsSelect.appendChild(o);
-  });
-  els.xsEmpty.style.display = list.length ? "none" : "flex";
-  drawXs();
-}
-els.xsSelect.onchange = drawXs;
-
-function drawXs(){
-  const s = curSeg(); const list = s?.cross_sections || [];
-  const i = +els.xsSelect.value || 0;
-  const xs = list[i];
-  els.xsSvg.innerHTML = "";
-  if(!xs || !xs.points || !xs.points.length) return;
-  const pts = xs.points;
-  const dMin=Math.min(...pts.map(p=>p.d)), dMax=Math.max(...pts.map(p=>p.d));
-  const zMin=Math.min(...pts.map(p=>p.z)), zMax=Math.max(...pts.map(p=>p.z));
-  const padZ=(zMax-zMin)*0.12 || 1;
-  const X0=6,X1=98,Y0=8,Y1=92;
-  const sx = d => X0 + (d-dMin)/((dMax-dMin)||1)*(X1-X0);
-  const sy = z => Y1 - (z-(zMin-padZ))/(((zMax+padZ)-(zMin-padZ))||1)*(Y1-Y0);
-  const path = pts.map((p,idx)=> (idx===0?"M":"L") + sx(p.d).toFixed(2) + " " + sy(p.z).toFixed(2)).join(" ");
-  const areaPath = path + ` L ${sx(pts[pts.length-1].d).toFixed(2)} ${Y1} L ${sx(pts[0].d).toFixed(2)} ${Y1} Z`;
-  const ns = "http://www.w3.org/2000/svg";
-  const mkEl = (tag, attrs) => { const e=document.createElementNS(ns,tag); for(const k in attrs) e.setAttribute(k,attrs[k]); return e; };
-  els.xsSvg.setAttribute("viewBox","0 0 100 100");
-  els.xsSvg.appendChild(mkEl("path",{d:areaPath, fill:"rgba(23,140,156,0.22)", stroke:"none"}));
-  els.xsSvg.appendChild(mkEl("path",{d:path, fill:"none", stroke:"#3DBF8C", "stroke-width":"0.9", "vector-effect":"non-scaling-stroke"}));
-  // sumbu sederhana
-  els.xsSvg.appendChild(mkEl("line",{x1:X0,y1:Y1,x2:X1,y2:Y1, stroke:"rgba(255,255,255,0.25)", "stroke-width":"0.3"}));
-  [zMin, (zMin+zMax)/2, zMax].forEach(z=>{
-    const t = mkEl("text", {x:1, y:sy(z), "font-size":"3.2", fill:"#9fb8b3"});
-    t.textContent = z.toFixed(1); els.xsSvg.appendChild(t);
-  });
-  const lastP = pts[pts.length-1];
-  const t2 = mkEl("text", {x:X1-6, y:Y0+4, "font-size":"3.2", fill:"#9fb8b3"});
-  t2.textContent = `jarak: 0–${lastP.d.toFixed(0)} m`;
-  els.xsSvg.appendChild(t2);
-}
-
-/* ============================ Navigasi bawah ============================ */
-document.querySelectorAll("nav button").forEach(btn=>{
-  btn.onclick = ()=>{
-    document.querySelectorAll("nav button").forEach(b=>b.classList.remove("active"));
-    btn.classList.add("active");
-    document.querySelectorAll("main > div").forEach(v=>v.classList.remove("active"));
-    document.getElementById(btn.dataset.view).classList.add("active");
-    if(btn.dataset.view==="mapView") resizeCanvas();
-    if(btn.dataset.view==="xsView") drawXs();
-  };
-});
-
-/* ============================ Load data ============================ */
-function setStatus(msg, cls){
-  els.loadStatus.textContent = msg;
-  els.loadStatus.className = "status" + (cls?(" "+cls):"");
-}
-
-function applyPackage(pkg, persist){
-  PKG = pkg; curSegIdx = 0;
-  renderSegSelect(); onSegChange();
-  const nSeg = pkg.segments?.length||0;
-  const nXs = (pkg.segments||[]).reduce((a,s)=>a+(s.cross_sections?.length||0),0);
-  els.dataInfo.textContent = `${nSeg} segmen, ${nXs} cross section dimuat.` +
-    (pkg.generated_at ? ` Diekspor: ${pkg.generated_at}.` : "");
-  if(persist) idbSet("last_package", pkg);
-}
-
-els.fileInput.onchange = async (e)=>{
-  const f = e.target.files[0]; if(!f) return;
-  try{
-    const txt = await f.text();
-    const pkg = JSON.parse(txt);
-    if(!pkg.segments || !pkg.segments.length) throw new Error("File tidak punya field 'segments'.");
-    applyPackage(pkg, true);
-    setStatus("Berhasil dimuat & disimpan offline di HP ini.", "ok");
-  }catch(err){
-    setStatus("Gagal memuat file: " + err.message, "err");
-  }
-};
-
-document.getElementById("clearDataBtn").onclick = async ()=>{
-  await idbDel("last_package");
-  PKG = null; renderSegSelect(); onSegChange();
-  els.dataInfo.textContent = "Belum ada data.";
-  setStatus("Data tersimpan sudah dihapus.", "");
-};
-
-function sampleData(){
-  const w=300, h=170;
-  const c = document.createElement("canvas"); c.width=w; c.height=h;
-  const g = c.getContext("2d");
-  const grad = g.createLinearGradient(0,0,w,h);
-  grad.addColorStop(0,"#3DBF8C"); grad.addColorStop(0.55,"#D3D95C"); grad.addColorStop(1,"#d8483f");
-  g.fillStyle=grad; g.fillRect(0,0,w,h);
-  g.strokeStyle="rgba(0,0,0,0.25)"; g.lineWidth=2;
-  for(let i=0;i<6;i++){ g.beginPath(); g.moveTo(0, 20+i*26); g.bezierCurveTo(w*0.3,10+i*26,w*0.7,40+i*26,w,15+i*26); g.stroke(); }
-  return {
-    epsg: "EPSG:32750", utm_zone: 50, utm_south: true,
-    generated_at: "contoh",
-    segments: [
-      { id:"seg1", label:"Channel A (contoh)", image:c.toDataURL("image/png"),
-        bounds_utm:{xmin:500000, xmax:500300, ymin:9500000, ymax:9500170},
-        legend:[{label:"Hijau (Normal)",color:"#3DBF8C"},{label:"Kuning (Waspada)",color:"#D3D95C"},
-                {label:"Oranye (Siaga)",color:"#e08a2b"},{label:"Merah (Kritis)",color:"#d8483f"}],
-        cross_sections:[
-          { name:"XS-1 (contoh)", points:[
-            {d:-30,z:65},{d:12,z:65},{d:20,z:61.7},{d:26,z:62.2},{d:35,z:58},{d:40,z:58.3},
-            {d:47,z:54},{d:54,z:54},{d:62,z:58.2},{d:67,z:58.7},{d:80,z:62.7},{d:88,z:63.7},{d:120,z:64}
-          ]}
-        ]
-      }
-    ]
-  };
-}
-document.getElementById("loadSampleBtn").onclick = ()=>{
-  applyPackage(sampleData(), false);
-  setStatus("Contoh data dimuat (tidak disimpan).", "ok");
-};
-
-/* ============================ Init ============================ */
-(async function init(){
-  resizeCanvas();
-  const problem = gpsOriginProblem();
-  if(problem) els.gpsBadge.textContent = "⚠️ GPS tidak bisa diaktifkan (ketuk utk detail)";
-  const saved = await idbGet("last_package");
-  if(saved){ applyPackage(saved, false); setStatus("Memuat data tersimpan sebelumnya.", "ok"); }
-  else { applyPackage(sampleData(), false); setStatus("Belum ada data proyek — ini contoh tampilan.", ""); }
-})();
-</script>
-</body>
-</html>
-"""
-
-
-def _render_mini_avenza_page():
-    """Halaman khusus akun 'avenza': mengambil-alih SELURUH tampilan (bukan tab tambahan di app
-    utama) -- peta risiko+satelit+GPS+cross section offline, sama seperti erosion_field_viewer.html
-    yang berdiri sendiri, tapi dijalankan di dalam Streamlit (https) supaya izin GPS browser berjalan
-    normal -- ini yang gagal kalau file HTML-nya dibuka lepas lewat viewer file di HP (origin content://
-    tidak didukung Geolocation API)."""
-    _c1, _c2 = st.columns([5, 1])
-    with _c1:
-        st.markdown("### 🗺️ Mini Avenza — Erosion Field Viewer")
-    with _c2:
-        if st.button("Logout", key="avenza_logout_btn", width="stretch"):
-            st.session_state["authenticated"] = False
-            st.rerun()
-    st.caption(_t(
-        "Muat file field_package.json (diekspor admin/surveyor dari tab Cross Section) lewat tab "
-        "Info/Data di bawah, lalu ketuk tombol GPS di tab Peta untuk mengaktifkan lokasi.",
-        "Load the field_package.json file (exported by admin/surveyor from the Cross Section tab) via "
-        "the Info/Data tab below, then tap the GPS button on the Peta tab to enable location.",
-    ))
-    # st.iframe (Streamlit >= 1.56) TIDAK punya parameter "scrolling" (beda dari
-    # components.v1.html yang lama) -- coba dgn scrolling dulu, kalau TypeError berarti versi baru,
-    # retry tanpa scrolling. Ini supaya jalan di versi Streamlit lama maupun baru.
-    _render_html = getattr(st, "iframe", None)
-    try:
-        if _render_html is not None:
-            try:
-                _render_html(_MINI_AVENZA_HTML, height=880, scrolling=False)
-            except TypeError:
-                _render_html(_MINI_AVENZA_HTML, height=880)
-        else:
-            import streamlit.components.v1 as _components_avenza
-            _components_avenza.html(_MINI_AVENZA_HTML, height=880, scrolling=False)
-    except Exception as _e_avenza_render:
-        st.error(_t(
-            f"Gagal menampilkan Mini Avenza: {_e_avenza_render}",
-            f"Failed to display Mini Avenza: {_e_avenza_render}",
-        ))
-    st.stop()
-
-
-if _is_avenza_user():
-    _render_mini_avenza_page()
 
 if "analysis_method" not in st.session_state:
     st.session_state["analysis_method"] = None
