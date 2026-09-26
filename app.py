@@ -1456,6 +1456,11 @@ def _field_lokal_to_utm(x_local, y_local):
 
 
 def _field_savefig_datauri(fig, transparent=True):
+    """PERBAIKAN bug 'Gagal membuat paket: name '_plt' is not defined' -- fungsi ini
+    dipanggil dari _field_composite_layers, tapi sebagai fungsi Python TERPISAH ia
+    TIDAK ikut mewarisi `import matplotlib.pyplot as _plt` yang cuma lokal di dalam
+    _field_composite_layers. Import sendiri di sini supaya _plt selalu ada."""
+    import matplotlib.pyplot as _plt
     buf = _io_mod.BytesIO()
     fig.savefig(buf, format="png", transparent=transparent)
     _plt.close(fig)
