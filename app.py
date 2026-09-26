@@ -15208,8 +15208,8 @@ with tab1:
                                 styles["Body"]
                             ))
                             story.append(_build_table(
-                                [[Paragraph(c, styles["TblHeader"]) for c in _rep_criteria_rows(_F, pdf_safe=True)[0]]]
-                                + [[Paragraph(_ascii_glyphs(c) if isinstance(c, str) else c, styles["TblCell"]) for c in r] for r in _rep_criteria_rows(_F, pdf_safe=True)[1:]],
+                                [_rep_criteria_rows(_F, pdf_safe=True)[0]]
+                                + [[_ascii_glyphs(c) if isinstance(c, str) else c for c in r] for r in _rep_criteria_rows(_F, pdf_safe=True)[1:]],
                                 col_widths=[CONTENT_W * 0.20, CONTENT_W * 0.32, CONTENT_W * 0.14, CONTENT_W * 0.34],
                             ))
                             story.append(Spacer(1, 10))
@@ -15221,8 +15221,7 @@ with tab1:
 
                             story.append(Paragraph("DATA MASUKAN PER SEGMEN", styles["H1"]))
                             story.append(_build_table(
-                                [[Paragraph(c, styles["TblHeader"]) for c in _rep_input_rows(seg_results_all)[0]]]
-                                + [[Paragraph(str(c), styles["TblCell"]) for c in r] for r in _rep_input_rows(seg_results_all)[1:]],
+                                _rep_input_rows(seg_results_all),
                                 col_widths=[CONTENT_W * 0.16, CONTENT_W * 0.16, CONTENT_W * 0.09, CONTENT_W * 0.10, CONTENT_W * 0.10,
                                            CONTENT_W * 0.09, CONTENT_W * 0.10, CONTENT_W * 0.09, CONTENT_W * 0.11],
                             ))
