@@ -370,7 +370,6 @@ _PROJECT_RESULT_KEYS = {
 _PROJECT_RESULT_PREFIXES = (
     "_flow_cache_", "_dem_cache_", "_d8_cache_", "orthophoto_parsed_", "sat_basemap_",
     "sim3d_sat_", "ai_reco_cache_", "dxf_regrade_bytes_", "flood_result_", "sim3d_result_",
-    "flow3d_result_", "pond_result_",
     "ba_erosi_boundary_",
 )
 _PROJECT_LAST_SIZES = {}  # key -> ukuran (byte) pada pemanggilan _collect_project_state terakhir
@@ -4682,15 +4681,15 @@ def _hub_module_specs():
              tags=[_t("Laju Drawdown", "Drawdown Rate"), _t("Muka Air (WL)", "Water Level (WL)"), _t("Faktor Keamanan", "Factor of Safety")]),
         dict(common, header_gradient="linear-gradient(135deg, #FEEB97 0%, #4FB783 100%)", badge_text=_t("MODUL 04: SIMULASI 3D", "MODULE 04: 3D SIMULATION"),
              badge_color="amber", fmt_text=_t("Animasi 3D", "3D Animation"), title=_t("Simulasi Aliran 3D", "3D Flow Simulation"),
-             subtitle=_t("Simulasi aliran air sungai/limpasan real-time (sumber Titik atau Hujan, mengikuti Erosion Mapping) di atas medan 3D + citra satelit, plus deteksi titik genangan (cekungan).",
-                         "Real-time river/overflow water flow simulation (Point or Rain source, following Erosion Mapping) over 3D terrain + satellite imagery, plus ponding/depression detection."),
-             intro_text=_t("Sumber aliran (titik hulu ATAU hujan tersebar) mengikuti otomatis pilihan 'Skenario Sumber Aliran' di Erosion Mapping. Aliran dihitung dgn solver local-inertial 2D (de Almeida dkk. 2012) yg menangkap limpasan/overtopping saat kapasitas medan terlampaui, divisualisasikan di atas citra satelit online. Terpisah: analisis statis cekungan/genangan via depression-fill (spt ArcGIS 'Fill'). Bersifat ilustratif, belum terkalibrasi.",
-                           "The flow source (upstream point OR distributed rain) automatically follows the 'Flow Source Scenario' chosen in Erosion Mapping. Flow is computed with a 2D local-inertial solver (de Almeida et al. 2012) that captures overtopping once the terrain's capacity is exceeded, visualized over online satellite imagery. Separately: a static depression/ponding analysis via depression-fill (like ArcGIS 'Fill'). Illustrative, not yet calibrated."),
-             features=[(_t("Sumber Otomatis dari Erosion Mapping", "Automatic Source from Erosion Mapping"), _t("Titik hulu atau hujan tersebar — tanpa input ganda.", "Upstream point or distributed rain — no duplicate input.")),
-                       (_t("Solver Local-Inertial 2D", "2D Local-Inertial Solver"), _t("Suku inersia (de Almeida 2012), overtopping muncul otomatis.", "Inertial term (de Almeida 2012), overtopping emerges automatically.")),
-                       (_t("Citra Satelit Online", "Online Satellite Imagery"), _t("Latar Esri World Imagery, tanpa perlu login/API key.", "Esri World Imagery backdrop, no login/API key needed.")),
-                       (_t("Deteksi Genangan (Cekungan)", "Ponding/Depression Detection"), _t("Analisis statis depression-fill — lokasi & volume genangan akhir.", "Static depression-fill analysis — final ponding location & volume."))],
-             tags=["Manning's n", _t("Sumber: Titik/Hujan", "Source: Point/Rain"), _t("Eksagerasi Vertikal", "Vertical Exaggeration")]),
+             subtitle=_t("Simulasi penjalaran debris/longsoran dan genangan banjir menuruni medan 3D hasil DEM segmen, lengkap animasi waktu.",
+                         "Simulates debris/landslide flow and flood inundation across the segment's 3D DEM terrain, with time-based animation."),
+             intro_text=_t("Dari titik sumber di peta interaktif, menjalankan cellular-automaton (debris/longsoran) atau shallow-water diffusive-wave (genangan banjir) di atas medan 3D, divisualisasikan sebagai animasi. Bersifat ilustratif, belum terkalibrasi.",
+                           "From a source point on an interactive map, runs a cellular-automaton (debris/landslide) or shallow-water diffusive-wave (flood) model over 3D terrain, shown as an animation. Illustrative, not yet calibrated."),
+             features=[(_t("Klik Peta Interaktif", "Interactive Map Click"), _t("Tandai titik sumber di peta DEM ber-citra satelit.", "Mark the source point on the satellite-imagery DEM map.")),
+                       (_t("Debris/Longsoran", "Debris/Landslide"), _t("Cellular-automaton penyebaran material berbasis kemiringan.", "Slope-based cellular-automaton material spreading.")),
+                       (_t("Genangan Banjir", "Flood Inundation"), _t("Shallow-water diffusive-wave mengikuti kontur.", "Shallow-water diffusive-wave following the terrain.")),
+                       (_t("Animasi 3D + Citra Satelit", "3D Animation + Satellite"), _t("Playback waktu di atas medan 3D dengan konteks citra satelit.", "Time playback over 3D terrain with satellite context."))],
+             tags=["Manning's n", _t("Radius Sumber", "Source Radius"), _t("Eksagerasi Vertikal", "Vertical Exaggeration")]),
         dict(common, header_gradient="linear-gradient(135deg, #4FB783 0%, #409D9B 100%)", badge_text=_t("MODUL 05: DESAIN CHANNEL", "MODULE 05: CHANNEL DESIGN"),
              badge_color="green", fmt_text="DXF 3D", title=_t("Rekonstruksi Desain", "Design Reconstruction"),
              subtitle=_t("Bangun ulang geometri channel secara parametrik (slope, lebar dasar, kedalaman, bench), hitung cut-fill dan saran kapasitas Manning, lalu ekspor DXF 3D.",
@@ -4759,8 +4758,8 @@ def _render_module_workflow():
             "2. Upload training data, choose the target (FS) and features, set cleaning (optional IQR outliers).\n3. Review correlation & scatter, run Check Best Model, then Train Model.\n4. Read the evaluation (R², MAE, RMSE / accuracy) — valid only within the training range.\n"
             "5. Upload new scenario/monitoring data → predicted FS + FAIL/CRITICAL/STABLE status.\n6. Review the FS vs water-level time series and verify critical scenarios with the Channel/Drainage Stability module.")),
         (_t("Modul 04 — Simulasi Aliran 3D", "Module 04 — 3D Flow Simulation"), False, _t(
-            "1. Pastikan Erosion Mapping segmen terkait sudah dijalankan (sumber DEM), dengan 'Skenario Sumber Aliran' (Hujan atau Satu Titik) sudah dipilih di Section B.\n2. Pilih segmen di tab ini — sumber aliran otomatis mengikuti pilihan tsb.\n3. Isi parameter (Manning's n, radius sumber kalau mode Titik, jumlah frame).\n4. Jalankan Simulasi Aliran — tinjau animasi 3D, titik limpasan, kedalaman & volume.\n5. (Opsional, terpisah) Deteksi Genangan — analisis statis cekungan/titik yang berpotensi menggenang.",
-            "1. Make sure Erosion Mapping for the relevant segment has been run (DEM source), with the 'Flow Source Scenario' (Rainfall or Point Source) already chosen in Section B.\n2. Select the segment here — the flow source automatically follows that choice.\n3. Fill the parameters (Manning's n, source radius for Point mode, number of frames).\n4. Run the Flow Simulation — review the 3D animation, overflow points, depth & volume.\n5. (Optional, separate) Detect Ponding — a static analysis of depressions/spots likely to pond.")),
+            "1. Pastikan Erosion Mapping segmen terkait sudah dijalankan (sumber DEM).\n2. Pilih segmen & jenis simulasi (Debris/Longsoran atau Genangan Banjir).\n3. Tandai titik sumber: klik di peta DEM atau input koordinat.\n4. Isi parameter (radius sumber, Manning's n, frame, eksagerasi vertikal).\n5. Jalankan Simulasi.\n6. Putar animasi dan tinjau kedalaman maksimum, volume, titik limpasan.",
+            "1. Make sure Erosion Mapping for the relevant segment has been run (DEM source).\n2. Select the segment & simulation type (Debris/Landslide or Flood Inundation).\n3. Mark the source point: click on the DEM map or enter coordinates.\n4. Fill the parameters (source radius, Manning's n, frames, vertical exaggeration).\n5. Run the simulation.\n6. Play the animation and review max depth, volume, overflow points.")),
         (_t("Modul 05 — Rekonstruksi Desain", "Module 05 — Design Reconstruction"), False, _t(
             "1. Pilih sumber geometri: upload DXF channel baru atau ambil dari hasil Erosion Mapping.\n2. Ubah parameter: sudut slope, lebar dasar, kedalaman, bench (grading).\n3. Tinjau volume cut-fill dan saran kapasitas Manning.\n4. Unduh DXF 3D desain revisi sebagai acuan.",
             "1. Choose the geometry source: upload a new channel DXF or use Erosion Mapping results.\n2. Change parameters: slope angles, bottom width, depth, benches (grading).\n3. Review cut-fill volumes and Manning capacity suggestions.\n4. Download the revised design as a 3D DXF reference.")),
@@ -19410,273 +19409,22 @@ def _simulate_flood_diffusive(grid_x, grid_y, grid_z, inside, src_xy, src_radius
     return h_frames, overflow_track, overflow_pts, z, dx, dy, cell_area
 
 
-# =========================================================================
-# SOLVER BARU: local-inertial 2D shallow-water (de Almeida dkk. 2012) --
-# upgrade dari _simulate_flood_diffusive di atas. Bedanya: fluks q di tiap
-# sisi sel TIDAK dihitung ulang dari nol tiap sub-step murni dari beda muka
-# air saat itu juga (diffusive-wave / kinematic), tapi punya "inersia" --
-# fluks step berikutnya dihitung dari fluks step sebelumnya + percepatan
-# gravitasi dikurangi gesekan Manning (skema semi-implisit, stabil & jauh
-# lebih ringan dari solver dynamic-wave/Saint-Venant penuh spt HEC-RAS 2D,
-# tapi menangkap efek gelombang/limpasan mendadak yang TIDAK bisa ditangkap
-# diffusive-wave murni -- itulah kenapa versi ini terasa lebih "seperti
-# sungai sungguhan" saat meluap, bukan cuma air yang "merembes" mengisi
-# kontur). Dipakai utk Simulasi Aliran Air 3D (real-time, sumber TITIK atau
-# HUJAN tersebar -- mengikuti pilihan Section B tab Erosion Mapping).
-def _simulate_flow_local_inertial(grid_x, grid_y, grid_z, inside, manning_n,
-                                   n_frames, sec_per_frame,
-                                   source_mode, point_xy=None, point_radius=15.0,
-                                   point_depth=0.3, rain_mm_hr=0.0,
-                                   min_substeps=6, max_substeps=80, g=9.81):
-    """source_mode: 'titik' (mempertahankan kedalaman >= point_depth di sekitar point_xy
-    tiap sub-step -- mensimulasikan aliran sungai kontinu dari 1 titik hulu) atau 'hujan'
-    (menambah lapisan air rain_mm_hr/3600 m/detik ke SETIAP sel `inside` tiap sub-step --
-    mensimulasikan limpasan hujan merata di seluruh catchment, lalu dialirkan turun
-    mengikuti gravitasi & Manning persis spt aliran permukaan sesungguhnya)."""
-    z = np.where(np.isnan(grid_z), np.nanmin(grid_z), grid_z).astype(float)
-    dx = float(np.nanmean(np.abs(np.diff(grid_x[:, 0])))) or 1.0
-    dy = float(np.nanmean(np.abs(np.diff(grid_y[0, :])))) or 1.0
-    cell_area = dx * dy
-
-    src_mask = None
-    if source_mode == "titik" and point_xy is not None:
-        src_mask = ((grid_x - point_xy[0]) ** 2 + (grid_y - point_xy[1]) ** 2) <= point_radius ** 2
-        src_mask = src_mask & inside
-        if not src_mask.any():
-            _ix = int(np.abs(grid_x[:, 0] - point_xy[0]).argmin())
-            _iy = int(np.abs(grid_y[0, :] - point_xy[1]).argmin())
-            src_mask = np.zeros_like(inside)
-            src_mask[_ix, _iy] = True
-
-    h = np.zeros_like(z)
-    if src_mask is not None:
-        h[src_mask] = point_depth
-
-    offsets = [(-1, 0, dy, dy), (1, 0, dy, dy), (0, -1, dx, dx), (0, 1, dx, dx)]
-    q_prev = {i: np.zeros_like(h) for i in range(len(offsets))}   # fluks m2/s per sisi, state antar sub-step
-
-    # jumlah sub-step per frame ditentukan ADAPTIF dari syarat CFL skema inersia lokal
-    # (Almeida dkk. 2012: dt <= ~0.7*dx/sqrt(g*h_maks)) -- supaya tetap stabil (tidak
-    # NaN/meledak) berapa pun kombinasi Manning's n / intensitas hujan / durasi per
-    # frame yang diisi user, tanpa perlu mereka atur cermat sendiri.
-    rain_rate = (rain_mm_hr / 1000.0) / 3600.0 if source_mode == "hujan" else 0.0
-
-    h_frames = [h.copy()]
-    overflow_track = np.zeros_like(h)
-
-    for _f in range(n_frames):
-        _h_est = max(float(h.max()), 0.05)
-        _dt_cfl = 0.7 * min(dx, dy) / np.sqrt(g * _h_est)
-        _n_sub = int(np.clip(np.ceil(sec_per_frame / max(_dt_cfl, 1e-3)), min_substeps, max_substeps))
-        dt = sec_per_frame / _n_sub
-
-        for _s in range(_n_sub):
-            if src_mask is not None:
-                h[src_mask] = np.maximum(h[src_mask], point_depth)
-            if rain_rate > 0:
-                h[inside] += rain_rate * dt
-
-            S = z + h
-            Q_dir, total_out = [], np.zeros_like(h)
-            for _i, (oy, ox, dist, width) in enumerate(offsets):
-                S_n = _grid_shift_no_wrap(S, oy, ox, -1e9)
-                z_n = _grid_shift_no_wrap(z, oy, ox, -1e9)
-                nb_inside = _grid_shift_no_wrap(inside.astype(np.float64), oy, ox, 0.0) > 0.5
-                valid_edge = inside & nb_inside
-
-                hflow = np.clip(np.maximum(S, S_n) - np.maximum(z, z_n), 0, None)
-                slope = np.where(valid_edge, (S - S_n) / dist, 0.0)  # + = mengalir i -> tetangga
-
-                qp = q_prev[_i]
-                _safe_h = np.maximum(hflow, 1e-6)
-                _denom = 1.0 + g * dt * (manning_n ** 2) * np.abs(qp) / np.power(_safe_h, 7.0 / 3.0)
-                q_new = (qp - g * hflow * dt * slope) / _denom
-                q_new = np.where((hflow > 1e-4) & valid_edge, q_new, 0.0)
-
-                Q = q_new * width * dt  # m3 -- boleh negatif (artinya arus balik krn inersia)
-                Q_dir.append(Q)
-                total_out += np.clip(Q, 0, None)
-                q_prev[_i] = q_new
-
-            avail = h * cell_area
-            scale = np.ones_like(h)
-            _over = total_out > avail
-            scale[_over] = avail[_over] / np.maximum(total_out[_over], 1e-9)
-
-            vol = h * cell_area
-            for _i, (oy, ox, dist, width) in enumerate(offsets):
-                Qs = np.where(Q_dir[_i] > 0, Q_dir[_i] * scale, Q_dir[_i])
-                vol -= Qs
-                _received_q = _grid_shift_no_wrap(Qs, -oy, -ox, 0.0)
-                vol += _received_q
-                overflow_track += np.clip(_received_q, 0, None)
-                q_prev[_i] = np.where(Q_dir[_i] > 0, q_prev[_i] * scale, q_prev[_i])
-
-            vol = np.clip(vol, 0, None)
-            h = vol / cell_area
-            h[~inside] = 0.0
-
-        h_frames.append(h.copy())
-
-    if src_mask is not None:
-        ring_mask = binary_dilation(src_mask, iterations=2) & (~src_mask) & inside
-    else:
-        ring_mask = inside
-    score = np.where(ring_mask, overflow_track, 0.0)
-    flat_order = np.argsort(score, axis=None)[::-1]
-    overflow_pts = []
-    for _idx in flat_order[:8]:
-        _iy, _ix = np.unravel_index(_idx, score.shape)
-        if score[_iy, _ix] <= 1e-6:
-            break
-        overflow_pts.append({
-            "X": float(grid_x[_iy, _ix]), "Y": float(grid_y[_iy, _ix]),
-            "Elevasi (m)": float(z[_iy, _ix]),
-            "Volume terlimpas (m³, kumulatif)": float(score[_iy, _ix]),
-        })
-
-    return h_frames, overflow_track, overflow_pts, z, dx, dy, cell_area
-
-
-# =========================================================================
-# FITUR BARU: deteksi titik/area genangan (cekungan) -- BUKAN simulasi aliran.
-# Memakai algoritma depression-fill (priority-flood) yang SAMA dipakai tab
-# Erosion Mapping (_dem_fill_depressions): kedalaman genangan potensial di
-# tiap sel = elevasi terisi (filled) dikurangi elevasi asli. Ini justru
-# jawaban ANALITIS utk "kalau air mengalir & akhirnya habis/berhenti, di
-# titik mana saja dia akan tertinggal menggenang" -- tanpa perlu menjalankan
-# simulasi transien sampai steady-state (hasilnya scr matematis identik utk
-# kondisi akhir "air habis", jauh lebih cepat & selalu konvergen).
-def _sample_grid_at(_data, _Xu, _Yu, _key):
-    """Sampling nearest-pixel generik dari raster berlabel UTM ({"extent":(xmin,xmax,ymin,ymax),
-    key: array HxW atau HxWx3}) pada array koordinat _Xu/_Yu (UTM) sembarang bentuk -- dipakai
-    baik utk sample warna RGB citra satelit maupun elevasi DEMNAS dgn 1 fungsi yang sama."""
-    if _data is None:
-        return None
-    _xmin, _xmax, _ymin, _ymax = _data["extent"]
-    _arr = _data[_key]
-    _h, _w = _arr.shape[0], _arr.shape[1]
-    _col = np.clip(((_Xu - _xmin) / max(_xmax - _xmin, 1e-9) * (_w - 1)).astype(int), 0, _w - 1)
-    _row = np.clip(((_ymax - _Yu) / max(_ymax - _ymin, 1e-9) * (_h - 1)).astype(int), 0, _h - 1)
-    return _arr[_row, _col]
-
-
-def _fetch_demnas_elevation_utm(utm_extent, out_size=200, pad_frac=0.15):
-    """Ambil elevasi DEMNAS (Digital Elevation Model Nasional -- BIG/Badan Informasi Geospasial,
-    RESMI & GRATIS, endpoint publik TANPA login/API key) via ArcGIS ImageServer, utk bounding box
-    UTM tertentu -- dipakai sbg kontur medan ASLI di LUAR boundary desain pada animasi 3D (bukan
-    bidang datar seperti sebelumnya). Sumber: geoservices.big.go.id, layanan ImageServer publik
-    (beda dgn Portal BIG yang perlu login utk bulk-download resolusi native/GeoTIFF penuh).
-    Best-effort: kalau server BIG lambat/down atau library 'rasterio' belum ada, kembalikan None
-    (area luar boundary jatuh kembali ke bidang datar, TIDAK menggagalkan simulasi)."""
-    try:
-        import rasterio
-        from rasterio.io import MemoryFile
-    except ImportError:
-        return None
-
-    xmin, xmax, ymin, ymax = utm_extent
-    pad_x = (xmax - xmin) * pad_frac
-    pad_y = (ymax - ymin) * pad_frac
-    xmin, xmax = xmin - pad_x, xmax + pad_x
-    ymin, ymax = ymin - pad_y, ymax + pad_y
-
-    aspect = (xmax - xmin) / max(ymax - ymin, 1e-6)
-    if aspect >= 1:
-        w = out_size
-        h = max(32, int(out_size / aspect))
-    else:
-        h = out_size
-        w = max(32, int(out_size * aspect))
-
-    epsg_code = _COORD_UTM_EPSG.split(":")[1]
-    url = "https://geoservices.big.go.id/raster/rest/services/DEMNAS/DEM_Indonesia/ImageServer/exportImage"
-    params = {
-        "bbox": f"{xmin},{ymin},{xmax},{ymax}",
-        "bboxSR": epsg_code,
-        "imageSR": epsg_code,
-        "size": f"{w},{h}",
-        "format": "tiff",
-        "pixelType": "F32",
-        "interpolation": "RSP_BilinearInterpolation",
-        "noData": "-9999",
-        "f": "image",
-    }
-    try:
-        resp = requests.get(url, params=params, timeout=25)
-        resp.raise_for_status()
-        with MemoryFile(resp.content) as _mem:
-            with _mem.open() as _src:
-                _z = _src.read(1).astype(float)
-        _z[_z <= -9000] = np.nan
-        if not np.isfinite(_z).any():
-            return None
-        return {"z": _z, "extent": (xmin, xmax, ymin, ymax)}
-    except Exception:
-        return None
-
-
-def _detect_ponding_zones(grid_x, grid_y, grid_z, inside, depth_threshold_m=0.05):
-    from scipy.ndimage import label as _cc_label
-    z = np.where(np.isnan(grid_z), np.nanmin(grid_z), grid_z).astype(float)
-    dx = float(np.nanmean(np.abs(np.diff(grid_x[:, 0])))) or 1.0
-    dy = float(np.nanmean(np.abs(np.diff(grid_y[0, :])))) or 1.0
-    cell_area = dx * dy
-
-    filled = _dem_fill_depressions(z, inside)
-    depth = np.clip(filled - z, 0, None)
-    depth[~inside] = 0.0
-    pond_mask = depth > depth_threshold_m
-
-    labels, n_ponds = _cc_label(pond_mask, structure=np.ones((3, 3), dtype=bool))
-    ponds = []
-    for _lbl in range(1, n_ponds + 1):
-        _m = labels == _lbl
-        _area = float(_m.sum() * cell_area)
-        if _area < cell_area * 2:   # buang noise 1 sel tunggal
-            continue
-        _depth_m = depth[_m]
-        _vol = float(_depth_m.sum() * cell_area)
-        _iy, _ix = np.unravel_index(np.argmax(np.where(_m, depth, -np.inf)), depth.shape)
-        ponds.append({
-            "id": len(ponds) + 1,
-            "X (titik terdalam)": float(grid_x[_iy, _ix]),
-            "Y (titik terdalam)": float(grid_y[_iy, _ix]),
-            "Kedalaman maks. (m)": float(_depth_m.max()),
-            "Luas (m²)": _area,
-            "Volume tertampung (m³)": _vol,
-            "mask": _m,
-        })
-    ponds.sort(key=lambda p: p["Volume tertampung (m³)"], reverse=True)
-    for _i, _p in enumerate(ponds):
-        _p["id"] = _i + 1
-    return depth, pond_mask, ponds, z, dx, dy, cell_area
-
-
 # =========================================================
-# ===== TAB 5: SIMULASI ALIRAN AIR 3D (SUNGAI/OVERFLOW) + GENANGAN =====
+# =========== TAB 5: SIMULASI ALIRAN 3D (DEBRIS FLOW) =====
 # =========================================================
 with tab5:
 
-    _sub_header(_t("Simulasi Aliran Air 3D — Sungai / Overflow + Deteksi Genangan", "3D Water Flow Simulation — River / Overflow + Ponding Detection"))
-    st.caption(_t(
-        "Simulasi aliran air (bukan debris/longsoran) menuruni medan 3D dari hasil DEM segmen yang "
-        "sudah dianalisis, dengan sumber mengikuti otomatis Section B tab Erosion Mapping (Titik atau "
-        "Hujan), plus analisis terpisah lokasi genangan/cekungan.",
-        "Water flow simulation (not debris/landslide) across the segment's analyzed 3D DEM terrain, "
-        "with the source automatically following Section B of the Erosion Mapping tab (Point or Rain), "
-        "plus a separate ponding/depression location analysis."
-    ))
-    _ui_warning(_t(
-        "Ini solver **local-inertial 2D yang disederhanakan** (de Almeida dkk. 2012) untuk visualisasi "
-        "ilustratif/edukatif — BUKAN solver dynamic-wave/Saint-Venant penuh (beda dengan HEC-RAS 2D/"
-        "FLO-2D/ANUGA). Jangan dipakai sebagai satu-satunya dasar desain mitigasi tanpa dikonfirmasi "
-        "model rekayasa yang tervalidasi.",
-        "This is a simplified **2D local-inertial solver** (de Almeida et al. 2012) for illustrative/"
-        "educational visualization — NOT a full dynamic-wave/Saint-Venant solver (unlike HEC-RAS 2D/"
-        "FLO-2D/ANUGA). Do not use as the sole basis for mitigation design without confirmation from a "
-        "validated engineering model."
-    ))
+    _sub_header(_t("Simulasi Aliran 3D — Debris Flow / Longsoran", "3D Flow Simulation — Debris Flow / Landslide"))
+    st.caption(
+        "Simulasi penjalaran massa (debris flow/longsoran/aliran sedimen) menuruni medan 3D dari "
+        "hasil DEM segmen yang sudah dianalisis, lengkap dengan animasi seiring waktu."
+    )
+    _ui_warning(
+        "Ini model **cellular-automaton yang disederhanakan** (penyebaran berbasis kemiringan "
+        "& sudut friksi) untuk visualisasi ilustratif/edukatif — BUKAN solver fisika penuh "
+        "(beda dengan RAMMS/FLO-2D/DAN3D/r.avaflow). Jangan dipakai sebagai satu-satunya dasar "
+        "desain mitigasi tanpa dikonfirmasi model rekayasa yang tervalidasi."
+    )
 
     _seg_results_sim = st.session_state.get("segment_results", {})
 
@@ -19706,15 +19454,16 @@ with tab5:
                 "ulang RUN ANALYSIS untuk segmen ini."
             )
         else:
+            _sub_header(_t("1. Setup Sumber Longsoran/Debris", "1. Landslide/Debris Source Setup"))
+
             _res_native = _gx_full.shape[0]
             _sim_res_n = st.slider(
-                _t("Resolusi grid simulasi (lebih tinggi = lebih detail, lebih lambat)",
-                   "Simulation grid resolution (higher = more detail, slower)"),
+                "Resolusi grid simulasi (lebih tinggi = lebih detail, lebih lambat)",
                 min_value=25, max_value=min(140, _res_native), value=min(70, _res_native),
                 step=5, key=f"sim3d_res_{_sim_sid}",
-                help=_t("Grid DEM asli di-downsample ke resolusi ini supaya animasi 3D tetap responsif.",
-                        "The original DEM grid is downsampled to this resolution so the 3D animation stays responsive."),
+                help="Grid DEM asli di-downsample ke resolusi ini supaya animasi 3D tetap responsif.",
             )
+
             _step_n = max(1, _res_native // _sim_res_n)
             _grid_x = _gx_full[::_step_n, ::_step_n]
             _grid_y = _gy_full[::_step_n, ::_step_n]
@@ -19724,11 +19473,13 @@ with tab5:
                 else np.ones_like(_grid_z, dtype=bool)
             )
             _inside_sim = _inside_sim & ~np.isnan(_grid_z)
+
             _bnds_sim = _bnd_sim.bounds
 
-            # --- koordinat UTM (utk overlay citra satelit) -- sumbu lokal DXF miring ~57°
-            # thd UTM sebenarnya, jadi citra satelit (yg north-up) hanya bisa dioverlay dgn
-            # benar kalau plot-nya juga dlm UTM, bukan koordinat lokal.
+            # --- siapkan koordinat UTM (utk overlay citra satelit, spt tab 1) ---
+            # Sumbu lokal DXF miring ~57° thd UTM sebenarnya, jadi citra satelit (yg
+            # north-up) hanya bisa dioverlay dgn benar kalau plot-nya juga dlm UTM,
+            # bukan koordinat lokal -- makanya semua trace di bawah pakai _utm_gx/_utm_gy.
             _utm_gx, _utm_gy = _grid_lokal_to_utm(_grid_x, _grid_y)
             _sbx_sim, _sby_sim = _boundary_xy_flat(_bnd_sim)
             _utm_bx_sim, _utm_by_sim = _ring_lokal_to_utm(_sbx_sim, _sby_sim)
@@ -19740,32 +19491,10 @@ with tab5:
             if _cached_sat_sim is not None and _cached_sat_sim.get("sig") == _sat_sig_sim:
                 _sat_sim = _cached_sat_sim.get("data")
             else:
-                with st.spinner(_t("Mengambil citra satelit online (Esri)...", "Fetching online satellite imagery (Esri)...")):
-                    _utm_ext_sim = (float(np.nanmin(_utm_gx)), float(np.nanmax(_utm_gx)),
-                                     float(np.nanmin(_utm_gy)), float(np.nanmax(_utm_gy)))
-                    _sat_sim = _fetch_satellite_basemap_utm(_utm_ext_sim, out_size=512, pad_frac=0.15)
-                    st.session_state[_sat_cache_key_sim] = {"sig": _sat_sig_sim, "data": _sat_sim}
-
-            # PERMINTAAN: area DI LUAR boundary desain jangan bidang datar -- pakai kontur medan
-            # ASLI dari DEMNAS (BIG, resmi & gratis tanpa login) supaya animasi 3D terasa
-            # menyatu dgn medan sungguhan di sekitarnya, bukan cuma "lantai" citra satelit rata.
-            _demnas_cache_key_sim = f"sim3d_demnas_{_sim_sid}"
-            _cached_demnas_sim = st.session_state.get(_demnas_cache_key_sim)
-            if _cached_demnas_sim is not None and _cached_demnas_sim.get("sig") == _sat_sig_sim:
-                _demnas_sim = _cached_demnas_sim.get("data")
-            else:
-                with st.spinner(_t("Mengambil kontur DEMNAS (BIG) di luar boundary...", "Fetching DEMNAS (BIG) contours outside the boundary...")):
-                    _utm_ext_sim2 = (float(np.nanmin(_utm_gx)), float(np.nanmax(_utm_gx)),
-                                      float(np.nanmin(_utm_gy)), float(np.nanmax(_utm_gy)))
-                    _demnas_sim = _fetch_demnas_elevation_utm(_utm_ext_sim2, out_size=200, pad_frac=0.15)
-                    st.session_state[_demnas_cache_key_sim] = {"sig": _sat_sig_sim, "data": _demnas_sim}
-            if _demnas_sim is None:
-                st.caption(_t(
-                    "⚠️ Kontur DEMNAS di luar boundary tidak berhasil diambil (server BIG lambat/"
-                    "tidak terjangkau) — area luar boundary ditampilkan datar sbg gantinya.",
-                    "⚠️ Could not fetch DEMNAS contours outside the boundary (BIG server slow/"
-                    "unreachable) — the outside area is shown flat instead."
-                ))
+                _utm_ext_sim = (float(np.nanmin(_utm_gx)), float(np.nanmax(_utm_gx)),
+                                 float(np.nanmin(_utm_gy)), float(np.nanmax(_utm_gy)))
+                _sat_sim = _fetch_satellite_basemap_utm(_utm_ext_sim, out_size=512, pad_frac=0.15)
+                st.session_state[_sat_cache_key_sim] = {"sig": _sat_sig_sim, "data": _sat_sim}
 
             def _sample_rgb_grid(_sat_data, _n=70):
                 """Bangun grid UTM kasar (n x n) sekitar boundary + sample warna RGB dari
@@ -19784,21 +19513,13 @@ with tab5:
                 _colors = _rgb[_row, _col]
                 return _GXu, _GYu, _colors
 
-            def _make_satellite_plane_trace(_sat_data, _z_level, _n=70, _dem_data=None, _vexag=1.0):
+            def _make_satellite_plane_trace(_sat_data, _z_level, _n=70):
                 _sampled = _sample_rgb_grid(_sat_data, _n)
                 if _sampled is None:
                     return None
                 _GXu, _GYu, _colors = _sampled
                 _Xf, _Yf = _GXu.ravel(), _GYu.ravel()
-                if _dem_data is not None:
-                    # PERMINTAAN: area luar boundary pakai kontur DEMNAS asli, bukan bidang
-                    # datar -- elevasinya di-sample dari raster DEMNAS lalu diberi eksagerasi
-                    # vertikal yang SAMA dgn medan di dalam boundary, supaya sambungannya wajar.
-                    _Zg = _sample_grid_at(_dem_data, _GXu, _GYu, "z")
-                    _z_fallback = float(np.nanmin(_dem_data["z"])) if np.isfinite(_dem_data["z"]).any() else _z_level / max(_vexag, 1e-9)
-                    _Zf = (np.where(np.isfinite(_Zg), _Zg, _z_fallback) * _vexag).ravel()
-                else:
-                    _Zf = np.full_like(_Xf, _z_level)
+                _Zf = np.full_like(_Xf, _z_level)
                 _vcolor = [f"rgb({r},{g},{b})" for r, g, b in _colors.reshape(-1, 3)]
                 _idx = np.arange(_n * _n).reshape(_n, _n)
                 _i, _j, _k = [], [], []
@@ -19814,226 +19535,478 @@ with tab5:
                     flatshading=False, name="Citra satelit", showlegend=False, hoverinfo="skip",
                 )
 
-            def _mesh_tris_from_grid(_inside2d):
-                """Indeks segitiga (i,j,k) dari grid ny x nx, MELOMPATI sel yang sebagian titik
-                sudutnya di luar `inside2d` -- dipakai supaya mesh terdrape (Mesh3d) medan di
-                DALAM boundary tidak menggambar area luar/invalid, setara `connectgaps=False`
-                pada go.Surface tapi utk Mesh3d (yg tak punya opsi itu)."""
-                _ny, _nx = _inside2d.shape
-                _idx = np.arange(_ny * _nx).reshape(_ny, _nx)
-                _i, _j, _k = [], [], []
-                for _r in range(_ny - 1):
-                    for _c in range(_nx - 1):
-                        if not (_inside2d[_r, _c] and _inside2d[_r, _c + 1]
-                                and _inside2d[_r + 1, _c] and _inside2d[_r + 1, _c + 1]):
-                            continue
-                        _a, _b2, _d, _e = _idx[_r, _c], _idx[_r, _c + 1], _idx[_r + 1, _c], _idx[_r + 1, _c + 1]
-                        _i += [_a, _b2]
-                        _j += [_b2, _e]
-                        _k += [_d, _d]
-                return _i, _j, _k
+            _erosion_mapping_pt = None
+            _main_sid_for_pt = (st.session_state.get("segments") or [None])[0]
+            if _main_sid_for_pt is not None and st.session_state.get(f"source_type_{_main_sid_for_pt}") == "Satu Titik (Point Source)":
+                _pt_x_em = st.session_state.get(f"point_x_{_main_sid_for_pt}")
+                _pt_y_em = st.session_state.get(f"point_y_{_main_sid_for_pt}")
+                if _pt_x_em is not None and _pt_y_em is not None:
+                    _erosion_mapping_pt = (float(_pt_x_em), float(_pt_y_em))
 
-            def _blend_water_rgb(_base_rgb, _h_layer2d, _depth_thresh, _depth_max):
-                """Campur warna dasar (foto satelit terdrape di medan) dgn tint biru sesuai
-                kedalaman air -- inilah yang membuat animasi terlihat 'air sungguhan mengalir
-                di atas foto medan aslinya', bukan gradasi warna elevasi generik."""
-                _alpha = np.clip((_h_layer2d - _depth_thresh) / max(_depth_max - _depth_thresh, 1e-6), 0, 1)
-                _alpha = _alpha[..., None]
-                _water_rgb = np.array([30, 100, 195], dtype=float)
-                _blended = _base_rgb.astype(float) * (1 - _alpha) + _water_rgb * _alpha
-                return np.clip(_blended, 0, 255).astype(np.uint8)
+            _src_method_sim = st.radio(
+                _t("Cara menentukan titik sumber", "Method to set source point"),
+                (
+                    [_t("Input Koordinat Manual", "Manual Coordinate Input"),
+                     _t("Ambil dari Titik Hulu (Erosion Mapping)", "Use Upstream Point (from Erosion Mapping)")]
+                    if _erosion_mapping_pt is not None
+                    else [_t("Input Koordinat Manual", "Manual Coordinate Input")]
+                ),
+                key=f"sim3d_src_method_{_sim_sid}",
+                horizontal=True,
+                help=_t(
+                    "'Ambil dari Titik Hulu' memakai koordinat yang sama dengan opsi 'Satu Titik (Point "
+                    "Source)' di Section B tab Erosion Mapping — supaya tidak perlu input dua kali titik "
+                    "yang sama. Hanya muncul kalau opsi tsb sedang aktif di sana.",
+                    "'Use Upstream Point' reuses the same coordinate as the 'Point Source' option in "
+                    "Section B of the Erosion Mapping tab — so you don't need to enter the same point "
+                    "twice. Only shown when that option is active there."
+                ),
+            )
 
-            _sub_header(_t("1. Simulasi Aliran Air 3D — Sungai / Limpasan (real-time)",
-                            "1. 3D Water Flow Simulation — River / Overflow (real-time)"))
-            _ui_info(_t(
-                "Air mengalir TERUS-MENERUS (bukan sekali tuang lalu habis) dari sumber yang dipilih, "
-                "dihitung dengan solver **local-inertial 2D** (de Almeida dkk. 2012 — punya suku inersia, "
-                "beda dari diffusive-wave murni) sehingga limpasan/overtopping saat kapasitas medan "
-                "terlampaui muncul otomatis dari fisikanya, ditampilkan di atas citra satelit online "
-                "(Esri, tanpa perlu login) sebagai konteks lokasi. Sumber aliran (Titik atau Hujan) "
-                "**mengikuti otomatis** pilihan 'Skenario Sumber Aliran' di Section B tab Erosion Mapping "
-                "— ganti di sana kalau ingin skenario lain, bukan di tab ini.",
-                "Water flows CONTINUOUSLY (not a one-time pour) from the selected source, computed with a "
-                "**local-inertial 2D** solver (de Almeida et al. 2012 — has an inertial term, unlike pure "
-                "diffusive-wave) so overtopping/overflow once the terrain's capacity is exceeded emerges "
-                "naturally from the physics, shown over free online satellite imagery (Esri, no login) for "
-                "location context. The flow source (Point or Rain) **automatically follows** the 'Flow "
-                "Source Scenario' choice in Section B of the Erosion Mapping tab — change it there, not here."
-            ))
-
-            _main_sid_sim = (st.session_state.get("segments") or [None])[0]
-            _src_type_tab1 = st.session_state.get(f"source_type_{_main_sid_sim}") if _main_sid_sim else None
-            _hydro_tab1 = (_sim_res.get("hydraulics_result") or {}) if isinstance(_sim_res.get("hydraulics_result"), dict) else {}
-
-            _flow_source_mode = None
-            _src_point = None
-            _rain_intensity = None
-
-            if _src_type_tab1 == "Satu Titik (Point Source)":
-                _flow_source_mode = "titik"
-                _pt_x_tab1 = st.session_state.get(f"point_x_{_main_sid_sim}")
-                _pt_y_tab1 = st.session_state.get(f"point_y_{_main_sid_sim}")
-                _pt_depth_tab1 = float(st.session_state.get(f"point_depth_{_main_sid_sim}", 0.3) or 0.3)
-                if _pt_x_tab1 is None or _pt_y_tab1 is None:
-                    _ui_warning(_t(
-                        "Mode 'Satu Titik' aktif di Erosion Mapping tapi koordinatnya belum diisi — "
-                        "lengkapi di Section B tab Erosion Mapping dulu.",
-                        "'Point Source' mode is active in Erosion Mapping but no coordinate is set yet — "
-                        "fill it in Section B of the Erosion Mapping tab first."
-                    ))
-                else:
-                    _src_point = (float(_pt_x_tab1), float(_pt_y_tab1))
-                    st.success(_t(
-                        f"Sumber TITIK (dari Erosion Mapping): X={_src_point[0]:.2f}, Y={_src_point[1]:.2f}, "
-                        f"kedalaman dipertahankan {_pt_depth_tab1:.2f} m — air mengalir terus dari sini.",
-                        f"POINT source (from Erosion Mapping): X={_src_point[0]:.2f}, Y={_src_point[1]:.2f}, "
-                        f"depth held at {_pt_depth_tab1:.2f} m — water flows continuously from here."
-                    ))
-            elif _src_type_tab1 == "Hujan (Uniform)":
-                _flow_source_mode = "hujan"
-                _rain_intensity = _hydro_tab1.get("intensity_mm_hr")
-                if _rain_intensity:
-                    st.success(_t(
-                        f"Sumber HUJAN (dari Erosion Mapping): intensitas rencana (Mononobe) "
-                        f"{_rain_intensity:.1f} mm/jam, disebar merata ke SELURUH area boundary segmen "
-                        f"lalu dialirkan turun mengikuti topografi.",
-                        f"RAIN source (from Erosion Mapping): design intensity (Mononobe) "
-                        f"{_rain_intensity:.1f} mm/hr, spread uniformly over the ENTIRE segment boundary "
-                        f"then routed downhill following the topography."
-                    ))
-                else:
-                    _ui_warning(_t(
-                        "Mode 'Hujan' aktif di Erosion Mapping tapi intensitas rencana segmen ini belum "
-                        "tersedia (jalankan RUN ANALYSIS dengan hujan rencana/Mononobe aktif). Isi manual "
-                        "di bawah sebagai gantinya sementara.",
-                        "'Rainfall' mode is active in Erosion Mapping but this segment's design intensity "
-                        "isn't available yet (run RUN ANALYSIS with the design/Mononobe rainfall enabled). "
-                        "Fill it manually below as a temporary substitute."
-                    ))
-                    _rain_intensity = st.number_input(
-                        _t("Intensitas hujan manual (mm/jam)", "Manual rain intensity (mm/hr)"),
-                        min_value=1.0, value=30.0, step=5.0, key=f"flow3d_manual_intensity_{_sim_sid}",
+            if _src_method_sim.startswith(_t("Ambil dari Titik Hulu", "Use Upstream Point")):
+                _src_x, _src_y = _erosion_mapping_pt
+                st.caption(
+                    _t(
+                        f"Memakai titik hulu dari Erosion Mapping: X={_src_x:.3f}, Y={_src_y:.3f}. "
+                        "Ganti ke 'Input Koordinat Manual' kalau ingin titik sumber yang berbeda khusus "
+                        "untuk simulasi ini.",
+                        f"Using upstream point from Erosion Mapping: X={_src_x:.3f}, Y={_src_y:.3f}. "
+                        "Switch to 'Manual Coordinate Input' if this simulation needs a different source point."
                     )
+                )
             else:
-                _ui_warning(_t(
-                    "Belum ada 'Skenario Sumber Aliran' yang dipilih di Section B tab Erosion Mapping "
-                    "(Hujan atau Satu Titik) — pilih dulu di sana, tab ini otomatis mengikutinya.",
-                    "No 'Flow Source Scenario' selected yet in Section B of the Erosion Mapping tab "
-                    "(Rainfall or Point Source) — choose one there first; this tab follows it automatically."
-                ))
+                _ui_info(
+                    "Titik sumber ditandai lewat input koordinat manual di bawah (opsi klik-di-peta "
+                    "sudah dihapus karena tidak reliable di semua environment browser/Streamlit)."
+                )
+                _mcs1, _mcs2 = st.columns(2)
+                with _mcs1:
+                    _src_x = st.number_input(
+                        "Koordinat X sumber", value=float((_bnds_sim[0] + _bnds_sim[2]) / 2),
+                        format="%.3f", key=f"sim3d_srcx_{_sim_sid}",
+                    )
+                with _mcs2:
+                    _src_y = st.number_input(
+                        "Koordinat Y sumber", value=float((_bnds_sim[1] + _bnds_sim[3]) / 2),
+                        format="%.3f", key=f"sim3d_srcy_{_sim_sid}",
+                    )
+            st.session_state[f"sim3d_click_xy_{_sim_sid}"] = (float(_src_x), float(_src_y))
+
+            _click_sim = st.session_state.get(f"sim3d_click_xy_{_sim_sid}")
+            if _click_sim is not None:
+                st.success(_t(f"Titik sumber saat ini: X={_click_sim[0]:.2f}, Y={_click_sim[1]:.2f}", f"Current source point: X={_click_sim[0]:.2f}, Y={_click_sim[1]:.2f}"))
+            else:
+                _ui_warning("Belum ada titik sumber ditandai.")
 
             _sub_header(_t("2. Parameter Simulasi", "2. Simulation Parameters"))
             _pc1, _pc2, _pc3 = st.columns(3)
             with _pc1:
-                _manning_n_flow = st.number_input(
-                    _t("Koefisien kekasaran Manning (n)", "Manning's roughness coefficient (n)"),
-                    min_value=0.010, max_value=0.200, value=0.035, step=0.005, format="%.3f",
-                    key=f"flow3d_manning_{_sim_sid}",
-                    help="≈0.030–0.040 sungai alami/tanah, ≈0.020–0.025 saluran beton, ≈0.050–0.080 semak/vegetasi lebat.",
+                _src_radius = st.number_input(
+                    "Radius sumber material (m)", min_value=5.0, value=30.0, step=5.0,
+                    key=f"sim3d_radius_{_sim_sid}",
                 )
-                if _flow_source_mode == "titik":
-                    _flow_radius = st.number_input(
-                        _t("Radius area sumber (m)", "Source area radius (m)"),
-                        min_value=5.0, value=15.0, step=5.0, key=f"flow3d_radius_{_sim_sid}",
-                    )
-                else:
-                    _flow_radius = 15.0
+                _vol_sim = st.number_input(
+                    "Volume material awal (m³)", min_value=10.0, value=2000.0, step=100.0,
+                    key=f"sim3d_vol_{_sim_sid}",
+                )
             with _pc2:
-                _n_frames_flow = st.slider(
-                    _t("Jumlah frame animasi", "Number of animation frames"), 10, 60, 30, key=f"flow3d_nframes_{_sim_sid}",
+                _friction_deg = st.slider(
+                    "Sudut friksi/berhenti (°) — makin kecil, makin jauh larinya", 3, 30, 12,
+                    key=f"sim3d_friction_{_sim_sid}",
                 )
-                _sec_per_frame_flow = st.number_input(
-                    _t("Durasi tersimulasi per frame (detik)", "Simulated duration per frame (s)"),
-                    min_value=1.0, value=60.0, step=5.0, key=f"flow3d_secframe_{_sim_sid}",
-                    help=_t(
-                        "Jumlah sub-step per frame dihitung OTOMATIS dari syarat stabilitas CFL solver "
-                        "inersia lokal — tidak perlu diatur manual.",
-                        "The number of sub-steps per frame is chosen AUTOMATICALLY from the local-inertial "
-                        "solver's CFL stability condition — no need to tune it manually.",
-                    ),
+                _mobility_sim = st.slider(
+                    "Mobilitas aliran (kecepatan penyebaran)", 0.1, 1.0, 0.6, step=0.05,
+                    key=f"sim3d_mobility_{_sim_sid}",
                 )
             with _pc3:
-                _vexag_flow = st.slider(
-                    _t("Eksagerasi vertikal tampilan", "Vertical exaggeration"), 1.0, 4.0, 1.8, step=0.1,
-                    key=f"flow3d_vexag_{_sim_sid}",
+                _n_frames_sim = st.slider(
+                    _t("Jumlah frame animasi", "Number of animation frames"), 10, 50, 24, key=f"sim3d_nframes_{_sim_sid}",
+                )
+                _sec_per_frame = st.number_input(
+                    "Durasi tersimulasi per frame (detik)", min_value=0.5, value=3.0, step=0.5,
+                    key=f"sim3d_secframe_{_sim_sid}",
+                )
+                _vexag = st.slider(
+                    "Eksagerasi vertikal tampilan", 1.0, 4.0, 1.8, step=0.1,
+                    key=f"sim3d_vexag_{_sim_sid}",
                 )
 
-            _run_flow = st.button(
-                _t("Jalankan Simulasi Aliran", "Run Flow Simulation"), key=f"flow3d_run_{_sim_sid}", type="primary",
-                disabled=(_flow_source_mode is None or (_flow_source_mode == "titik" and _src_point is None)),
+            _run_sim = st.button(_t("Jalankan Simulasi", "Run Simulation"), key=f"sim3d_run_{_sim_sid}", type="primary")
+
+            if _click_sim is None:
+                _ui_info("Tandai dulu lokasi sumber (klik peta / input koordinat) sebelum menjalankan simulasi.")
+            elif _run_sim:
+                _scx, _scy = _click_sim
+                if not _bnd_sim.contains(Point(_scx, _scy)):
+                    st.error(_t("Titik sumber berada di luar boundary area kajian.", "The source point is outside the study area boundary."))
+                else:
+                    with st.spinner("Menjalankan simulasi penyebaran massa..."):
+                        _dx_sim = float(np.nanmean(np.abs(np.diff(_grid_x[:, 0])))) or 1.0
+                        _dy_sim = float(np.nanmean(np.abs(np.diff(_grid_y[0, :])))) or 1.0
+
+                        _src_mask_sim = (
+                            (_grid_x - _scx) ** 2 + (_grid_y - _scy) ** 2
+                        ) <= _src_radius ** 2
+                        _src_mask_sim = _src_mask_sim & _inside_sim
+                        if not _src_mask_sim.any():
+                            _iix = int(np.abs(_grid_x[:, 0] - _scx).argmin())
+                            _iiy = int(np.abs(_grid_y[0, :] - _scy).argmin())
+                            _src_mask_sim = np.zeros_like(_inside_sim)
+                            _src_mask_sim[_iix, _iiy] = True
+
+                        _z_fill = np.where(np.isnan(_grid_z), np.nanmin(_grid_z), _grid_z)
+                        # PERBAIKAN: elevasi mentah (_z_fill) sering punya cekungan kecil PALSU (artefak
+                        # interpolasi griddata di area data jarang) yg dulu bikin massa "berhenti"/menggenang
+                        # di situ alih-alih terus mengalir turun -- sekarang arah aliran dihitung dari versi
+                        # yg SUDAH di-fill (teknik priority-flood yg SAMA dipakai tab Erosion Mapping utk D8),
+                        # supaya alirannya konsisten & benar-benar menuruni lereng seperti di Erosion Mapping.
+                        # Elevasi ASLI (_z_fill) tetap dipakai apa adanya utk tampilan mesh 3D.
+                        _z_route = _dem_fill_depressions(_z_fill, _inside_sim)
+
+                        _sub_steps_sim = 4
+                        _h = np.zeros_like(_z_fill, dtype=float)
+                        _src_area_sim = _src_mask_sim.sum() * _dx_sim * _dy_sim
+                        _h[_src_mask_sim] = _vol_sim / max(_src_area_sim, 1e-6)
+                        _h[~_inside_sim] = 0.0
+
+                        _friction_slope_sim = np.tan(np.radians(_friction_deg))
+                        _offsets_sim = [(-1, 0), (1, 0), (0, -1), (0, 1),
+                                        (-1, -1), (-1, 1), (1, -1), (1, 1)]
+
+                        _h_frames = [_h.copy()]
+                        for _f in range(_n_frames_sim):
+                            for _s in range(_sub_steps_sim):
+                                _surf = _z_route + _h
+                                _weights = []
+                                _tot_w = np.zeros_like(_h)
+                                for (_oy, _ox) in _offsets_sim:
+                                    # tetangga di luar grid diberi elevasi +inf (tembok, bukan wrap-around)
+                                    # supaya materi tidak "meloncat" dari tepi seberang, dan juga tidak
+                                    # dipaksa keluar dari grid krn dianggap curam ke arah yg tak ada datanya.
+                                    _nsurf = _grid_shift_no_wrap(_surf, _oy, _ox, np.inf)
+                                    _dist = float(np.hypot(_oy * _dy_sim, _ox * _dx_sim))
+                                    _slope_local = (_surf - _nsurf) / _dist
+                                    _w = np.clip(_slope_local, 0, None)
+                                    _w = np.where(_w > _friction_slope_sim, _w, 0.0)
+                                    _weights.append(_w)
+                                    _tot_w += _w
+                                _safe_tot = np.where(_tot_w > 0, _tot_w, 1.0)
+                                _outflow_frac = np.clip(_mobility_sim * _tot_w, 0, 0.5)
+                                _h_new = _h * (1 - _outflow_frac)
+                                for (_oy, _ox), _w in zip(_offsets_sim, _weights):
+                                    _flow = _h * _outflow_frac * (_w / _safe_tot)
+                                    # PERBAIKAN BUG ARAH: _flow[i,j] = jumlah yg dikirim dari sel (i,j) ke
+                                    # tetangga (i-_oy, j-_ox) -- jadi sel penerima yg benar itu (i+_oy,
+                                    # j+_ox), diambil dgn shift (-_oy,-_ox), BUKAN (_oy,_ox) spt kode lama.
+                                    # Kode lama memakai shift yg sama dgn arah pengiriman -> materi
+                                    # dikreditkan ke sel yg SALAH (bukan tetangga sebenarnya), sehingga
+                                    # sebarannya tidak benar2 mengikuti kemiringan turun spt yg terlihat
+                                    # di tab Erosion Mapping. Sel penerima yg tak punya pengirim sah (di
+                                    # tepi grid) diisi 0, bukan wrap-around dari tepi seberang.
+                                    _received = _grid_shift_no_wrap(_flow, -_oy, -_ox, 0.0)
+                                    _h_new = _h_new + _received
+                                _h_new[~_inside_sim] = 0.0
+                                _h = _h_new
+                            _h_frames.append(_h.copy())
+
+                        st.session_state[f"sim3d_result_{_sim_sid}"] = {
+                            "h_frames": _h_frames,
+                            "grid_x": _grid_x, "grid_y": _grid_y, "z_fill": _z_fill,
+                            "inside": _inside_sim, "sec_per_frame": _sec_per_frame,
+                            "cell_area": _dx_sim * _dy_sim,
+                            "vexag": _vexag,
+                        }
+
+            _sim_out = st.session_state.get(f"sim3d_result_{_sim_sid}")
+
+            if _sim_out is not None:
+                _sub_header(_t("3. Hasil Animasi 3D", "3. 3D Animation Results"))
+
+                _hf = _sim_out["h_frames"]
+                _gx3 = _sim_out["grid_x"]
+                _gy3 = _sim_out["grid_y"]
+                _z3 = _sim_out["z_fill"]
+                _ins3 = _sim_out["inside"]
+                _utm_gx3, _utm_gy3 = _grid_lokal_to_utm(_gx3, _gy3)
+                _spf = _sim_out["sec_per_frame"]
+                _vex = _sim_out["vexag"]
+                _cell_area_sim = _sim_out.get("cell_area", 1.0)
+
+                _zmin, _zmax = float(np.nanmin(_z3)), float(np.nanmax(_z3))
+                _zrange = max(_zmax - _zmin, 1e-6)
+                _depth_max = max(float(np.max([hf.max() for hf in _hf])), 1e-6)
+                _depth_thresh = _depth_max * 0.02
+
+                _terrain_colorscale = [
+                    [0.00, "#8b0000"], [0.15, "#c1440e"], [0.32, "#e08a2b"], [0.48, "#e8c93d"],
+                    [0.65, "#a8c93d"], [0.799, "#1b5e28"],
+                    [0.80, "#aee9ff"], [0.87, "#2f9bdb"], [0.94, "#0b4c91"], [1.00, "#021a49"],
+                ]
+
+                def _make_surfacecolor(_h_layer):
+                    _elev_norm = np.clip((_z3 - _zmin) / _zrange, 0, 1) * 0.799
+                    _flow_norm = np.clip(_h_layer / _depth_max, 0, 1)
+                    _disp = np.where(
+                        _h_layer > _depth_thresh,
+                        0.80 + _flow_norm * 0.20,
+                        _elev_norm,
+                    )
+                    _disp = np.where(_ins3, _disp, np.nan)
+                    return _disp
+
+                _z_display = _z3 * _vex
+                # Sembunyikan mesh permukaan animasi DI LUAR boundary kajian -- z diberi NaN
+                # dan connectgaps=False supaya Plotly benar-benar membuat lubang di situ
+                # (bukan sekadar mewarnainya NaN, yang sebelumnya malah tampil merah solid).
+                _z_display = np.where(_ins3, _z_display, np.nan)
+
+                _sat_z_level_debris = float(np.nanmin(_z_display)) - 0.05 * (
+                    float(np.nanmax(_z_display)) - float(np.nanmin(_z_display)) + 1e-6
+                )
+                _sat_trace_debris = _make_satellite_plane_trace(_sat_sim, _sat_z_level_debris, _n=60)
+                _debris_data = ([_sat_trace_debris] if _sat_trace_debris is not None else []) + [go.Surface(
+                    x=_utm_gx3, y=_utm_gy3, z=_z_display,
+                    surfacecolor=_make_surfacecolor(_hf[0]),
+                    colorscale=_terrain_colorscale, cmin=0, cmax=1,
+                    showscale=False, connectgaps=False,
+                    lighting=dict(ambient=0.55, diffuse=0.7, specular=0.15, roughness=0.9),
+                )]
+                _surf_idx_debris = len(_debris_data) - 1
+
+                _fig3d = go.Figure(
+                    data=_debris_data,
+                    layout=go.Layout(
+                        height=560,
+                        margin=dict(l=0, r=0, t=30, b=0),
+                        scene=dict(
+                            xaxis_title="Easting (m)", yaxis_title="Northing (m)", zaxis_title="Elevasi (m)",
+                            aspectmode="data",
+                            camera=dict(eye=dict(x=1.2, y=-1.6, z=0.9)),
+                        ),
+                        title=f"t = 0 s",
+                        updatemenus=[dict(
+                            type="buttons", showactive=False,
+                            y=1, x=0.05, xanchor="left", yanchor="top",
+                            buttons=[
+                                dict(label="▶ Play", method="animate",
+                                     args=[None, dict(frame=dict(duration=250, redraw=True),
+                                                       fromcurrent=True, transition=dict(duration=0))]),
+                                dict(label="⏸ Pause", method="animate",
+                                     args=[[None], dict(frame=dict(duration=0, redraw=False),
+                                                         mode="immediate")]),
+                            ],
+                        )],
+                        sliders=[dict(
+                            active=0, x=0.1, y=0, len=0.85,
+                            steps=[
+                                dict(label=f"{int(i * _spf)}s", method="animate",
+                                     args=[[str(i)], dict(mode="immediate",
+                                                           frame=dict(duration=0, redraw=True))])
+                                for i in range(len(_hf))
+                            ],
+                        )],
+                    ),
+                    frames=[
+                        go.Frame(
+                            data=[go.Surface(
+                                z=_z_display, surfacecolor=_make_surfacecolor(_hf[i]),
+                                colorscale=_terrain_colorscale, cmin=0, cmax=1, connectgaps=False,
+                            )],
+                            traces=[_surf_idx_debris],
+                            name=str(i),
+                            layout=go.Layout(title=f"t = {int(i * _spf)} s"),
+                        )
+                        for i in range(len(_hf))
+                    ],
+                )
+
+                st.plotly_chart(_fig3d, width="stretch")
+                st.caption(
+                    "Drag untuk rotasi, scroll untuk zoom. Tekan ▶ Play untuk animasi, atau geser "
+                    "slider di bawah plot untuk lompat ke waktu tertentu. Warna merah→kuning→hijau "
+                    "menandai elevasi medan (rendah→tinggi); biru muda→biru tua menandai keberadaan "
+                    "& ketebalan relatif material/air yang bergerak. Area di luar boundary kajian "
+                    "ditampilkan sbg citra satelit sebagai konteks lokasi."
+                )
+
+                _final_depth = _hf[-1]
+                _c_a, _c_b, _c_c = st.columns(3)
+                _metric_card("Kedalaman maks. tersisa", f"{_final_depth.max():.2f} m", container=_c_a)
+                _metric_card("Total volume (cek konservasi)",
+                            f"{float(_final_depth[_ins3].sum() * _cell_area_sim):.0f} m³", container=_c_b)
+                _metric_card("Durasi tersimulasi total", f"{int((len(_hf)-1) * _spf)} s", container=_c_c)
+
+            # =================================================================
+            # MODE BARU: SIMULASI GENANGAN BANJIR (diffusive-wave, bukan CA)
+            # =================================================================
+            st.markdown("---")
+            _sub_header(_t("Simulasi Genangan Banjir (Shallow-Water — mengikuti kontur)", "Flood Inundation Simulation (Shallow-Water — contour-following)"))
+            _ui_info(
+                "Mode terpisah dari simulasi debris-flow di atas. Di sini arah & besar aliran "
+                "dihitung dari **beda elevasi muka air** (bed + kedalaman) memakai persamaan "
+                "Manning — bukan aturan penyebaran sederhana. Air baru menyeberang ke sel "
+                "tetangga begitu muka airnya melebihi titik tertinggi di antara keduanya, "
+                "sehingga **lokasi limpasan/overtopping tanggul atau punggungan muncul otomatis** "
+                "dari hasil hitungan, dan batas genangan mengikuti kontur medan secara halus."
             )
 
-            if _run_flow:
-                with st.spinner(_t("Menjalankan solver local-inertial 2D...", "Running the 2D local-inertial solver...")):
-                    _fh_frames, _flow_overflow_track, _flow_overflow_pts, _z_flow, _dx_flow, _dy_flow, _cell_area_flow = (
-                        _simulate_flow_local_inertial(
-                            grid_x=_grid_x, grid_y=_grid_y, grid_z=_grid_z, inside=_inside_sim,
-                            manning_n=_manning_n_flow, n_frames=_n_frames_flow, sec_per_frame=_sec_per_frame_flow,
-                            source_mode=_flow_source_mode, point_xy=_src_point, point_radius=_flow_radius,
-                            point_depth=float(st.session_state.get(f"point_depth_{_main_sid_sim}", 0.3) or 0.3),
-                            rain_mm_hr=float(_rain_intensity or 0.0),
-                        )
+            _fc1, _fc2, _fc3 = st.columns(3)
+            with _fc1:
+                _flood_src_mode = st.radio(
+                    "Sumber air",
+                    ["Muka air awal (reservoir / dam-break)", "Debit masuk kontinu (inflow sungai)"],
+                    key=f"flood_srcmode_{_sim_sid}",
+                )
+                _flood_radius = st.number_input(
+                    "Radius area sumber (m)", min_value=5.0, value=30.0, step=5.0,
+                    key=f"flood_radius_{_sim_sid}",
+                    help="Pakai titik sumber yang sama dengan yang ditandai di bagian '1. Setup' di atas.",
+                )
+            with _fc2:
+                if _flood_src_mode.startswith("Muka air"):
+                    # PERBAIKAN: dulu default-nya dipatok ke elevasi TERTINGGI DI SELURUH
+                    # DOMAIN -- kalau titik sumber yang diklik tidak persis di puncak
+                    # tertinggi itu (kasus paling umum), kedalaman awal jadi nyaris NOL,
+                    # sehingga air nyaris tidak mengalir sama sekali (persis keluhan
+                    # "airnya dikit banget"). Sekarang dipatok relatif ke elevasi DI TITIK
+                    # SUMBER itu sendiri + kedalaman awal wajar, supaya selalu ada air yang
+                    # benar-benar bisa mengalir berapa pun titik sumbernya.
+                    if _click_sim is not None:
+                        _z_at_src_default = float(griddata(
+                            (_grid_x.ravel(), _grid_y.ravel()), _grid_z.ravel(),
+                            (_click_sim[0], _click_sim[1]), method="linear"
+                        ))
+                        if np.isnan(_z_at_src_default):
+                            _z_at_src_default = float(np.nanmax(_grid_z[_inside_sim])) if _inside_sim.any() else float(np.nanmax(_grid_z))
+                    else:
+                        _z_at_src_default = float(np.nanmax(_grid_z[_inside_sim])) if _inside_sim.any() else float(np.nanmax(_grid_z))
+                    _flood_level = st.number_input(
+                        "Elevasi muka air awal di sumber (m)",
+                        value=_z_at_src_default + 2.0,
+                        format="%.2f", key=f"flood_level_{_sim_sid}",
+                        help=(
+                            "Mis. elevasi puncak tampungan/dam sebelum meluap atau jebol. "
+                            "Default = elevasi tanah di titik sumber + 2 m (supaya ada kedalaman "
+                            "awal yang cukup untuk benar-benar mengalir) — sesuaikan kalau elevasi "
+                            "tampungan sebenarnya berbeda."
+                        ),
                     )
-                    st.session_state[f"flow3d_result_{_sim_sid}"] = {
-                        "h_frames": _fh_frames, "grid_x": _grid_x, "grid_y": _grid_y,
-                        "z_fill": _z_flow, "inside": _inside_sim,
-                        "sec_per_frame": _sec_per_frame_flow, "vexag": _vexag_flow,
-                        "cell_area": _cell_area_flow, "overflow_pts": _flow_overflow_pts,
-                        "boundary": _bnd_sim, "source_mode": _flow_source_mode,
-                    }
+                    _flood_q = None
+                else:
+                    _flood_level = None
+                    _flood_q = st.number_input(
+                        "Debit masuk (m³/detik)", min_value=0.1, value=20.0, step=1.0,
+                        key=f"flood_q_{_sim_sid}",
+                    )
+                _manning_n = st.number_input(
+                    "Koefisien kekasaran Manning (n)", min_value=0.010, max_value=0.200,
+                    value=0.035, step=0.005, format="%.3f", key=f"flood_manning_{_sim_sid}",
+                    help="≈0.030–0.040 sungai alami/tanah, ≈0.020–0.025 saluran beton, "
+                         "≈0.050–0.080 semak/vegetasi lebat.",
+                )
+            with _fc3:
+                _flood_nframes = st.slider(
+                    _t("Jumlah frame animasi", "Number of animation frames"), 10, 60, 30, key=f"flood_nframes_{_sim_sid}",
+                )
+                _flood_secpf = st.number_input(
+                    "Durasi tersimulasi per frame (detik)", min_value=1.0, value=60.0, step=5.0,
+                    key=f"flood_secpf_{_sim_sid}",
+                    help=(
+                        "Air yang mengalir dangkal (model shallow-water) butuh waktu nyata yang "
+                        "cukup untuk merambat jauh — durasi terlalu pendek (mis. 10 detik/frame) "
+                        "membuat air terkesan 'diam'/hampir tidak bergerak walau perhitungannya "
+                        "benar. Default 60 detik/frame x 30 frame = 30 menit tersimulasi, cukup "
+                        "untuk air merambat mengikuti kontur secara terlihat jelas."
+                    ),
+                )
+                _flood_vexag = st.slider(
+                    "Eksagerasi vertikal tampilan", 1.0, 4.0, 1.8, step=0.1,
+                    key=f"flood_vexag_{_sim_sid}",
+                )
 
-            _flow_out = st.session_state.get(f"flow3d_result_{_sim_sid}")
+            _flood_run = st.button(
+                "Jalankan Simulasi Genangan", key=f"flood_run_{_sim_sid}", type="primary",
+            )
 
-            if _flow_out is not None:
-                st.markdown("###### " + _t("3. Hasil Animasi 3D — Aliran Air", "3. 3D Animation Results — Water Flow"))
+            if _click_sim is None:
+                st.caption(
+                    "Tandai dulu titik sumber (klik peta / input koordinat) di bagian "
+                    "'1. Setup Sumber Longsoran/Debris' di atas — titik yang sama dipakai "
+                    "sebagai lokasi sumber air di sini."
+                )
+            elif _flood_run:
+                _fcx, _fcy = _click_sim
+                if not _bnd_sim.contains(Point(_fcx, _fcy)):
+                    st.error(_t("Titik sumber berada di luar boundary area kajian.", "The source point is outside the study area boundary."))
+                else:
+                    with st.spinner("Menjalankan simulasi shallow-water (diffusive-wave)..."):
+                        (_fh_frames, _flood_overflow_track, _flood_overflow_pts,
+                         _z_flood, _dx_flood, _dy_flood, _cell_area_flood) = _simulate_flood_diffusive(
+                            grid_x=_grid_x, grid_y=_grid_y, grid_z=_grid_z, inside=_inside_sim,
+                            src_xy=(_fcx, _fcy), src_radius=_flood_radius,
+                            src_mode=("level" if _flood_src_mode.startswith("Muka air") else "inflow"),
+                            src_level=_flood_level, src_q=_flood_q, manning_n=_manning_n,
+                            n_frames=_flood_nframes, sec_per_frame=_flood_secpf,
+                        )
+                        st.session_state[f"flood_result_{_sim_sid}"] = {
+                            "h_frames": _fh_frames, "grid_x": _grid_x, "grid_y": _grid_y,
+                            "z_fill": _z_flood, "inside": _inside_sim,
+                            "sec_per_frame": _flood_secpf, "vexag": _flood_vexag,
+                            "cell_area": _cell_area_flood, "overflow_pts": _flood_overflow_pts,
+                            "boundary": _bnd_sim,
+                        }
 
-                _ffh = _flow_out["h_frames"]
-                _fgx = _flow_out["grid_x"]
-                _fgy = _flow_out["grid_y"]
-                _fz = _flow_out["z_fill"]
-                _fins = _flow_out["inside"]
-                _fspf = _flow_out["sec_per_frame"]
-                _fvex = _flow_out["vexag"]
-                _f_cell_area = _flow_out.get("cell_area", 1.0)
+            _flood_out = st.session_state.get(f"flood_result_{_sim_sid}")
+
+            if _flood_out is not None:
+                st.markdown("###### " + _t("Hasil Animasi 3D — Genangan", "3D Animation Results — Inundation"))
+
+                _ffh = _flood_out["h_frames"]
+                _fgx = _flood_out["grid_x"]
+                _fgy = _flood_out["grid_y"]
+                _fz = _flood_out["z_fill"]
+                _fins = _flood_out["inside"]
+                _fspf = _flood_out["sec_per_frame"]
+                _fvex = _flood_out["vexag"]
+                _f_cell_area = _flood_out.get("cell_area", 1.0)
                 _utm_fgx, _utm_fgy = _grid_lokal_to_utm(_fgx, _fgy)
 
+                _fzmin, _fzmax = float(np.nanmin(_fz)), float(np.nanmax(_fz))
+                _fzrange = max(_fzmax - _fzmin, 1e-6)
                 _fdepth_max = max(float(np.max([hf.max() for hf in _ffh])), 1e-6)
                 _fdepth_thresh = _fdepth_max * 0.02
 
-                # PERMINTAAN: bukan bidang datar/gradasi warna elevasi generik -- medan di DALAM
-                # boundary sekarang di-drape LANGSUNG dgn foto citra satelit sungguhan (Mesh3d +
-                # vertexcolor per titik, disampling dari _sat_sim), ditumpuk warna biru sesuai
-                # kedalaman air tiap frame supaya terlihat "air mengalir di atas foto medan asli",
-                # menyatu dgn bidang DEMNAS di luar boundary yg SEKARANG JUGA berkontur asli
-                # (bukan rata) -- lihat _make_satellite_plane_trace(_dem_data=...) di bawah.
+                _water_colorscale = [
+                    [0.00, "#8b0000"], [0.15, "#c1440e"], [0.32, "#e08a2b"], [0.48, "#e8c93d"],
+                    [0.65, "#a8c93d"], [0.799, "#1b5e28"],
+                    [0.80, "#aee9ff"], [0.87, "#2f9bdb"], [0.94, "#0b4c91"], [1.00, "#021a49"],
+                ]
+
+                def _make_flood_surfacecolor(_h_layer):
+                    _elev_norm = np.clip((_fz - _fzmin) / _fzrange, 0, 1) * 0.799
+                    _flow_norm = np.clip(_h_layer / _fdepth_max, 0, 1)
+                    _disp = np.where(
+                        _h_layer > _fdepth_thresh, 0.80 + _flow_norm * 0.20, _elev_norm,
+                    )
+                    return np.where(_fins, _disp, np.nan)
+
                 _fz_display = _fz * _fvex
-                _base_rgb_flow = _sample_grid_at(_sat_sim, _utm_fgx, _utm_fgy, "rgb")
-                if _base_rgb_flow is None:
-                    # tanpa citra satelit -- fallback abu-abu netral, supaya tetap tampil terdrape
-                    _base_rgb_flow = np.full(_fz_display.shape + (3,), 170, dtype=np.uint8)
-                _tri_i_flow, _tri_j_flow, _tri_k_flow = _mesh_tris_from_grid(_fins)
+                _fz_display = np.where(_fins, _fz_display, np.nan)
 
-                def _flow_vertexcolor(_h_layer):
-                    _blended = _blend_water_rgb(_base_rgb_flow, _h_layer, _fdepth_thresh, _fdepth_max)
-                    return [f"rgb({r},{g},{b})" for r, g, b in _blended.reshape(-1, 3)]
-
-                _sat_z_level_flow = float(np.nanmin(_fz_display)) - 0.05 * (
+                _sat_z_level_flood = float(np.nanmin(_fz_display)) - 0.05 * (
                     float(np.nanmax(_fz_display)) - float(np.nanmin(_fz_display)) + 1e-6
                 )
-                _sat_trace_flow = _make_satellite_plane_trace(
-                    _sat_sim, _sat_z_level_flow, _n=60, _dem_data=_demnas_sim, _vexag=_fvex,
-                )
-                _flow_data = ([_sat_trace_flow] if _sat_trace_flow is not None else []) + [go.Mesh3d(
-                    x=_utm_fgx.ravel(), y=_utm_fgy.ravel(), z=_fz_display.ravel(),
-                    i=_tri_i_flow, j=_tri_j_flow, k=_tri_k_flow,
-                    vertexcolor=_flow_vertexcolor(_ffh[0]),
-                    flatshading=False, showscale=False, name="Aliran air",
+                _sat_trace_flood = _make_satellite_plane_trace(_sat_sim, _sat_z_level_flood, _n=60)
+                _flood_data = ([_sat_trace_flood] if _sat_trace_flood is not None else []) + [go.Surface(
+                    x=_utm_fgx, y=_utm_fgy, z=_fz_display,
+                    surfacecolor=_make_flood_surfacecolor(_ffh[0]),
+                    colorscale=_water_colorscale, cmin=0, cmax=1, showscale=False, connectgaps=False,
                     lighting=dict(ambient=0.55, diffuse=0.7, specular=0.15, roughness=0.9),
                 )]
-                _surf_idx_flow = len(_flow_data) - 1
+                _surf_idx_flood = len(_flood_data) - 1
 
-                _fig_flow = go.Figure(
-                    data=_flow_data,
+                _fig_flood = go.Figure(
+                    data=_flood_data,
                     layout=go.Layout(
                         height=560, margin=dict(l=0, r=0, t=30, b=0),
                         scene=dict(
@@ -20062,28 +20035,33 @@ with tab5:
                     ),
                     frames=[
                         go.Frame(
-                            data=[go.Mesh3d(vertexcolor=_flow_vertexcolor(_ffh[i]))],
-                            traces=[_surf_idx_flow],
+                            data=[go.Surface(
+                                z=_fz_display, surfacecolor=_make_flood_surfacecolor(_ffh[i]),
+                                colorscale=_water_colorscale, cmin=0, cmax=1, connectgaps=False,
+                            )],
+                            traces=[_surf_idx_flood],
                             name=str(i), layout=go.Layout(title=f"t = {int(i * _fspf)} s"),
                         )
                         for i in range(len(_ffh))
                     ],
                 )
-                st.plotly_chart(_fig_flow, width="stretch")
-                st.caption(_t(
-                    "Medan (di dalam MAUPUN di luar boundary) di-drape dgn citra satelit asli; warna "
-                    "biru muda→biru tua menandai kedalaman air yang menutupinya. Di luar boundary, "
-                    "konturnya mengikuti elevasi DEMNAS (BIG) sungguhan, menyatu dgn medan hasil DXF "
-                    "di dalam boundary.",
-                    "Terrain (both inside AND outside the boundary) is draped with real satellite "
-                    "imagery; light→dark blue marks the water depth covering it. Outside the boundary, "
-                    "the contour follows real DEMNAS (BIG) elevation, blending with the DXF-derived "
-                    "terrain inside the boundary."
-                ))
+                st.plotly_chart(_fig_flood, width="stretch")
+                st.caption(
+                    "Biru muda→biru tua = kedalaman genangan relatif; warna dasar merah→kuning→hijau "
+                    "= elevasi medan asli (rendah→tinggi). Karena fluks dihitung dari gradien muka air "
+                    "(bukan CA), genangan menjalar mengikuti kontur secara halus. Area di luar boundary "
+                    "kajian ditampilkan sbg citra satelit sebagai konteks lokasi."
+                )
 
-                st.markdown("###### " + _t("Peta Aliran & Titik Limpasan", "Flow Map & Overflow Points"))
-                _final_h_flow = _ffh[-1]
+                st.markdown("###### " + _t("Peta Genangan Halus (mengikuti kontur) & Titik Limpasan", "Smooth Inundation Map (contour-following) & Overflow Points"))
+                _final_h_flood = _ffh[-1]
                 _fig_contour = go.Figure()
+
+                # Latar citra satelit (koordinat LOKAL) -- dibuat sbg layer Scattergl padat
+                # berwarna hasil sampling piksel citra satelit (via transform lokal->UTM per
+                # titik), supaya area DI LUAR boundary/genangan tetap menampilkan citra asli
+                # sbg konteks, bukan kosong putih. go.Contour butuh grid axis-aligned jadi
+                # tidak bisa langsung dipindah ke sumbu UTM (sumbu lokal miring ~57° thd UTM).
                 if _sat_sim is not None:
                     _padx = (_fgx.max() - _fgx.min()) * 0.15
                     _pady = (_fgy.max() - _fgy.min()) * 0.15
@@ -20099,13 +20077,16 @@ with tab5:
                     _sat_colors_2d = _sat_rgb[_row_i, _col_i]
                     _fig_contour.add_trace(go.Scattergl(
                         x=_SXl.ravel(), y=_SYl.ravel(), mode="markers",
-                        marker=dict(size=9, opacity=1.0,
-                                    color=[f"rgb({r},{g},{b})" for r, g, b in _sat_colors_2d.reshape(-1, 3)]),
+                        marker=dict(
+                            size=9, opacity=1.0,
+                            color=[f"rgb({r},{g},{b})" for r, g, b in _sat_colors_2d.reshape(-1, 3)],
+                        ),
                         name="Citra satelit", showlegend=False, hoverinfo="skip",
                     ))
+
                 _fig_contour.add_trace(go.Contour(
-                    x=_fgx[:, 0], y=_fgy[0, :], z=np.where(_fins, _final_h_flow, np.nan).T,
-                    colorscale="Blues", showscale=True, colorbar=dict(title=_t("Kedalaman (m)", "Depth (m)")),
+                    x=_fgx[:, 0], y=_fgy[0, :], z=np.where(_fins, _final_h_flood, np.nan).T,
+                    colorscale="Blues", showscale=True, colorbar=dict(title="Kedalaman (m)"),
                     line_smoothing=1.3, contours=dict(coloring="heatmap"),
                     opacity=0.85, connectgaps=False,
                     hovertemplate="X=%{x:.2f}, Y=%{y:.2f}<br>Kedalaman=%{z:.2f}m<extra></extra>",
@@ -20115,15 +20096,16 @@ with tab5:
                     x=_fbx, y=_fby, mode="lines", line=dict(color="magenta", width=2),
                     name="Boundary", hoverinfo="skip",
                 ))
-                _flow_pts_list = _flow_out.get("overflow_pts", [])
-                if _flow_pts_list:
+                _flood_pts_list = _flood_out.get("overflow_pts", [])
+                if _flood_pts_list:
                     _fig_contour.add_trace(go.Scatter(
-                        x=[p["X"] for p in _flow_pts_list], y=[p["Y"] for p in _flow_pts_list],
+                        x=[p["X"] for p in _flood_pts_list], y=[p["Y"] for p in _flood_pts_list],
                         mode="markers+text",
-                        marker=dict(size=14, color="red", symbol="star", line=dict(color="black", width=1)),
-                        text=[str(i + 1) for i in range(len(_flow_pts_list))],
-                        textposition="top center", name=_t("Titik limpasan", "Overflow points"),
-                        hovertemplate="#%{text}<br>X=%{x:.2f}, Y=%{y:.2f}<extra></extra>",
+                        marker=dict(size=14, color="red", symbol="star",
+                                    line=dict(color="black", width=1)),
+                        text=[str(i + 1) for i in range(len(_flood_pts_list))],
+                        textposition="top center", name="Titik limpasan",
+                        hovertemplate="Titik limpasan #%{text}<br>X=%{x:.2f}, Y=%{y:.2f}<extra></extra>",
                     ))
                 _fig_contour.update_layout(
                     height=480, xaxis_title="Easting (m)", yaxis_title="Northing (m)",
@@ -20132,128 +20114,27 @@ with tab5:
                 )
                 st.plotly_chart(_fig_contour, width="stretch")
 
-                if _flow_pts_list:
-                    st.markdown("**" + _t("Titik-titik limpasan terdeteksi", "Detected overflow points") + "**:")
-                    st.dataframe(pd.DataFrame(_flow_pts_list), width="stretch", hide_index=True)
-                else:
-                    st.caption(_t(
-                        "Belum terdeteksi limpasan keluar dari area sumber — coba perpanjang durasi "
-                        "simulasi atau naikkan intensitas/kedalaman sumber.",
-                        "No overflow out of the source area detected yet — try a longer simulated duration "
-                        "or a higher source intensity/depth."
-                    ))
-
-                _final_depth_flow = _ffh[-1]
-                _fca, _fcb, _fcc = st.columns(3)
-                _metric_card(_t("Kedalaman maks. air", "Max water depth"), f"{_final_depth_flow.max():.2f} m", container=_fca)
-                _metric_card(_t("Total volume air (sesaat)", "Total water volume (instant)"),
-                            f"{float(_final_depth_flow[_fins].sum() * _f_cell_area):.0f} m³", container=_fcb)
-                _metric_card(_t("Durasi tersimulasi total", "Total simulated duration"), f"{int((len(_ffh) - 1) * _fspf)} s", container=_fcc)
-
-            # =================================================================
-            # DETEKSI TITIK GENANGAN (CEKUNGAN) -- analisis medan statis,
-            # bukan simulasi aliran waktu. Lihat _detect_ponding_zones().
-            # =================================================================
-            st.markdown("---")
-            _sub_header(_t("4. Deteksi Titik Genangan (Cekungan)", "4. Ponding/Depression Detection"))
-            _ui_info(_t(
-                "Bukan simulasi aliran waktu — ini analisis medan STATIS: memakai metode depression-fill "
-                "(priority-flood) yang SAMA dipakai tab Erosion Mapping (setara 'Fill' di ArcGIS/"
-                "WhiteboxTools/QGIS 'Fill Sinks'). Setiap cekungan tertutup di DEM ditandai sebagai lokasi "
-                "yang akan menggenang kalau air yang mengalir ke situ akhirnya habis/berhenti — secara "
-                "matematis inilah kondisi akhir simulasi aliran di atas setelah mencapai steady-state, "
-                "hanya dihitung langsung tanpa perlu menjalankan simulasi waktu yang panjang.",
-                "Not a time-based flow simulation — this is a STATIC terrain analysis: using the same "
-                "depression-fill (priority-flood) method as the Erosion Mapping tab (equivalent to "
-                "ArcGIS 'Fill'/WhiteboxTools/QGIS 'Fill Sinks'). Every closed depression in the DEM is "
-                "flagged as a spot that will pond once water flowing into it finally runs out/stops — "
-                "mathematically this is the steady-state end-condition of the flow simulation above, just "
-                "computed directly without running a long time simulation."
-            ))
-            _pond_thresh = st.slider(
-                _t("Ambang kedalaman genangan minimum ditampilkan (m)", "Minimum pond depth shown (m)"),
-                0.02, 1.0, 0.05, step=0.01, key=f"pond_thresh_{_sim_sid}",
-            )
-            _run_pond = st.button(_t("Deteksi Genangan", "Detect Ponding"), key=f"pond_run_{_sim_sid}", type="primary")
-            if _run_pond:
-                with st.spinner(_t("Menghitung cekungan (depression-fill)...", "Computing depressions (depression-fill)...")):
-                    _pdepth, _pmask, _ponds, _pz, _pdx, _pdy, _pcell = _detect_ponding_zones(
-                        _grid_x, _grid_y, _grid_z, _inside_sim, depth_threshold_m=_pond_thresh,
+                if _flood_pts_list:
+                    st.markdown("**" + _t("Titik-titik limpasan terdeteksi", "Detected overflow points") + "** (" + _t("diurutkan dari volume terlimpas terbesar", "sorted by largest overflow volume") + "):")
+                    st.dataframe(pd.DataFrame(_flood_pts_list), width="stretch", hide_index=True)
+                    st.caption(
+                        "Titik-titik ini adalah sel yang berbatasan langsung dengan area sumber (dam/"
+                        "reservoir) dan tercatat menerima aliran keluar terbesar selama simulasi — "
+                        "kandidat lokasi limpasan/overtopping paling mungkin secara fisik."
                     )
-                    st.session_state[f"pond_result_{_sim_sid}"] = {
-                        "depth": _pdepth, "mask": _pmask, "ponds": _ponds, "z": _pz, "cell_area": _pcell,
-                    }
-
-            _pond_out = st.session_state.get(f"pond_result_{_sim_sid}")
-            if _pond_out is not None:
-                _pdepth = _pond_out["depth"]
-                _ponds = _pond_out["ponds"]
-                _pz = _pond_out["z"]
-
-                st.markdown("###### " + _t("Peta Genangan Terdeteksi", "Detected Ponding Map"))
-                _pfig = go.Figure()
-                if _sat_sim is not None:
-                    _padx2 = (_grid_x.max() - _grid_x.min()) * 0.15
-                    _pady2 = (_grid_y.max() - _grid_y.min()) * 0.15
-                    _sxl2 = np.linspace(_grid_x.min() - _padx2, _grid_x.max() + _padx2, 110)
-                    _syl2 = np.linspace(_grid_y.min() - _pady2, _grid_y.max() + _pady2, 110)
-                    _SXl2, _SYl2 = np.meshgrid(_sxl2, _syl2)
-                    _SXu2, _SYu2 = _grid_lokal_to_utm(_SXl2, _SYl2)
-                    _sxmin2, _sxmax2, _symin2, _symax2 = _sat_sim["extent"]
-                    _srgb2 = _sat_sim["rgb"]
-                    _sh2, _sw2 = _srgb2.shape[0], _srgb2.shape[1]
-                    _ci2 = np.clip(((_SXu2 - _sxmin2) / max(_sxmax2 - _sxmin2, 1e-9) * (_sw2 - 1)).astype(int), 0, _sw2 - 1)
-                    _ri2 = np.clip(((_symax2 - _SYu2) / max(_symax2 - _symin2, 1e-9) * (_sh2 - 1)).astype(int), 0, _sh2 - 1)
-                    _scolors2 = _srgb2[_ri2, _ci2]
-                    _pfig.add_trace(go.Scattergl(
-                        x=_SXl2.ravel(), y=_SYl2.ravel(), mode="markers",
-                        marker=dict(size=9, opacity=1.0,
-                                    color=[f"rgb({r},{g},{b})" for r, g, b in _scolors2.reshape(-1, 3)]),
-                        name="Citra satelit", showlegend=False, hoverinfo="skip",
-                    ))
-                _pfig.add_trace(go.Contour(
-                    x=_grid_x[:, 0], y=_grid_y[0, :], z=np.where(_inside_sim, _pdepth, np.nan).T,
-                    colorscale="Blues", showscale=True, colorbar=dict(title=_t("Kedalaman (m)", "Depth (m)")),
-                    line_smoothing=1.3, contours=dict(coloring="heatmap", start=float(_pond_thresh)),
-                    opacity=0.85, connectgaps=False,
-                    hovertemplate="X=%{x:.2f}, Y=%{y:.2f}<br>Kedalaman=%{z:.2f}m<extra></extra>",
-                ))
-                _pbx, _pby = _boundary_xy_flat(_bnd_sim)
-                _pfig.add_trace(go.Scatter(x=_pbx, y=_pby, mode="lines", line=dict(color="magenta", width=2),
-                                            name="Boundary", hoverinfo="skip"))
-                if _ponds:
-                    _pfig.add_trace(go.Scatter(
-                        x=[p["X (titik terdalam)"] for p in _ponds], y=[p["Y (titik terdalam)"] for p in _ponds],
-                        mode="markers+text",
-                        marker=dict(size=13, color="#ffd166", symbol="circle", line=dict(color="black", width=1)),
-                        text=[str(p["id"]) for p in _ponds], textposition="top center",
-                        name=_t("Titik genangan", "Ponding points"),
-                        hovertemplate="Genangan #%{text}<extra></extra>",
-                    ))
-                _pfig.update_layout(
-                    height=480, xaxis_title="Easting (m)", yaxis_title="Northing (m)",
-                    yaxis=dict(scaleanchor="x", scaleratio=1),
-                    margin=dict(l=10, r=10, t=10, b=10),
-                )
-                st.plotly_chart(_pfig, width="stretch")
-
-                if _ponds:
-                    st.markdown("**" + _t(f"{len(_ponds)} titik genangan terdeteksi", f"{len(_ponds)} ponding spots detected") + "** (" + _t("diurutkan dari volume terbesar", "sorted by largest volume") + "):")
-                    _ponds_df = pd.DataFrame([{k: v for k, v in p.items() if k not in ("id", "mask")} | {"#": p["id"]} for p in _ponds])
-                    _ponds_df = _ponds_df[["#"] + [c for c in _ponds_df.columns if c != "#"]]
-                    st.dataframe(_ponds_df, width="stretch", hide_index=True)
-                    _pca, _pcb, _pcc = st.columns(3)
-                    _metric_card(_t("Jumlah titik genangan", "Number of ponding spots"), str(len(_ponds)), container=_pca)
-                    _metric_card(_t("Genangan terbesar", "Largest pond"), f"{_ponds[0]['Volume tertampung (m³)']:.0f} m³", container=_pcb)
-                    _metric_card(_t("Total volume tertampung", "Total captured volume"),
-                                f"{sum(p['Volume tertampung (m³)'] for p in _ponds):.0f} m³", container=_pcc)
                 else:
-                    st.caption(_t(
-                        "Tidak ada cekungan signifikan terdeteksi pada ambang kedalaman ini — coba turunkan "
-                        "ambang di atas.",
-                        "No significant depressions detected at this depth threshold — try lowering the "
-                        "threshold above."
-                    ))
+                    st.caption(
+                        "Belum terdeteksi limpasan keluar dari area sumber pada durasi & parameter "
+                        "simulasi ini — coba naikkan elevasi muka air awal / debit masuk, atau "
+                        "perpanjang durasi simulasi."
+                    )
+
+                _final_depth_flood = _ffh[-1]
+                _fca, _fcb, _fcc = st.columns(3)
+                _metric_card("Kedalaman maks. genangan", f"{_final_depth_flood.max():.2f} m", container=_fca)
+                _metric_card("Total volume genangan",
+                            f"{float(_final_depth_flood[_fins].sum() * _f_cell_area):.0f} m³", container=_fcb)
+                _metric_card("Durasi tersimulasi total", f"{int((len(_ffh) - 1) * _fspf)} s", container=_fcc)
 
 import os
 import pandas as pd
