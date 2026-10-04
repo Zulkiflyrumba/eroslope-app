@@ -353,7 +353,7 @@ _PROJECT_EXCLUDE_KEYS = {
 
 # Mode "ringan" pada download: lewati citra hasil olahan yang otomatis dibuat ulang dari
 # file input (orthophoto) / internet (basemap satelit) saat project dibuka lagi.
-_PROJECT_LIGHT_EXCLUDE_PREFIXES = ("orthophoto_parsed_", "sat_basemap_", "sim3d_sat_")
+_PROJECT_LIGHT_EXCLUDE_PREFIXES = ("orthophoto_parsed_", "sat_basemap_", "sim3d_sat_", "wsim_sat_", "wsim_result_")
 # Mode "INPUT SAJA": project hanya berisi apa yang diisi user SEBELUM menekan RUN ANALYSIS
 # (nilai parameter/properties, file DXF, titik aliran, garis section yang digambar, dsb).
 # Semua hasil running (grid, peta risiko, hasil tiap segmen/section, cache, simulasi, dst) TIDAK
@@ -369,7 +369,7 @@ _PROJECT_RESULT_KEYS = {
 }
 _PROJECT_RESULT_PREFIXES = (
     "_flow_cache_", "_dem_cache_", "_d8_cache_", "orthophoto_parsed_", "sat_basemap_",
-    "sim3d_sat_", "ai_reco_cache_", "dxf_regrade_bytes_", "flood_result_", "sim3d_result_",
+    "sim3d_sat_", "ai_reco_cache_", "dxf_regrade_bytes_", "flood_result_", "sim3d_result_", "wsim_sat_", "wsim_result_",
     "ba_erosi_boundary_",
 )
 _PROJECT_LAST_SIZES = {}  # key -> ukuran (byte) pada pemanggilan _collect_project_state terakhir
@@ -4681,14 +4681,14 @@ def _hub_module_specs():
              tags=[_t("Laju Drawdown", "Drawdown Rate"), _t("Muka Air (WL)", "Water Level (WL)"), _t("Faktor Keamanan", "Factor of Safety")]),
         dict(common, header_gradient="linear-gradient(135deg, #FEEB97 0%, #4FB783 100%)", badge_text=_t("MODUL 04: SIMULASI 3D", "MODULE 04: 3D SIMULATION"),
              badge_color="amber", fmt_text=_t("Animasi 3D", "3D Animation"), title=_t("Simulasi Aliran 3D", "3D Flow Simulation"),
-             subtitle=_t("Simulasi penjalaran debris/longsoran dan genangan banjir menuruni medan 3D hasil DEM segmen, lengkap animasi waktu.",
-                         "Simulates debris/landslide flow and flood inundation across the segment's 3D DEM terrain, with time-based animation."),
-             intro_text=_t("Dari titik sumber di peta interaktif, menjalankan cellular-automaton (debris/longsoran) atau shallow-water diffusive-wave (genangan banjir) di atas medan 3D, divisualisasikan sebagai animasi. Bersifat ilustratif, belum terkalibrasi.",
-                           "From a source point on an interactive map, runs a cellular-automaton (debris/landslide) or shallow-water diffusive-wave (flood) model over 3D terrain, shown as an animation. Illustrative, not yet calibrated."),
-             features=[(_t("Klik Peta Interaktif", "Interactive Map Click"), _t("Tandai titik sumber di peta DEM ber-citra satelit.", "Mark the source point on the satellite-imagery DEM map.")),
-                       (_t("Debris/Longsoran", "Debris/Landslide"), _t("Cellular-automaton penyebaran material berbasis kemiringan.", "Slope-based cellular-automaton material spreading.")),
-                       (_t("Genangan Banjir", "Flood Inundation"), _t("Shallow-water diffusive-wave mengikuti kontur.", "Shallow-water diffusive-wave following the terrain.")),
-                       (_t("Animasi 3D + Citra Satelit", "3D Animation + Satellite"), _t("Playback waktu di atas medan 3D dengan konteks citra satelit.", "Time playback over 3D terrain with satellite context."))],
+             subtitle=_t("Simulasi aliran air (hujan atau titik point) di atas medan 3D hasil DEM segmen, citra satelit ditempel langsung di permukaan, lengkap animasi waktu.",
+                         "Water-flow simulation (rainfall or point source) over the segment's 3D DEM terrain, with imagery draped on the surface and time animation."),
+             intro_text=_t("Pilih skenario Hujan atau Titik Point -- titik, curah hujan dan koefisien limpasan diambil otomatis dari Erosion Mapping. Solver shallow-water 2D (local-inertia) pada DEM, divisualisasikan sebagai scene WebGL 3D. Bersifat ilustratif, belum terkalibrasi.",
+                           "Choose Rainfall or Point source -- the point, rainfall and runoff coefficient come automatically from Erosion Mapping. A 2D shallow-water (local-inertia) solver on the DEM, shown as a 3D WebGL scene. Illustrative, not yet calibrated."),
+             features=[(_t("Input Otomatis", "Automatic Inputs"), _t("Titik, hujan & C dibaca dari Erosion Mapping, tanpa input koordinat.", "Point, rainfall & C are read from Erosion Mapping, no coordinate entry.")),
+                       (_t("Hujan / Titik Point", "Rainfall / Point Source"), _t("Satu simulasi air: hujan merata atau debit masuk di titik hulu.", "One water simulation: uniform rainfall or inflow at the upstream point.")),
+                       (_t("3D + Citra Menempel", "3D + Draped Imagery"), _t("Citra satelit/orthophoto ditempel di permukaan medan 3D.", "Satellite/orthophoto imagery draped on the 3D terrain.")),
+                       (_t("Animasi & Hidrograf", "Animation & Hydrograph"), _t("Playback waktu, kedalaman maksimum, hidrograf & neraca massa.", "Time playback, maximum depth, hydrograph & mass balance."))],
              tags=["Manning's n", _t("Radius Sumber", "Source Radius"), _t("Eksagerasi Vertikal", "Vertical Exaggeration")]),
         dict(common, header_gradient="linear-gradient(135deg, #4FB783 0%, #409D9B 100%)", badge_text=_t("MODUL 05: DESAIN CHANNEL", "MODULE 05: CHANNEL DESIGN"),
              badge_color="green", fmt_text="DXF 3D", title=_t("Rekonstruksi Desain", "Design Reconstruction"),
@@ -4758,8 +4758,8 @@ def _render_module_workflow():
             "2. Upload training data, choose the target (FS) and features, set cleaning (optional IQR outliers).\n3. Review correlation & scatter, run Check Best Model, then Train Model.\n4. Read the evaluation (R², MAE, RMSE / accuracy) — valid only within the training range.\n"
             "5. Upload new scenario/monitoring data → predicted FS + FAIL/CRITICAL/STABLE status.\n6. Review the FS vs water-level time series and verify critical scenarios with the Channel/Drainage Stability module.")),
         (_t("Modul 04 — Simulasi Aliran 3D", "Module 04 — 3D Flow Simulation"), False, _t(
-            "1. Pastikan Erosion Mapping segmen terkait sudah dijalankan (sumber DEM).\n2. Pilih segmen & jenis simulasi (Debris/Longsoran atau Genangan Banjir).\n3. Tandai titik sumber: klik di peta DEM atau input koordinat.\n4. Isi parameter (radius sumber, Manning's n, frame, eksagerasi vertikal).\n5. Jalankan Simulasi.\n6. Putar animasi dan tinjau kedalaman maksimum, volume, titik limpasan.",
-            "1. Make sure Erosion Mapping for the relevant segment has been run (DEM source).\n2. Select the segment & simulation type (Debris/Landslide or Flood Inundation).\n3. Mark the source point: click on the DEM map or enter coordinates.\n4. Fill the parameters (source radius, Manning's n, frames, vertical exaggeration).\n5. Run the simulation.\n6. Play the animation and review max depth, volume, overflow points.")),
+            "1. Pastikan Erosion Mapping segmen terkait sudah dijalankan (sumber DEM).\n2. Pilih segmen & skenario: Hujan atau Titik Point (titik, hujan & C otomatis dari Erosion Mapping).\n3. Cek/ubah parameter (durasi, debit, Manning's n).\n4. Jalankan simulasi air 3D.\n5. Putar animasi di scene 3D ber-citra, aktifkan 'Kedalaman maksimum', tinjau hidrograf & titik genangan terdalam.",
+            "1. Make sure Erosion Mapping for the relevant segment has been run (DEM source).\n2. Select the segment & scenario: Rainfall or Point source (point, rainfall & C automatic from Erosion Mapping).\n3. Check/adjust parameters (duration, discharge, Manning's n).\n4. Run the 3D water simulation.\n5. Play the animation in the imagery-draped 3D scene, enable 'Maximum depth', review the hydrograph & deepest ponding points.")),
         (_t("Modul 05 — Rekonstruksi Desain", "Module 05 — Design Reconstruction"), False, _t(
             "1. Pilih sumber geometri: upload DXF channel baru atau ambil dari hasil Erosion Mapping.\n2. Ubah parameter: sudut slope, lebar dasar, kedalaman, bench (grading).\n3. Tinjau volume cut-fill dan saran kapasitas Manning.\n4. Unduh DXF 3D desain revisi sebagai acuan.",
             "1. Choose the geometry source: upload a new channel DXF or use Erosion Mapping results.\n2. Change parameters: slope angles, bottom width, depth, benches (grading).\n3. Review cut-fill volumes and Manning capacity suggestions.\n4. Download the revised design as a 3D DXF reference.")),
@@ -19293,848 +19293,1596 @@ with tab4:
             )
 
 # =========================================================
-# =========== SOLVER GENANGAN BANJIR (DIFFUSIVE-WAVE) =====
+# ======= SIMULASI AIR 3D  (HUJAN / TITIK) -- MODUL BARU ==
 # =========================================================
-# Beda mendasar dengan simulasi debris-flow (cellular-automaton) di bawah:
-# di sini arah & besar fluks air antar sel DIHITUNG dari beda ELEVASI MUKA
-# AIR (bed + kedalaman) memakai persamaan Manning -- pendekatan "diffusive
-# wave" yang sama prinsipnya dengan LISFLOOD-FP (Bates & De Roo, 2000).
-# Karena fisikanya berbasis gradien muka air riil (bukan aturan penyebaran
-# buatan), air HANYA akan menyeberang ke sel tetangga begitu muka airnya
-# melebihi elevasi tertinggi di antara kedua sel -- ini persis definisi
-# "limpasan/overtopping" tanggul/punggungan, jadi lokasi limpasan muncul
-# otomatis dari hasil hitungan, bukan ditandai manual.
-#
-# CATATAN JUJUR: skema ini tetap SEDERHANA -- momentum/inersia diabaikan
-# (cocok utk aliran lambat yg didominasi gravitasi, spt genangan & luapan
-# dam/tanggul), BUKAN solver shallow-water 2D penuh (beda dgn ANUGA/
-# HEC-RAS 2D/FLO-2D). Untuk desain rekayasa final tetap perlu divalidasi
-# dgn software hidraulik yang tersertifikasi.
-def _simulate_flood_diffusive(grid_x, grid_y, grid_z, inside, src_xy, src_radius,
-                               src_mode, src_level, src_q, manning_n,
-                               n_frames, sec_per_frame, sub_steps=6):
-    z = np.where(np.isnan(grid_z), np.nanmin(grid_z), grid_z).astype(float)
-    dx = float(np.nanmean(np.abs(np.diff(grid_x[:, 0])))) or 1.0
-    dy = float(np.nanmean(np.abs(np.diff(grid_y[0, :])))) or 1.0
-    cell_area = dx * dy
+# Modul ini menggantikan dua simulasi lama (debris cellular-automaton + genangan diffusive) dengan
+# SATU simulasi air saja:
+#   * Skenario "Hujan"  : hujan merata di seluruh segmen (curah hujan, C limpasan & durasi
+#                         diambil otomatis dari tab Erosion Mapping).
+#   * Skenario "Titik"  : debit masuk di titik sumber yang SAMA dengan 'Satu Titik (Point Source)'
+#                         di tab Erosion Mapping (tidak ada input koordinat lagi).
+# Solver : shallow-water 2D "local inertia" (Bates dkk., 2010 -- skema inti LISFLOOD-FP) pada grid
+#          DEM, dengan time-step adaptif (CFL), batas area TERBUKA (air bisa keluar dari area kajian)
+#          dan pembatas volume supaya neraca massa terjaga.
+# Tampilan: WebGL (three.js) -- medan 3D sungguhan, citra satelit/orthophoto DITEMPEL langsung di
+#          permukaan medan (draping), air 3D semi-transparan yang naik/turun mengikuti medan, animasi
+#          waktu + hujan + hover info. CATATAN JUJUR: tetap model ILUSTRATIF/awal, belum terkalibrasi.
+import base64 as _wsim_base64
+import json as _wsim_json
+from scipy.ndimage import (map_coordinates as _wsim_map_coordinates,
+                           distance_transform_edt as _wsim_edt,
+                           maximum_filter as _wsim_maxfilter)
 
-    src_mask = ((grid_x - src_xy[0]) ** 2 + (grid_y - src_xy[1]) ** 2) <= src_radius ** 2
-    src_mask = src_mask & inside
-    if not src_mask.any():
-        _ix = int(np.abs(grid_x[:, 0] - src_xy[0]).argmin())
-        _iy = int(np.abs(grid_y[0, :] - src_xy[1]).argmin())
-        src_mask = np.zeros_like(inside)
-        src_mask[_ix, _iy] = True
 
-    h = np.zeros_like(z)
-    if src_mode == "level":
-        h[src_mask] = np.clip(src_level - z[src_mask], 0, None)
+def _wsim_contains_xy(geom, X, Y):
+    """Titik-dalam-poligon vektor (shapely 2.x: contains_xy; shapely 1.x: shapely.vectorized)."""
+    X = np.asarray(X, dtype=float)
+    Y = np.asarray(Y, dtype=float)
+    try:
+        import shapely as _shp
+        return np.asarray(_shp.contains_xy(geom, X.ravel(), Y.ravel())).reshape(X.shape)
+    except Exception:
+        from shapely import vectorized as _shpv
+        return np.asarray(_shpv.contains(geom, X, Y)).reshape(X.shape)
 
-    dt = sec_per_frame / max(sub_steps, 1)
-    offsets = [(-1, 0, dy, dy), (1, 0, dy, dy), (0, -1, dx, dx), (0, 1, dx, dx)]
 
-    h_frames = [h.copy()]
-    overflow_track = np.zeros_like(h)  # akumulasi volume yg pernah lewat tiap sel (m3)
+def _wsim_axis_index(coords, query):
+    """Indeks pecahan (utk map_coordinates) dari koordinat 1D monoton (naik/turun) -> query."""
+    coords = np.asarray(coords, dtype=float)
+    idx = np.arange(coords.size, dtype=float)
+    if coords.size < 2:
+        return np.zeros_like(np.asarray(query, dtype=float))
+    if coords[0] <= coords[-1]:
+        return np.interp(query, coords, idx)
+    return np.interp(query, coords[::-1], idx[::-1])
 
-    for _f in range(n_frames):
-        for _s in range(sub_steps):
-            if src_mode == "level":
-                # tampungan dijaga tetap terisi sampai levelnya sendiri -- mensimulasikan
-                # dam/reservoir yg terus mengisi sampai melimpas sendiri via fisikanya
-                h[src_mask] = np.maximum(h[src_mask], src_level - z[src_mask])
-            else:
-                h[src_mask] += (src_q * dt) / max(src_mask.sum() * cell_area, 1e-6)
 
-            S = z + h
-            Q_dir, total_out = [], np.zeros_like(h)
-            for (oy, ox, dist, width) in offsets:
-                # PERBAIKAN: dipakai fungsi shift bersama (_grid_shift_no_wrap) supaya tidak
-                # wrap-around (np.roll murni membuat tepi grid seolah "menyambung" ke tepi
-                # seberangnya, yg salah utk domain terbatas -- itu yg bikin neraca massa air
-                # tercemar & aliran kelihatan "macet"/tidak wajar). Sel tetangga yg jatuh DI
-                # LUAR grid diberi S/z sangat rendah (bukan wrap) & inside=False, jadi otomatis
-                # tersaring oleh mask nb_inside di bawah (Q=0 ke arah situ).
-                S_n = _grid_shift_no_wrap(S, oy, ox, -1e9)
-                z_n = _grid_shift_no_wrap(z, oy, ox, -1e9)
-                nb_inside = _grid_shift_no_wrap(inside.astype(np.float64), oy, ox, 0.0) > 0.5
-                dS = S - S_n
-                hflow = np.clip(np.maximum(S, S_n) - np.maximum(z, z_n), 0, None)
-                slope = np.clip(dS / dist, 1e-8, None)
-                q_unit = (1.0 / manning_n) * np.power(hflow, 5.0 / 3.0) * np.sqrt(slope)  # m2/s
-                Q = np.where((dS > 0) & inside & nb_inside, q_unit * width * dt, 0.0)      # m3
-                Q_dir.append(Q)
-                total_out += Q
+def _wsim_fill_nan_nearest(a):
+    """Isi NaN dengan nilai valid terdekat (agar interpolasi tidak 'bolong')."""
+    a = np.asarray(a, dtype=float)
+    bad = ~np.isfinite(a)
+    if not bad.any():
+        return a, ~bad
+    if bad.all():
+        raise ValueError("Grid elevasi kosong (semua NaN).")
+    ind = _wsim_edt(bad, return_distances=False, return_indices=True)
+    return a[tuple(ind)], ~bad
 
-            avail = h * cell_area
-            scale = np.ones_like(h)
-            _over = total_out > avail
-            scale[_over] = avail[_over] / np.maximum(total_out[_over], 1e-9)
 
-            vol = h * cell_area
-            for (oy, ox, dist, width), Q in zip(offsets, Q_dir):
-                Qs = Q * scale
-                vol -= Qs
-                # PERBAIKAN BUG ARAH: Qs[i,j] = volume yg dikirim dari sel (i,j) ke tetangga
-                # (i-oy, j-ox) -- jadi sel yg benar2 MENERIMA itu (i+oy, j+ox), diambil dgn
-                # shift (-oy,-ox), BUKAN (oy,ox) spt kode lama. Kode lama memakai shift yg
-                # SAMA dgn arah pengiriman, jadi volume air dikreditkan ke sel yg SALAH
-                # (bukan tetangga penerima sebenarnya) -- akibatnya air tidak benar2 mengalir
-                # turun mengikuti kemiringan spt yg terlihat konsisten di tab Erosion Mapping.
-                _received_q = _grid_shift_no_wrap(Qs, -oy, -ox, 0.0)
-                vol += _received_q
-                overflow_track += _received_q
+def _wsim_prepare_grid(seg, n_long=90, fill_pits=True):
+    """Resample DEM segmen ke grid simulasi (sel ~persegi) + mask boundary + DEM routing.
+    Sumbu 0 = X (Easting lokal), sumbu 1 = Y -- sama dgn konvensi grid Erosion Mapping."""
+    gx, gy, gz = seg["grid_x"], seg["grid_y"], seg["grid_z"]
+    xs_n = np.asarray(gx[:, 0], dtype=float)
+    ys_n = np.asarray(gy[0, :], dtype=float)
+    x0, x1 = float(np.nanmin(xs_n)), float(np.nanmax(xs_n))
+    y0, y1 = float(np.nanmin(ys_n)), float(np.nanmax(ys_n))
+    ex, ey = max(x1 - x0, 1e-6), max(y1 - y0, 1e-6)
+    n_long = int(max(20, n_long))
+    if ex >= ey:
+        nxs = n_long
+        cell = ex / (nxs - 1)
+        nys = max(10, int(round(ey / cell)) + 1)
+    else:
+        nys = n_long
+        cell = ey / (nys - 1)
+        nxs = max(10, int(round(ex / cell)) + 1)
+    xs = np.linspace(x0, x1, nxs)
+    ys = np.linspace(y0, y1, nys)
+    dx = ex / (nxs - 1)
+    dy = ey / (nys - 1)
+    X, Y = np.meshgrid(xs, ys, indexing="ij")
 
-            vol = np.clip(vol, 0, None)
-            h = vol / cell_area
-            h[~inside] = 0.0
+    z_native, valid_native = _wsim_fill_nan_nearest(gz)
+    fi = _wsim_axis_index(xs_n, xs)
+    fj = _wsim_axis_index(ys_n, ys)
+    II, JJ = np.meshgrid(fi, fj, indexing="ij")
+    z = _wsim_map_coordinates(z_native, [II, JJ], order=1, mode="nearest")
 
-        h_frames.append(h.copy())
+    inside = _wsim_contains_xy(seg["boundary"], X, Y)
+    if int(inside.sum()) < 12:
+        # cadangan: pakai mask 'inside' bawaan Erosion Mapping (nearest)
+        ins_n = np.asarray(seg.get("inside"), dtype=float) if seg.get("inside") is not None else None
+        if ins_n is not None and ins_n.shape == z_native.shape:
+            inside = _wsim_map_coordinates(ins_n, [II, JJ], order=0, mode="nearest") > 0.5
+    if int(inside.sum()) < 12:
+        raise ValueError("Area kajian (boundary) terlalu kecil / tidak terbaca pada grid simulasi.")
 
-    # --- deteksi titik limpasan: sel yg BERBATASAN LANGSUNG dgn area sumber
-    # (dam/reservoir) & pernah menerima volume air keluar dari sumber ---
-    ring_mask = binary_dilation(src_mask, iterations=2) & (~src_mask) & inside
-    score = np.where(ring_mask, overflow_track, 0.0)
-    flat_order = np.argsort(score, axis=None)[::-1]
-    overflow_pts = []
-    for _idx in flat_order[:8]:
-        _iy, _ix = np.unravel_index(_idx, score.shape)
-        if score[_iy, _ix] <= 1e-6:
+    z_route = z.copy()
+    if fill_pits:
+        try:
+            z_route = np.asarray(_dem_fill_depressions(z.copy(), inside), dtype=float)
+            z_route = np.where(np.isfinite(z_route), z_route, z)
+        except Exception:
+            z_route = z.copy()
+    return {"xs": xs, "ys": ys, "X": X, "Y": Y, "z": z, "z_route": z_route, "inside": inside,
+            "dx": float(dx), "dy": float(dy), "native": (xs_n, ys_n, z_native)}
+
+
+def _wsim_solve(z, inside, dx, dy, manning_n, total_time_s, n_frames,
+                rain_rate_ms=0.0, rain_dur_s=0.0,
+                src_mask=None, src_q=0.0, src_dur_s=0.0, init_depth=0.0,
+                dt_max=6.0, max_steps=45000, progress_cb=None):
+    """Shallow-water 2D 'local inertia' (Bates, Horritt & Fewtrell 2010) di grid DEM.
+
+      q^{t+dt} = ( q^t - g*h_f*dt*dS/dx ) / ( 1 + g*dt*n^2*|q^t| / h_f^{7/3} )
+
+    * h_f = kedalaman aliran pada sisi sel = max(S_i,S_j) - max(z_i,z_j)  (S = z + h)
+    * Time-step adaptif CFL: dt = a*dx/sqrt(g*h_max)  (a=0.55)
+    * Batas area terbuka : sel tepi boleh mengalirkan air keluar (Manning, kemiringan lokal) bila
+      medan menurun ke luar; tidak ada 'dinding' semu yg membuat air menumpuk di tepi.
+    * Pembatas volume    : fluks keluar sel tak pernah melebihi isi sel -> neraca massa terjaga.
+    Mengembalikan dict (frame kedalaman, kedalaman puncak, hidrograf, neraca massa)."""
+    g = 9.81
+    alpha = 0.55
+    hmin = 1.0e-4          # ambang 'basah' (0,1 mm)
+    fr_max = 1.0           # batas Froude di sisi sel
+    s_min = 0.002          # kemiringan minimum utk outflow batas
+    nx, ny = z.shape
+    NX, NY = nx + 2, ny + 2
+    zin = np.where(np.isfinite(z), z, np.nanmin(z[np.isfinite(z)]))
+    zp = np.pad(zin, 1, mode="edge").astype(np.float64)
+    ins = np.zeros((NX, NY), dtype=bool)
+    ins[1:-1, 1:-1] = inside
+    A = float(dx * dy)
+    n2 = float(manning_n) ** 2
+    dmin = float(min(dx, dy))
+
+    FX = ins[:-1, :] & ins[1:, :]
+    FY = ins[:, :-1] & ins[:, 1:]
+    zfx = np.maximum(zp[:-1, :], zp[1:, :])
+    zfy = np.maximum(zp[:, :-1], zp[:, 1:])
+
+    # --- sisi batas terbuka (4 arah) : donor di dalam, tetangga di luar, 'opposite' di dalam ---
+    def _shift_prev(a, axis):    # out[i] = a[i-1]  (i=0 -> a[0])
+        out = np.empty_like(a)
+        if axis == 0:
+            out[1:] = a[:-1]; out[0] = a[0]
+        else:
+            out[:, 1:] = a[:, :-1]; out[:, 0] = a[:, 0]
+        return out
+
+    def _shift_next(a, axis):    # out[i] = a[i+1]  (i=last -> a[last])
+        out = np.empty_like(a)
+        if axis == 0:
+            out[:-1] = a[1:]; out[-1] = a[-1]
+        else:
+            out[:, :-1] = a[:, 1:]; out[:, -1] = a[:, -1]
+        return out
+
+    zp_prev0, zp_next0 = _shift_prev(zp, 0), _shift_next(zp, 0)
+    zp_prev1, zp_next1 = _shift_prev(zp, 1), _shift_next(zp, 1)
+    ins_prev0, ins_next0 = _shift_prev(ins, 0), _shift_next(ins, 0)
+    ins_prev1, ins_next1 = _shift_prev(ins, 1), _shift_next(ins, 1)
+    # arah: (nama, tetangga-keluar-di-luar, opposite-di-dalam, z_opposite, jarak, lebar)
+    bnd = []
+    for (ins_out, ins_opp, z_opp, dist, width) in (
+        (ins_next0, ins_prev0, zp_prev0, dx, dy),   # keluar ke +x, opposite = -x
+        (ins_prev0, ins_next0, zp_next0, dx, dy),   # keluar ke -x
+        (ins_next1, ins_prev1, zp_prev1, dy, dx),   # keluar ke +y
+        (ins_prev1, ins_next1, zp_next1, dy, dx),   # keluar ke -y
+    ):
+        m = ins & (~ins_out) & ins_opp & (z_opp >= zp - 1e-9)
+        bnd.append((m, ins_opp, dist, width))
+    # indeks sel opposite (utk membaca S opposite): dipetakan lewat fungsi shift yg sama
+    shifters = [lambda a: _shift_prev(a, 0), lambda a: _shift_next(a, 0),
+                lambda a: _shift_prev(a, 1), lambda a: _shift_next(a, 1)]
+
+    h = np.zeros((NX, NY), dtype=np.float64)
+    qx = np.zeros((NX - 1, NY), dtype=np.float64)
+    qy = np.zeros((NX, NY - 1), dtype=np.float64)
+
+    if src_mask is not None:
+        smask = np.zeros((NX, NY), dtype=bool)
+        smask[1:-1, 1:-1] = src_mask & inside
+        if not smask.any():
+            smask = None
+    else:
+        smask = None
+    n_src = int(smask.sum()) if smask is not None else 0
+    n_ins = int(ins.sum())
+
+    v_init = 0.0
+    if smask is not None and init_depth > 0:
+        h[smask] = init_depth
+        v_init = float(init_depth * A * n_src)
+
+    times = np.linspace(0.0, float(total_time_s), int(n_frames) + 1)
+    peak = np.zeros((NX, NY), dtype=np.float64)
+    frames = [h[1:-1, 1:-1].astype(np.float32)]
+    v_in = 0.0
+    v_out = 0.0
+    cum_in = [0.0]
+    cum_out = [0.0]
+    steps = 0
+    t = 0.0
+    dt_floor_abs = 0.01
+
+    for k in range(1, int(n_frames) + 1):
+        t_end = times[k]
+        while t < t_end - 1e-9:
+            hmax = max(float(h.max()), 1.0e-3)
+            dt = alpha * dmin / np.sqrt(g * hmax)
+            if smask is not None and t < src_dur_s:
+                hpred = hmax + src_q * min(dt, dt_max) / (A * n_src)
+                dt = min(dt, alpha * dmin / np.sqrt(g * hpred))
+            dt = float(min(max(dt, dt_floor_abs), dt_max))
+            # anggaran langkah: bila terlalu banyak, perbesar dt secukupnya
+            budget = max(max_steps - steps, 1)
+            dt = max(dt, (total_time_s - t) / budget)
+            dt = min(dt, t_end - t)
+
+            # ---- sumber air ----
+            if rain_rate_ms > 0 and t < rain_dur_s:
+                dr = rain_rate_ms * min(dt, rain_dur_s - t)
+                h[ins] += dr
+                v_in += dr * A * n_ins
+            if smask is not None and src_q > 0 and t < src_dur_s:
+                vol = src_q * min(dt, src_dur_s - t)
+                h[smask] += vol / (A * n_src)
+                v_in += vol
+
+            S = zp + h
+            # ---- fluks internal (inersia lokal) ----
+            Sa, Sb = S[:-1, :], S[1:, :]
+            hf = np.maximum(Sa, Sb) - zfx
+            wet = FX & (hf > hmin)
+            hfs = np.where(wet, hf, 1.0)
+            den = 1.0 + g * dt * n2 * np.abs(qx) / (hfs * hfs * np.cbrt(hfs))
+            qn = (qx - g * hfs * dt * (Sb - Sa) / dx) / den
+            lim = fr_max * hfs * np.sqrt(g * hfs)
+            qx = np.where(wet, np.clip(qn, -lim, lim), 0.0)
+
+            Sa, Sb = S[:, :-1], S[:, 1:]
+            hf = np.maximum(Sa, Sb) - zfy
+            wet = FY & (hf > hmin)
+            hfs = np.where(wet, hf, 1.0)
+            den = 1.0 + g * dt * n2 * np.abs(qy) / (hfs * hfs * np.cbrt(hfs))
+            qn = (qy - g * hfs * dt * (Sb - Sa) / dy) / den
+            lim = fr_max * hfs * np.sqrt(g * hfs)
+            qy = np.where(wet, np.clip(qn, -lim, lim), 0.0)
+
+            Vx = qx * (dy * dt)
+            Vy = qy * (dx * dt)
+
+            # ---- outflow batas terbuka (Manning, kemiringan muka air ke dalam) ----
+            Vb = []
+            for (m, ins_opp, dist, width), shf in zip(bnd, shifters):
+                So = shf(S)
+                hb = h * m
+                s_loc = np.maximum((So - S) / dist, s_min)
+                qb = np.where(hb > hmin, np.power(np.maximum(hb, hmin), 5.0 / 3.0) * np.sqrt(s_loc) / manning_n, 0.0)
+                qb = np.minimum(qb, hb * np.sqrt(g * np.maximum(hb, hmin)))
+                Vb.append(np.where(m, qb * width * dt, 0.0))
+
+            # ---- pembatas volume per sel donor ----
+            out = np.zeros((NX, NY))
+            out[:-1, :] += np.maximum(Vx, 0.0)
+            out[1:, :] += np.maximum(-Vx, 0.0)
+            out[:, :-1] += np.maximum(Vy, 0.0)
+            out[:, 1:] += np.maximum(-Vy, 0.0)
+            for v in Vb:
+                out += v
+            avail = h * A
+            scale = np.where(out > avail, avail / np.maximum(out, 1e-12), 1.0)
+            Vx = np.where(Vx > 0, Vx * scale[:-1, :], Vx * scale[1:, :])
+            Vy = np.where(Vy > 0, Vy * scale[:, :-1], Vy * scale[:, 1:])
+            qx = Vx / (dy * dt)
+            qy = Vy / (dx * dt)
+
+            dV = np.zeros((NX, NY))
+            dV[:-1, :] -= Vx
+            dV[1:, :] += Vx
+            dV[:, :-1] -= Vy
+            dV[:, 1:] += Vy
+            for v in Vb:
+                vs = v * scale
+                dV -= vs
+                v_out += float(vs.sum())
+            h = np.maximum(h + dV / A, 0.0)
+            h[~ins] = 0.0
+            np.maximum(peak, h, out=peak)
+            t += dt
+            steps += 1
+        frames.append(h[1:-1, 1:-1].astype(np.float32))
+        cum_in.append(v_in)
+        cum_out.append(v_out)
+        if progress_cb is not None:
+            progress_cb(k / float(n_frames))
+
+    v_end = float(h.sum() * A)
+    cum_in = np.asarray(cum_in)
+    cum_out = np.asarray(cum_out)
+    dts = np.diff(times)
+    q_in = np.diff(cum_in) / np.maximum(dts, 1e-9)
+    q_out = np.diff(cum_out) / np.maximum(dts, 1e-9)
+    bal_err = (v_init + v_in - v_out - v_end)
+    return {
+        "frames": frames, "times": times, "peak": peak[1:-1, 1:-1].astype(np.float32),
+        "q_in": q_in, "q_out": q_out, "v_in": float(v_in), "v_init": float(v_init),
+        "v_out": float(v_out), "v_end": v_end,
+        "balance_err_pct": float(100.0 * bal_err / max(v_init + v_in, 1e-9)),
+        "steps": int(steps), "cell_area": A,
+    }
+
+
+_WSIM_VIEWER_TEMPLATE = r'''<!doctype html>
+<html lang="id"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root{--bg:#0b121b;--panel:rgba(14,22,34,.84);--fg:#e8eef6;--mut:#9fb0c3;--acc:#2f9bdb;--line:rgba(255,255,255,.15)}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:12.5px/1.35 system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;overflow:hidden}
+#wrap{position:relative;width:100%;height:100%;background:radial-gradient(ellipse at 50% 25%,#22344b 0%,#0b121b 70%)}
+canvas#gl{display:block;width:100%;height:100%;outline:none;touch-action:none;cursor:grab}
+canvas#gl:active{cursor:grabbing}
+.panel{position:absolute;background:var(--panel);border:1px solid var(--line);border-radius:10px;-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+#hud{left:10px;top:10px;padding:7px 12px;max-width:62%}
+#hud .ttl{font-weight:600;font-size:13px}
+#hud .sub{color:var(--mut);font-size:11.5px}
+#hud .tm{font-variant-numeric:tabular-nums;color:#bfe6ff;font-size:16px;font-weight:700;margin-top:2px}
+#side{right:10px;top:10px;width:236px;max-height:calc(100% - 84px);overflow:auto;padding:6px 10px 8px}
+#side summary{cursor:pointer;font-weight:600;padding:3px 0;outline:none}
+#side label.row{display:flex;align-items:center;gap:7px;margin:3px 0;cursor:pointer;user-select:none}
+#side .sl{margin:5px 0 2px}
+#side .sl span{display:flex;justify-content:space-between;color:var(--mut);font-size:11.5px}
+#side input[type=range]{width:100%;margin:1px 0}
+#side hr{border:0;border-top:1px solid var(--line);margin:7px 0}
+#legend{right:10px;bottom:62px;padding:6px 10px 5px;width:236px}
+#legend canvas{width:100%;height:12px;display:block;border-radius:3px;border:1px solid var(--line)}
+#legend .tk{display:flex;justify-content:space-between;color:var(--mut);font-size:11px;margin-top:2px}
+#legend .lt{font-size:11.5px;margin-bottom:3px}
+#bar{left:10px;right:10px;bottom:10px;padding:7px 10px;display:flex;gap:9px;align-items:center}
+#bar button,#side button,.tb button{background:rgba(255,255,255,.08);color:var(--fg);border:1px solid var(--line);border-radius:7px;padding:4px 9px;cursor:pointer;font:inherit}
+#bar button:hover,#side button:hover,.tb button:hover{background:rgba(47,155,219,.35)}
+#bar #play{min-width:34px;font-size:14px}
+#bar input[type=range]{flex:1;min-width:80px}
+#bar select{background:rgba(255,255,255,.08);color:var(--fg);border:1px solid var(--line);border-radius:7px;padding:3px 4px;font:inherit}
+#bar select option{color:#000}
+#bar .lp{display:flex;align-items:center;gap:4px;color:var(--mut);user-select:none}
+#tt{position:absolute;pointer-events:none;display:none;padding:6px 9px;border-radius:8px;background:rgba(8,14,22,.92);border:1px solid var(--line);font-size:11.5px;line-height:1.45;white-space:nowrap;z-index:5}
+#tt b{color:#bfe6ff}
+.tb{position:absolute;left:10px;top:78px;display:flex;flex-direction:column;gap:5px}
+#err{position:absolute;inset:0;display:none;align-items:center;justify-content:center;text-align:center;padding:24px;background:rgba(8,12,18,.94);z-index:9;font-size:14px;line-height:1.5}
+#loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(8,12,18,.88);z-index:8;font-size:14px;color:var(--mut)}
+@media (max-width:640px){#side{width:190px}#legend{width:190px}#hud{max-width:92%}}
+</style></head>
+<body>
+<div id="wrap">
+  <canvas id="gl" tabindex="0"></canvas>
+  <div id="hud" class="panel"><div class="ttl" id="hudT"></div><div class="sub" id="hudS"></div><div class="tm" id="hudTm">t = 0</div></div>
+  <div class="tb">
+    <button id="bReset" title=""></button><button id="bTop"></button><button id="bIso"></button><button id="bFull"></button><button id="bShot"></button>
+  </div>
+  <div id="side" class="panel"><details open><summary id="sLayers"></summary><div id="layers"></div></details></div>
+  <div id="legend" class="panel"><div class="lt" id="legT"></div><canvas id="legC" width="256" height="12"></canvas><div class="tk" id="legK"></div></div>
+  <div id="bar" class="panel">
+    <button id="play">▶</button>
+    <input type="range" id="tl" min="0" max="1000" value="0">
+    <select id="spd"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select>
+    <label class="lp"><input type="checkbox" id="loop" checked><span id="loopT"></span></label>
+  </div>
+  <div id="tt"></div>
+  <div id="loading"></div>
+  <div id="err"><div id="errT"></div></div>
+</div>
+<script>/*__THREE_INLINE__*/</script>
+<script>window.__WSIM__ = /*__PAYLOAD__*/null;</script>
+<script>
+(function(){
+"use strict";
+var P = window.__WSIM__, L = P.labels;
+function $(id){return document.getElementById(id);}
+function showErr(m){var e=$('err');e.style.display='flex';$('errT').innerHTML=m;$('loading').style.display='none';}
+$('loading').textContent = L.loading;
+
+function loadThree(cb){
+  if (window.THREE) return cb();
+  var urls = P.three_cdn || [], i = 0;
+  (function next(){
+    if (i >= urls.length){ showErr(L.err_three); return; }
+    var s = document.createElement('script');
+    s.src = urls[i++];
+    s.onload = function(){ if (window.THREE) cb(); else next(); };
+    s.onerror = next;
+    document.head.appendChild(s);
+  })();
+}
+
+function b64u8(s){
+  var bin = atob(s), n = bin.length, u = new Uint8Array(n);
+  for (var i=0;i<n;i++) u[i] = bin.charCodeAt(i);
+  return u;
+}
+
+function main(){
+try {
+var T = THREE;
+// ---------------------------------------------------------------- data
+var G = P.grid, nx = G.nx, ny = G.ny, N = nx*ny;
+var px = new Float32Array(b64u8(G.px).buffer);
+var py = new Float32Array(b64u8(G.py).buffer);
+var pz = new Float32Array(b64u8(G.pz).buffer);
+var sdf = new Float32Array(b64u8(G.sdf).buffer);
+var S = P.sim, nsx = S.nx, nsy = S.ny, NF = S.nframes;       // NF = jumlah frame waktu (termasuk t=0)
+var fr = new Uint16Array(b64u8(S.frames).buffer);             // (NF + 1 peak) x nsx x nsy, mm
+var FS = nsx*nsy;
+var times = S.times, Ttot = times[times.length-1];
+var zmin = G.zmin, zrange = Math.max(G.zmax - G.zmin, 0.5);
+var E0 = G.E0, N0 = G.N0;
+var meta = P.meta;
+
+// ---------------------------------------------------------------- renderer
+var canvas = $('gl');
+var renderer = new T.WebGLRenderer({canvas: canvas, antialias: true, alpha: false, preserveDrawingBuffer: true});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setClearColor(0x0b121b, 1);
+var scene = new T.Scene();
+var span = Math.max(G.xspan, G.yspan);
+var cam = new T.PerspectiveCamera(42, 1, Math.max(span*0.002, 0.2), span*30);
+
+// ---------------------------------------------------------------- texture
+var hasTex = !!P.imagery;
+var tex = null;
+var ext = hasTex ? P.imagery.extent : [0,1,0,1];
+function mkTex(img){
+  var t = new T.Texture(img);
+  t.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+  t.minFilter = T.LinearMipmapLinearFilter; t.magFilter = T.LinearFilter;
+  t.wrapS = t.wrapT = T.ClampToEdgeWrapping;
+  t.needsUpdate = true; return t;
+}
+
+// ---------------------------------------------------------------- terrain geometry
+var pos = new Float32Array(N*3), uvs = new Float32Array(N*2);
+var ex0 = ext[0], exW = Math.max(ext[1]-ext[0], 1e-6), ey0 = ext[2], eyH = Math.max(ext[3]-ext[2], 1e-6);
+for (var v=0; v<N; v++){
+  pos[3*v] = px[v]; pos[3*v+1] = pz[v]-zmin; pos[3*v+2] = -py[v];
+  uvs[2*v] = (px[v]+E0-ex0)/exW; uvs[2*v+1] = (py[v]+N0-ey0)/eyH;
+}
+var idxArr = [];
+for (var i=0;i<nx-1;i++){
+  for (var j=0;j<ny-1;j++){
+    var a=i*ny+j, b=(i+1)*ny+j, c=i*ny+j+1, d=(i+1)*ny+j+1;
+    if (sdf[a]>0 || sdf[b]>0 || sdf[c]>0 || sdf[d]>0){ idxArr.push(a,b,c, b,d,c); }
+  }
+}
+var index = new Uint32Array(idxArr);
+var tgeo = new T.BufferGeometry();
+tgeo.setAttribute('position', new T.BufferAttribute(pos,3));
+tgeo.setAttribute('uv', new T.BufferAttribute(uvs,2));
+tgeo.setAttribute('aSdf', new T.BufferAttribute(sdf,1));
+tgeo.setIndex(new T.BufferAttribute(index,1));
+tgeo.computeVertexNormals();
+tgeo.computeBoundingSphere(); tgeo.computeBoundingBox();
+
+var lightDir = new T.Vector3(-0.5, 0.82, -0.38).normalize();
+var terrMat = new T.ShaderMaterial({
+  uniforms:{ uTex:{value:null}, uHasTex:{value:0}, uLight:{value:lightDir}, uZr:{value:zrange}, uShade:{value:0.8}, uDim:{value:1.0} },
+  vertexShader:
+   'attribute float aSdf; varying vec2 vUv; varying vec3 vN; varying float vS; varying float vH; varying vec3 vL; uniform vec3 uLight;\n'+
+   'void main(){ vUv=uv; vS=aSdf; vH=position.y; vN=normalize(normalMatrix*normal); vL=normalize((viewMatrix*vec4(uLight,0.0)).xyz);\n'+
+   ' gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
+  fragmentShader:
+   'uniform sampler2D uTex; uniform float uHasTex; uniform float uZr; uniform float uShade; uniform float uDim;\n'+
+   'varying vec2 vUv; varying vec3 vN; varying float vS; varying float vH; varying vec3 vL;\n'+
+   'vec3 ramp(float t){ vec3 c0=vec3(0.20,0.46,0.27), c1=vec3(0.80,0.78,0.40), c2=vec3(0.62,0.45,0.30), c3=vec3(0.96,0.96,0.96);\n'+
+   ' return t<0.33? mix(c0,c1,t/0.33) : (t<0.66? mix(c1,c2,(t-0.33)/0.33) : mix(c2,c3,(t-0.66)/0.34)); }\n'+
+   'void main(){ if(vS<0.0) discard;\n'+
+   ' vec3 base = uHasTex>0.5 ? texture2D(uTex,vUv).rgb : ramp(clamp(vH/uZr,0.0,1.0));\n'+
+   ' float nd = max(dot(normalize(vN), vL), 0.0);\n'+
+   ' float lit = mix(1.0, 0.42+0.70*nd, uShade);\n'+
+   ' gl_FragColor = vec4(base*lit*uDim, 1.0); }',
+  side: T.DoubleSide
+});
+var world = new T.Group(); scene.add(world);
+var terrain = new T.Mesh(tgeo, terrMat); world.add(terrain);
+
+// ---------------------------------------------------------------- context plane (citra di sekitar area)
+var ctx = null;
+var yCtx = -(0.03*zrange + 0.6);
+if (hasTex){
+  var cg = new T.BufferGeometry();
+  var cx0 = ext[0]-E0, cx1 = ext[1]-E0, cy0 = ext[2]-N0, cy1 = ext[3]-N0;
+  var cp = new Float32Array([cx0,yCtx,-cy0,  cx1,yCtx,-cy0,  cx0,yCtx,-cy1,  cx1,yCtx,-cy1]);
+  var cu = new Float32Array([0,0, 1,0, 0,1, 1,1]);
+  cg.setAttribute('position', new T.BufferAttribute(cp,3));
+  cg.setAttribute('uv', new T.BufferAttribute(cu,2));
+  cg.setAttribute('normal', new T.BufferAttribute(new Float32Array([0,1,0, 0,1,0, 0,1,0, 0,1,0]),3));
+  cg.setAttribute('aSdf', new T.BufferAttribute(new Float32Array([1,1,1,1]),1));
+  cg.setIndex([0,1,2, 1,3,2]);
+  var cmat = terrMat.clone();
+  cmat.uniforms = { uTex:terrMat.uniforms.uTex, uHasTex:terrMat.uniforms.uHasTex, uLight:terrMat.uniforms.uLight, uZr:terrMat.uniforms.uZr, uShade:{value:0.0}, uDim:{value:0.55} };
+  ctx = new T.Mesh(cg, cmat); ctx.visible = false; world.add(ctx);
+}
+
+// ---------------------------------------------------------------- boundary outline
+var outline = new T.Group(); world.add(outline);
+(P.outline || []).forEach(function(ring){
+  var arr = new Float32Array(ring.length);
+  for (var q=0;q<ring.length;q+=3){ arr[q]=ring[q]; arr[q+1]=ring[q+1]-zmin+0.15; arr[q+2]=-ring[q+2]; }
+  var g = new T.BufferGeometry(); g.setAttribute('position', new T.BufferAttribute(arr,3));
+  outline.add(new T.Line(g, new T.LineBasicMaterial({color:0xff5fd2})));
+});
+
+// ---------------------------------------------------------------- water
+var lift = Math.max(0.02, span*0.00025);
+var wpos = new Float32Array(pos);
+var wdepth = new Float32Array(N);
+var wgeo = new T.BufferGeometry();
+var wposAttr = new T.BufferAttribute(wpos,3); wposAttr.setUsage(T.DynamicDrawUsage);
+var wdAttr = new T.BufferAttribute(wdepth,1); wdAttr.setUsage(T.DynamicDrawUsage);
+wgeo.setAttribute('position', wposAttr);
+wgeo.setAttribute('aDepth', wdAttr);
+wgeo.setAttribute('aSdf', new T.BufferAttribute(sdf,1));
+wgeo.setAttribute('normal', tgeo.getAttribute('normal'));
+wgeo.setIndex(tgeo.getIndex());
+var peakMode = false;
+var waterMat = new T.ShaderMaterial({
+  uniforms:{ uThr:{value:meta.thr_m}, uScale:{value:meta.hscale}, uOp:{value:0.95}, uTime:{value:0}, uLight:{value:lightDir}, uPeak:{value:0}, uK:{value:6.2832/Math.max(span/22,1)} },
+  vertexShader:
+   'attribute float aDepth; attribute float aSdf; varying float vD; varying float vS; varying vec3 vN; varying vec3 vV; varying vec2 vXZ; varying vec3 vL; uniform vec3 uLight;\n'+
+   'void main(){ vD=aDepth; vS=aSdf; vXZ=position.xz; vN=normalize(normalMatrix*normal); vec4 mv=modelViewMatrix*vec4(position,1.0); vV=-mv.xyz;\n'+
+   ' vL=normalize((viewMatrix*vec4(uLight,0.0)).xyz); gl_Position=projectionMatrix*mv; }',
+  fragmentShader:
+   'uniform float uThr; uniform float uScale; uniform float uOp; uniform float uTime; uniform float uPeak; uniform float uK;\n'+
+   'varying float vD; varying float vS; varying vec3 vN; varying vec3 vV; varying vec2 vXZ; varying vec3 vL;\n'+
+   'vec3 wr(float u){ vec3 a=vec3(0.66,0.93,1.0), b=vec3(0.18,0.62,0.88), c=vec3(0.04,0.31,0.60), d=vec3(0.01,0.10,0.30);\n'+
+   ' return u<0.33? mix(a,b,u/0.33) : (u<0.66? mix(b,c,(u-0.33)/0.33) : mix(c,d,(u-0.66)/0.34)); }\n'+
+   'vec3 pr(float u){ vec3 a=vec3(1.0,0.93,0.45), b=vec3(1.0,0.60,0.12), c=vec3(0.88,0.18,0.12), d=vec3(0.45,0.03,0.12);\n'+
+   ' return u<0.33? mix(a,b,u/0.33) : (u<0.66? mix(b,c,(u-0.33)/0.33) : mix(c,d,(u-0.66)/0.34)); }\n'+
+   'void main(){ if(vS<0.0 || vD<=uThr*0.5) discard;\n'+
+   ' float u=sqrt(clamp(vD/uScale,0.0,1.0)); float a=smoothstep(uThr*0.5,uThr*2.5,vD);\n'+
+   ' vec3 n=normalize(vN + 0.028*vec3(sin(vXZ.x*uK+uTime*1.7)+sin(vXZ.y*uK*0.8-uTime*1.3), 0.0, cos(vXZ.x*uK*0.9-uTime*1.1)+cos(vXZ.y*uK+uTime*1.9)));\n'+
+   ' vec3 V=normalize(vV); float nd=max(dot(n,vL),0.0);\n'+
+   ' vec3 base = uPeak>0.5 ? pr(u) : wr(u);\n'+
+   ' vec3 col = base*(0.66+0.46*nd);\n'+
+   ' vec3 R=reflect(-vL,n); float sp=pow(max(dot(R,V),0.0),56.0)*0.5*(1.0-uPeak);\n'+
+   ' float fr=pow(1.0-max(dot(n,V),0.0),3.0);\n'+
+   ' col += sp + fr*0.10*(1.0-uPeak);\n'+
+   ' gl_FragColor=vec4(col, a*uOp*(0.52+0.44*u)); }',
+  transparent:true, depthWrite:false, side:T.DoubleSide, polygonOffset:true, polygonOffsetFactor:-2, polygonOffsetUnits:-2
+});
+var water = new T.Mesh(wgeo, waterMat); water.renderOrder = 2; world.add(water);
+
+// bilinear lookup tables display-vertex -> sim cell
+var bIdx = new Int32Array(N), bFx = new Float32Array(N), bFy = new Float32Array(N);
+for (var ii=0; ii<nx; ii++){
+  var gi = nx>1 ? ii*(nsx-1)/(nx-1) : 0; var i0 = Math.min(Math.floor(gi), nsx-2); var fx = gi - i0;
+  for (var jj=0; jj<ny; jj++){
+    var gj = ny>1 ? jj*(nsy-1)/(ny-1) : 0; var j0 = Math.min(Math.floor(gj), nsy-2); var fy = gj - j0;
+    var vv = ii*ny+jj; bIdx[vv] = i0*nsy + j0; bFx[vv] = fx; bFy[vv] = fy;
+  }
+}
+function sampleFrame(off, v){
+  var k = off + bIdx[v], fx = bFx[v], fy = bFy[v];
+  return ((1-fx)*(1-fy)*fr[k] + fx*(1-fy)*fr[k+nsy] + (1-fx)*fy*fr[k+1] + fx*fy*fr[k+nsy+1]) * 0.001;
+}
+var curT = 0, lastKey = '';
+function depthAt(v){
+  if (peakMode) return sampleFrame(NF*FS, v);
+  var k = 0; while (k < NF-2 && times[k+1] <= curT) k++;
+  var a = (curT - times[k]) / Math.max(times[k+1]-times[k], 1e-9); a = Math.min(Math.max(a,0),1);
+  return (1-a)*sampleFrame(k*FS, v) + a*sampleFrame((k+1)*FS, v);
+}
+function updateWater(){
+  var thr = waterMat.uniforms.uThr.value*0.5;
+  for (var v=0; v<N; v++){
+    var d = sdf[v] < -1.5 ? 0 : depthAt(v);
+    if (d <= thr) d = 0;
+    wdepth[v] = d;
+    wpos[3*v+1] = pos[3*v+1] + lift + d;
+  }
+  wposAttr.needsUpdate = true; wdAttr.needsUpdate = true;
+}
+
+// ---------------------------------------------------------------- rain streaks
+var rain = null, nRain = 2200, rainTop = 0;
+if (meta.mode === 'rain'){
+  rainTop = zrange*1.2 + span*0.28;
+  var rp = new Float32Array(nRain*6), rph = new Float32Array(nRain);
+  var rx0 = G.xmin_s, rx1 = G.xmax_s, rz0 = -G.ymax_s, rz1 = -G.ymin_s;
+  for (var r=0;r<nRain;r++){
+    var x = rx0 + Math.random()*(rx1-rx0), z = rz0 + Math.random()*(rz1-rz0), y = Math.random()*rainTop;
+    rp[6*r]=x; rp[6*r+1]=y; rp[6*r+2]=z; rp[6*r+3]=x+span*0.0016; rp[6*r+4]=y+span*0.03; rp[6*r+5]=z; rph[r]=y;
+  }
+  var rg = new T.BufferGeometry(); var rpAttr = new T.BufferAttribute(rp,3); rpAttr.setUsage(T.DynamicDrawUsage);
+  rg.setAttribute('position', rpAttr);
+  var rmat = new T.LineBasicMaterial({color:0xbfe3ff, transparent:true, opacity:0.38, depthWrite:false});
+  rain = new T.LineSegments(rg, rmat); rain.frustumCulled = false; rain.renderOrder = 3; scene.add(rain);
+}
+function updateRain(dt, on){
+  if (!rain) return;
+  rain.visible = on;
+  if (!on) return;
+  var sp = span*0.55*dt, len = span*0.03, dxs = span*0.0016;
+  for (var r=0;r<nRain;r++){
+    var y = rp[6*r+1] - sp;
+    if (y < 0){ y += rainTop; }
+    rp[6*r+1] = y; rp[6*r+4] = y + len; rp[6*r+3] = rp[6*r] + dxs;
+  }
+  rpAttr.needsUpdate = true;
+}
+
+// ---------------------------------------------------------------- source marker (mode titik)
+var marker = null, ring = null, beam = null, srcRel = null;
+if (P.source){
+  srcRel = {x:P.source.x, y:P.source.y - zmin, z:-P.source.n};
+  marker = new T.Group();
+  beam = new T.Mesh(new T.CylinderGeometry(span*0.0022, span*0.0022, span*0.10, 12),
+                    new T.MeshBasicMaterial({color:0x35e0ff, transparent:true, opacity:0.55}));
+  beam.position.y = span*0.05; marker.add(beam);
+  var ball = new T.Mesh(new T.SphereGeometry(span*0.006, 16, 12), new T.MeshBasicMaterial({color:0xffffff})); ball.position.y = span*0.105; marker.add(ball);
+  ring = new T.Mesh(new T.RingGeometry(0.8, 1.0, 48), new T.MeshBasicMaterial({color:0x35e0ff, transparent:true, opacity:0.7, side:T.DoubleSide, depthWrite:false}));
+  ring.rotation.x = -Math.PI/2; ring.position.y = 0.4; marker.add(ring);
+  scene.add(marker);
+}
+
+// ---------------------------------------------------------------- camera (orbit sendiri)
+var cxm = (G.xmin_s + G.xmax_s)/2, czm = -(G.ymin_s + G.ymax_s)/2;
+var vex = meta.vexag;
+var cs = {tx:cxm, ty:zrange*0.25*vex, tz:czm, r:span*1.15, az:0.35, pol:1.0};
+var cs0 = {tx:cs.tx, tz:cs.tz, r:cs.r, az:cs.az, pol:cs.pol};
+function applyCam(){
+  var sp = Math.sin(cs.pol);
+  cam.position.set(cs.tx + cs.r*sp*Math.sin(cs.az), cs.ty + cs.r*Math.cos(cs.pol), cs.tz + cs.r*sp*Math.cos(cs.az));
+  cam.lookAt(cs.tx, cs.ty, cs.tz);
+}
+function setVex(val){
+  vex = val; world.scale.y = vex; cs.ty = zrange*0.25*vex;
+  if (marker && srcRel){ marker.position.set(srcRel.x, srcRel.y*vex, srcRel.z); }
+  dirty = true;
+}
+var dirty = true;
+var pts = {}, lastMid = null, lastDist = 0;
+canvas.addEventListener('contextmenu', function(e){e.preventDefault();});
+canvas.addEventListener('pointerdown', function(e){ canvas.setPointerCapture(e.pointerId); pts[e.pointerId] = {x:e.clientX,y:e.clientY,b:e.buttons,s:e.shiftKey}; lastMid=null; lastDist=0; hideTip(); });
+function endPtr(e){ delete pts[e.pointerId]; lastMid=null; lastDist=0; }
+canvas.addEventListener('pointerup', endPtr); canvas.addEventListener('pointercancel', endPtr);
+canvas.addEventListener('pointermove', function(e){
+  var p = pts[e.pointerId];
+  if (!p){ hoverTip(e); return; }
+  var ids = Object.keys(pts), dx = e.clientX - p.x, dy = e.clientY - p.y;
+  p.x = e.clientX; p.y = e.clientY;
+  if (ids.length >= 2){
+    var a = pts[ids[0]], b = pts[ids[1]];
+    var mid = {x:(a.x+b.x)/2, y:(a.y+b.y)/2}, dist = Math.hypot(a.x-b.x, a.y-b.y);
+    if (lastMid){ pan(mid.x-lastMid.x, mid.y-lastMid.y); if (lastDist>0) zoom(lastDist/dist); }
+    lastMid = mid; lastDist = dist;
+  } else if ((p.b & 2) || (p.b & 4) || p.s){ pan(dx, dy); }
+  else { cs.az -= dx*0.006; cs.pol = Math.min(Math.max(cs.pol - dy*0.006, 0.04), Math.PI/2 - 0.015); }
+  dirty = true;
+});
+function pan(dx, dy){
+  var k = cs.r*0.0017, rx = Math.cos(cs.az), rz = -Math.sin(cs.az), fx = -Math.sin(cs.az), fz = -Math.cos(cs.az);
+  cs.tx -= rx*dx*k; cs.tz -= rz*dx*k; cs.tx += fx*dy*k; cs.tz += fz*dy*k;
+}
+function zoom(f){ cs.r = Math.min(Math.max(cs.r*f, span*0.04), span*6); }
+canvas.addEventListener('wheel', function(e){ e.preventDefault(); zoom(Math.exp(e.deltaY*0.0012)); dirty = true; }, {passive:false});
+canvas.addEventListener('dblclick', function(){ resetCam(); });
+function resetCam(){ cs.tx=cs0.tx; cs.tz=cs0.tz; cs.r=cs0.r; cs.az=cs0.az; cs.pol=cs0.pol; dirty=true; }
+
+// ---------------------------------------------------------------- UI
+$('hudT').textContent = meta.title; $('hudS').textContent = meta.subtitle;
+$('bReset').textContent = '⟲'; $('bReset').title = L.reset;
+$('bTop').textContent = '⬒'; $('bTop').title = L.top;
+$('bIso').textContent = '◩'; $('bIso').title = L.iso;
+$('bFull').textContent = '⛶'; $('bFull').title = L.full;
+$('bShot').textContent = '📷'; $('bShot').title = L.shot;
+$('loopT').textContent = L.loop; $('sLayers').textContent = L.layers;
+$('bReset').onclick = resetCam;
+$('bTop').onclick = function(){ cs.pol = 0.04; cs.az = 0; cs.r = span*1.2; cs.tx = cs0.tx; cs.tz = cs0.tz; dirty = true; };
+$('bIso').onclick = function(){ cs.pol = 1.0; cs.az = 0.35; cs.r = cs0.r; cs.tx = cs0.tx; cs.tz = cs0.tz; dirty = true; };
+$('bFull').onclick = function(){ var w = $('wrap'); try { if (document.fullscreenElement) document.exitFullscreen(); else (w.requestFullscreen||w.webkitRequestFullscreen).call(w); } catch(e){} };
+$('bShot').onclick = function(){
+  renderer.render(scene, cam);
+  var url = canvas.toDataURL('image/png'); var a = document.createElement('a'); a.href = url; a.download = 'simulasi_air_3d.png';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+};
+
+var lay = $('layers');
+function addCheck(id, label, checked, onch, disabled){
+  var l = document.createElement('label'); l.className = 'row';
+  var c = document.createElement('input'); c.type = 'checkbox'; c.id = id; c.checked = checked; c.disabled = !!disabled;
+  c.onchange = function(){ onch(c.checked); dirty = true; };
+  l.appendChild(c); l.appendChild(document.createTextNode(label)); lay.appendChild(l); return c;
+}
+function addSlider(id, label, min, max, step, val, fmt, onch){
+  var d = document.createElement('div'); d.className = 'sl';
+  var sp = document.createElement('span'); var a = document.createElement('i'); a.style.fontStyle = 'normal'; a.textContent = label;
+  var b = document.createElement('b'); b.style.fontWeight = '600'; b.style.color = '#cfe8ff'; sp.appendChild(a); sp.appendChild(b);
+  var s = document.createElement('input'); s.type = 'range'; s.min = min; s.max = max; s.step = step; s.value = val;
+  function upd(){ b.textContent = fmt(parseFloat(s.value)); }
+  s.oninput = function(){ upd(); onch(parseFloat(s.value)); dirty = true; };
+  upd(); d.appendChild(sp); d.appendChild(s); lay.appendChild(d); return s;
+}
+var showWater = true;
+addCheck('cTex', hasTex ? L.l_tex : L.l_tex_na, hasTex, function(c){ terrMat.uniforms.uHasTex.value = c ? 1 : 0; if (ctx) ctx.visible = c && cCtx.checked; }, !hasTex);
+var cCtx = addCheck('cCtx', L.l_ctx, hasTex, function(c){ if (ctx) ctx.visible = c && terrMat.uniforms.uHasTex.value > 0.5; }, !hasTex);
+addCheck('cWater', L.l_water, true, function(c){ showWater = c; water.visible = c; });
+addCheck('cPeak', L.l_peak, false, function(c){ peakMode = c; waterMat.uniforms.uPeak.value = c ? 1 : 0; lastKey=''; drawLegend(); $('tl').disabled = c; });
+addCheck('cOut', L.l_out, true, function(c){ outline.visible = c; });
+if (meta.mode === 'rain') addCheck('cRain', L.l_rain, true, function(c){ rainOn = c; });
+var rainOn = true;
+var hr = document.createElement('hr'); lay.appendChild(hr);
+addSlider('sVex', L.s_vex, 1, 6, 0.1, meta.vexag, function(v){ return v.toFixed(1)+'×'; }, setVex);
+addSlider('sScale', L.s_scale, Math.max(meta.hscale*0.1, 0.002), Math.max(meta.hscale*3, 0.05), Math.max(meta.hscale*0.01, 0.0005), meta.hscale, function(v){ return v<1? (v*100).toFixed(1)+' cm' : v.toFixed(2)+' m'; }, function(v){ waterMat.uniforms.uScale.value = v; drawLegend(); });
+addSlider('sThr', L.s_thr, 0.5, 60, 0.5, meta.thr_m*1000, function(v){ return v.toFixed(1)+' mm'; }, function(v){ waterMat.uniforms.uThr.value = v/1000; lastKey=''; });
+addSlider('sOp', L.s_op, 0.2, 1, 0.05, 0.95, function(v){ return Math.round(v*100)+'%'; }, function(v){ waterMat.uniforms.uOp.value = v; });
+addSlider('sShade', L.s_shade, 0, 1, 0.05, 0.8, function(v){ return Math.round(v*100)+'%'; }, function(v){ terrMat.uniforms.uShade.value = v; });
+
+// legend
+function wrJS(u){
+  var A=[0.66,0.93,1.0],B=[0.18,0.62,0.88],C=[0.04,0.31,0.60],D=[0.01,0.10,0.30];
+  var p = peakMode ? [[1.0,0.93,0.45],[1.0,0.60,0.12],[0.88,0.18,0.12],[0.45,0.03,0.12]] : [A,B,C,D];
+  var t, a, b;
+  if (u<0.33){a=p[0];b=p[1];t=u/0.33;} else if (u<0.66){a=p[1];b=p[2];t=(u-0.33)/0.33;} else {a=p[2];b=p[3];t=(u-0.66)/0.34;}
+  return 'rgb('+[0,1,2].map(function(k){return Math.round(255*(a[k]+(b[k]-a[k])*t));}).join(',')+')';
+}
+function fmtD(v){ return v<0.1 ? (v*1000).toFixed(0)+' mm' : (v<1 ? (v*100).toFixed(0)+' cm' : v.toFixed(2)+' m'); }
+function drawLegend(){
+  var c = $('legC'), g = c.getContext('2d'), W = c.width;
+  for (var x=0;x<W;x++){ var f = x/(W-1); g.fillStyle = wrJS(Math.sqrt(f)); g.fillRect(x,0,1,c.height); }
+  var s = waterMat.uniforms.uScale.value;
+  $('legT').textContent = peakMode ? L.leg_peak : L.leg_depth;
+  $('legK').innerHTML = '<span>0</span><span>'+fmtD(s*0.25)+'</span><span>'+fmtD(s*0.5)+'</span><span>'+fmtD(s*0.75)+'</span><span>≥ '+fmtD(s)+'</span>';
+}
+drawLegend();
+
+// timeline
+var playing = false, speed = 1, loop = true;
+$('play').onclick = function(){ playing = !playing; if (playing && curT >= Ttot - 1e-6) curT = 0; $('play').textContent = playing ? '⏸' : '▶'; };
+$('spd').onchange = function(){ speed = parseFloat($('spd').value); };
+$('loop').onchange = function(){ loop = $('loop').checked; };
+$('tl').oninput = function(){ curT = parseFloat($('tl').value)/1000*Ttot; dirty = true; };
+function fmtT(s){
+  s = Math.max(0, s);
+  if (s < 120) return s.toFixed(0)+' '+L.u_s;
+  var m = Math.floor(s/60), sc = Math.round(s - m*60);
+  if (m < 120) return m+' '+L.u_min+' '+(sc<10?'0':'')+sc+' '+L.u_s;
+  var h = Math.floor(m/60), mm = m - h*60;
+  return h+' '+L.u_h+' '+(mm<10?'0':'')+mm+' '+L.u_min;
+}
+
+// tooltip
+var tip = $('tt'), ray = new T.Raycaster(), mouse = new T.Vector2(), tipPend = null;
+function hideTip(){ tip.style.display = 'none'; }
+function hoverTip(e){ tipPend = e; }
+function doTip(){
+  if (!tipPend) return; var e = tipPend; tipPend = null;
+  var r = canvas.getBoundingClientRect();
+  mouse.x = ((e.clientX - r.left)/r.width)*2 - 1; mouse.y = -((e.clientY - r.top)/r.height)*2 + 1;
+  ray.setFromCamera(mouse, cam);
+  var hit = ray.intersectObject(terrain, false)[0];
+  if (!hit){ hideTip(); return; }
+  var f = hit.face, best = f.a, bd = 1e30, loc = world.worldToLocal(hit.point.clone());
+  [f.a, f.b, f.c].forEach(function(vi){ var d = (pos[3*vi]-loc.x)*(pos[3*vi]-loc.x) + (pos[3*vi+2]-loc.z)*(pos[3*vi+2]-loc.z); if (d < bd){ bd = d; best = vi; } });
+  if (sdf[best] < 0){ hideTip(); return; }
+  var dnow = depthAt(best), dpk = sampleFrame(NF*FS, best);
+  tip.innerHTML = '<b>'+ (meta.frame==='utm' ? 'E' : 'X') +'</b> '+(px[best]+E0).toFixed(1)+' &nbsp; <b>'+(meta.frame==='utm' ? 'N' : 'Y')+'</b> '+(py[best]+N0).toFixed(1)+
+    '<br><b>'+L.t_elev+'</b> '+pz[best].toFixed(2)+' m<br><b>'+L.t_depth+'</b> '+fmtD(dnow)+'<br><b>'+L.t_peak+'</b> '+fmtD(dpk);
+  tip.style.display = 'block';
+  var tx = e.clientX - r.left + 14, ty = e.clientY - r.top + 14;
+  if (tx + 190 > r.width) tx -= 210; if (ty + 90 > r.height) ty -= 100;
+  tip.style.left = tx + 'px'; tip.style.top = ty + 'px';
+}
+canvas.addEventListener('pointerleave', hideTip);
+
+// ---------------------------------------------------------------- resize + loop
+function resize(){
+  var w = $('wrap').clientWidth, h = $('wrap').clientHeight;
+  renderer.setSize(w, h, false); cam.aspect = w/Math.max(h,1); cam.updateProjectionMatrix(); dirty = true;
+}
+window.addEventListener('resize', resize);
+if (window.ResizeObserver) new ResizeObserver(resize).observe($('wrap'));
+
+if (hasTex){
+  var img = new Image();
+  img.onload = function(){ tex = mkTex(img); terrMat.uniforms.uTex.value = tex; terrMat.uniforms.uHasTex.value = 1; if (ctx) ctx.visible = true; dirty = true; };
+  img.onerror = function(){ hasTex = false; terrMat.uniforms.uHasTex.value = 0; if (ctx) ctx.visible = false; };
+  img.src = P.imagery.uri;
+}
+
+setVex(vex); resize(); applyCam(); updateWater();
+$('loading').style.display = 'none';
+var tPrev = performance.now(), tClock = 0;
+function frame(now){
+  requestAnimationFrame(frame);
+  var dt = Math.min((now - tPrev)/1000, 0.1); tPrev = now; tClock += dt;
+  if (playing){
+    curT += dt*speed*(Ttot/Math.max(meta.play_seconds,1));
+    if (curT >= Ttot){ if (loop){ curT = 0; } else { curT = Ttot; playing = false; $('play').textContent = '▶'; } }
+    dirty = true;
+  }
+  var key = peakMode ? 'pk' : curT.toFixed(2);
+  if ((key !== lastKey || dirty) && showWater){ lastKey = key; updateWater(); }
+  if (dirty || playing){
+    $('tl').value = Math.round(curT/Ttot*1000);
+    $('hudTm').textContent = (peakMode ? L.leg_peak : (L.t + ' = ' + fmtT(curT)));
+  }
+  var rainActive = meta.mode === 'rain' && rainOn && curT < meta.rain_dur_s && !peakMode;
+  updateRain(dt, rainActive);
+  if (ring){ var ph = (tClock % 1.6)/1.6; var rs = span*(0.004 + 0.03*ph); ring.scale.set(rs, rs, rs); ring.material.opacity = 0.75*(1-ph); if (beam) beam.material.opacity = 0.35 + 0.2*Math.sin(tClock*4); }
+  waterMat.uniforms.uTime.value = tClock;
+  doTip();
+  applyCam();
+  renderer.render(scene, cam);
+  dirty = false;
+}
+requestAnimationFrame(frame);
+window.__wsim_ready = true;
+} catch(err){ showErr(L.err_gen + ' ' + (err && err.message ? err.message : err)); try{console.error(err);}catch(e){} }
+}
+loadThree(main);
+})();
+</script>
+</body></html>
+'''
+
+
+# ---------------------------------------------------------------------------------------------
+# Pembangun scene 3D (HTML + three.js) dari hasil simulasi
+# ---------------------------------------------------------------------------------------------
+_WSIM_THREE_CDN = [
+    "https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js",
+    "https://unpkg.com/three@0.128.0/build/three.min.js",
+    "https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js",
+]
+
+
+def _wsim_find_local_three():
+    """Cari three.min.js lokal (opsional) supaya viewer bisa jalan OFFLINE. Letakkan file
+    'three.min.js' (three r128) di folder 'vendor/', 'static/' atau 'assets/' di samping app ini,
+    atau set env WSIM_THREE_JS. Kalau tidak ada, viewer memuat three.js dari CDN."""
+    import os as _os
+    cands = []
+    _env = _os.environ.get("WSIM_THREE_JS")
+    if _env:
+        cands.append(_env)
+    try:
+        _base = _os.path.dirname(_os.path.abspath(__file__))
+    except Exception:
+        _base = _os.getcwd()
+    for _b in (_base, _os.getcwd()):
+        for _sub in ("vendor", "static", "assets", ""):
+            cands.append(_os.path.join(_b, _sub, "three.min.js"))
+    for _c in cands:
+        try:
+            if _os.path.isfile(_c) and _os.path.getsize(_c) > 100_000:
+                with open(_c, "r", encoding="utf-8") as _f:
+                    return _f.read()
+        except Exception:
+            continue
+    return None
+
+
+def _wsim_b64(arr, dtype):
+    return _wsim_base64.b64encode(np.ascontiguousarray(np.asarray(arr, dtype=dtype)).tobytes()).decode("ascii")
+
+
+def _wsim_jpeg_datauri(rgb, max_side=2048, quality=86):
+    im = PILImage.fromarray(np.asarray(rgb, dtype=np.uint8)).convert("RGB")
+    w, h = im.size
+    if max(w, h) > max_side:
+        sc = max_side / float(max(w, h))
+        im = im.resize((max(2, int(round(w * sc))), max(2, int(round(h * sc)))), PILImage.LANCZOS)
+    buf = io.BytesIO()
+    im.save(buf, format="JPEG", quality=quality, optimize=True)
+    return "data:image/jpeg;base64," + _wsim_base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _wsim_boundary_rings(geom):
+    polys = []
+    if geom is None:
+        return []
+    gt = getattr(geom, "geom_type", "")
+    if gt == "Polygon":
+        polys = [geom]
+    elif gt in ("MultiPolygon", "GeometryCollection"):
+        polys = [g for g in geom.geoms if getattr(g, "geom_type", "") == "Polygon"]
+    rings = []
+    for p in polys:
+        rings.append(np.asarray(p.exterior.coords, dtype=float)[:, :2])
+        for it in p.interiors:
+            rings.append(np.asarray(it.coords, dtype=float)[:, :2])
+    return rings
+
+
+def _wsim_signed_distance_cells(inside, X, Y, boundary, cell):
+    """Jarak bertanda ke boundary (satuan 'sel', + di dalam, - di luar). Jauh dari tepi: EDT cepat;
+    dekat tepi: jarak geometris ke poligon asli -> tepi area di 3D mulus (bukan tangga piksel)."""
+    d_in = _wsim_edt(inside)
+    d_out = _wsim_edt(~inside)
+    sdf = np.where(inside, d_in - 0.5, -(d_out - 0.5)).astype(np.float64)
+    near = np.abs(sdf) <= 3.0
+    if near.any():
+        try:
+            import shapely as _shp
+            line = boundary.boundary
+            pts = _shp.points(X[near], Y[near])
+            dist = np.asarray(_shp.distance(line, pts), dtype=float)
+        except Exception:
+            line = boundary.boundary
+            dist = np.array([line.distance(Point(float(a), float(b))) for a, b in zip(X[near], Y[near])])
+        sign = np.where(inside[near], 1.0, -1.0)
+        val = sign * dist / max(cell, 1e-9)
+        # jaga agar tanda konsisten dengan mask & tidak persis nol
+        val = np.where(inside[near], np.maximum(val, 0.02), np.minimum(val, -0.02))
+        sdf[near] = val
+    return sdf.astype(np.float32)
+
+
+def _wsim_build_scene_html(*, seg, prep, sim, mode, title, subtitle, imagery, to_utm, labels,
+                           vexag=2.0, nd_long=200, rain_dur_s=0.0, source_xy=None,
+                           play_seconds=24.0, three_inline=None):
+    """Susun HTML viewer WebGL: medan 3D (DEM) + citra yg ditempel + air animasi."""
+    xs_n, ys_n, z_native = prep["native"]
+    x0, x1 = float(prep["xs"][0]), float(prep["xs"][-1])
+    y0, y1 = float(prep["ys"][0]), float(prep["ys"][-1])
+    ex, ey = x1 - x0, y1 - y0
+    if ex >= ey:
+        ndx = int(nd_long)
+        ndy = max(24, int(round(nd_long * ey / ex)))
+    else:
+        ndy = int(nd_long)
+        ndx = max(24, int(round(nd_long * ex / ey)))
+    xd = np.linspace(x0, x1, ndx)
+    yd = np.linspace(y0, y1, ndy)
+    Xd, Yd = np.meshgrid(xd, yd, indexing="ij")
+    II, JJ = np.meshgrid(_wsim_axis_index(xs_n, xd), _wsim_axis_index(ys_n, yd), indexing="ij")
+    zd = _wsim_map_coordinates(z_native, [II, JJ], order=3, mode="nearest")
+    zd = np.clip(zd, float(np.nanmin(z_native)), float(np.nanmax(z_native)))
+    inside_d = _wsim_contains_xy(seg["boundary"], Xd, Yd)
+    cell_d = 0.5 * (ex / (ndx - 1) + ey / (ndy - 1))
+    sdf = _wsim_signed_distance_cells(inside_d, Xd, Yd, seg["boundary"], cell_d)
+
+    frame = "local"
+    if imagery is not None and imagery.get("frame") == "utm" and to_utm is not None:
+        frame = "utm"
+    elif imagery is None and to_utm is not None:
+        frame = "utm"
+    if frame == "utm":
+        Ed, Nd = to_utm(Xd, Yd)
+        Ed = np.asarray(Ed, dtype=float)
+        Nd = np.asarray(Nd, dtype=float)
+    else:
+        Ed, Nd = Xd.astype(float), Yd.astype(float)
+    E0 = float(np.round(np.nanmean(Ed[inside_d]), 1))
+    N0 = float(np.round(np.nanmean(Nd[inside_d]), 1))
+    pxd = (Ed - E0).astype(np.float32)
+    pyd = (Nd - N0).astype(np.float32)
+    zmin = float(np.nanmin(zd[inside_d])) if inside_d.any() else float(np.nanmin(zd))
+    zmax = float(np.nanmax(zd[inside_d])) if inside_d.any() else float(np.nanmax(zd))
+
+    # ---- garis batas area (di-drape ke medan) ----
+    outline = []
+    budget = 3500
+    rings = _wsim_boundary_rings(seg["boundary"])
+    tot_pts = sum(len(r) for r in rings) or 1
+    step = max(1, int(np.ceil(tot_pts / float(budget))))
+    for r in rings:
+        rr = r[::step]
+        if len(rr) < 2:
+            continue
+        rr = np.vstack([rr, rr[:1]])
+        fi = _wsim_axis_index(xs_n, rr[:, 0])
+        fj = _wsim_axis_index(ys_n, rr[:, 1])
+        zr = _wsim_map_coordinates(z_native, [fi, fj], order=1, mode="nearest")
+        if frame == "utm":
+            er, nr = to_utm(rr[:, 0], rr[:, 1])
+        else:
+            er, nr = rr[:, 0], rr[:, 1]
+        trip = np.column_stack([np.asarray(er) - E0, zr, np.asarray(nr) - N0]).ravel()
+        outline.append([round(float(v), 2) for v in trip])
+
+    # ---- frame kedalaman (mm, uint16) + puncak ----
+    frames_mm = [np.clip(np.rint(f.astype(np.float64) * 1000.0), 0, 65535).astype(np.uint16) for f in sim["frames"]]
+    peak_mm = np.clip(np.rint(sim["peak"].astype(np.float64) * 1000.0), 0, 65535).astype(np.uint16)
+    all_mm = np.stack(frames_mm + [peak_mm], axis=0)
+    nsx, nsy = sim["frames"][0].shape
+    pk = sim["peak"][prep["inside"]]
+    thr_m = 0.0015 if mode == "rain" else 0.004
+    pos_pk = pk[pk > max(thr_m, 0.003)]
+    hscale = float(np.percentile(pos_pk, 98)) if pos_pk.size else 0.1
+    hscale = float(np.clip(hscale, 0.02, 25.0))
+    hscale = float(float("%.2g" % hscale))
+
+    img_payload = None
+    if imagery is not None:
+        img_payload = {"uri": _wsim_jpeg_datauri(imagery["rgb"]), "extent": [float(v) for v in imagery["extent"]]}
+
+    src_payload = None
+    if source_xy is not None:
+        sx, sy = float(source_xy[0]), float(source_xy[1])
+        fi = _wsim_axis_index(xs_n, np.array([sx]))
+        fj = _wsim_axis_index(ys_n, np.array([sy]))
+        sz = float(_wsim_map_coordinates(z_native, [fi, fj], order=1, mode="nearest")[0])
+        if frame == "utm":
+            se, sn = to_utm(np.array([sx]), np.array([sy]))
+            se, sn = float(np.asarray(se)[0]), float(np.asarray(sn)[0])
+        else:
+            se, sn = sx, sy
+        src_payload = {"x": se - E0, "y": sz, "n": sn - N0}
+
+    payload = {
+        "labels": labels,
+        "three_cdn": _WSIM_THREE_CDN,
+        "grid": {
+            "nx": int(ndx), "ny": int(ndy),
+            "px": _wsim_b64(pxd, "<f4"), "py": _wsim_b64(pyd, "<f4"), "pz": _wsim_b64(zd, "<f4"),
+            "sdf": _wsim_b64(sdf, "<f4"),
+            "zmin": zmin, "zmax": zmax, "E0": E0, "N0": N0,
+            "xmin_s": float(pxd.min()), "xmax_s": float(pxd.max()),
+            "ymin_s": float(pyd.min()), "ymax_s": float(pyd.max()),
+            "xspan": float(pxd.max() - pxd.min()), "yspan": float(pyd.max() - pyd.min()),
+        },
+        "sim": {"nx": int(nsx), "ny": int(nsy), "nframes": int(len(sim["frames"])),
+                "times": [float(t) for t in sim["times"]], "frames": _wsim_b64(all_mm, "<u2")},
+        "imagery": img_payload,
+        "outline": outline,
+        "source": src_payload,
+        "meta": {"mode": mode, "title": title, "subtitle": subtitle, "frame": frame,
+                 "vexag": float(vexag), "hscale": hscale, "thr_m": float(thr_m),
+                 "rain_dur_s": float(rain_dur_s), "play_seconds": float(play_seconds)},
+    }
+    js = _wsim_json.dumps(payload, separators=(",", ":")).replace("</", "<\\/")
+    html = _WSIM_VIEWER_TEMPLATE.replace("/*__PAYLOAD__*/null", js)
+    inline = ""
+    if three_inline:
+        inline = three_inline.replace("</script", "<\\/script")
+    html = html.replace("/*__THREE_INLINE__*/", inline)
+    return html, {"hscale": hscale, "E0": E0, "N0": N0, "frame": frame,
+                  "display_shape": (int(ndx), int(ndy)), "html_mb": len(html) / 1.0e6}
+
+
+def _wsim_labels():
+    """Teks UI di dalam viewer 3D (mengikuti pilihan bahasa aplikasi lewat _t)."""
+    return {
+        "loading": _t("Memuat scene 3D...", "Loading 3D scene..."),
+        "err_three": _t(
+            "Pustaka 3D (three.js) gagal dimuat dari CDN. Cek koneksi internet / firewall, atau letakkan file "
+            "<b>three.min.js</b> (three r128) di folder <b>vendor/</b> di samping aplikasi agar viewer bisa jalan offline.",
+            "The 3D library (three.js) could not be loaded from the CDN. Check your internet connection / firewall, or put "
+            "<b>three.min.js</b> (three r128) in a <b>vendor/</b> folder next to the app to run the viewer offline."),
+        "err_gen": _t("Viewer 3D gagal dibuat:", "The 3D viewer failed to start:"),
+        "reset": _t("Reset kamera (atau klik ganda)", "Reset camera (or double-click)"),
+        "top": _t("Tampak atas", "Top view"),
+        "iso": _t("Tampak miring", "Oblique view"),
+        "full": _t("Layar penuh", "Fullscreen"),
+        "shot": _t("Simpan gambar PNG", "Save PNG image"),
+        "loop": _t("ulang", "loop"),
+        "layers": _t("Lapisan & tampilan", "Layers & display"),
+        "l_tex": _t("Citra di permukaan medan", "Imagery draped on terrain"),
+        "l_tex_na": _t("Citra tidak tersedia", "Imagery unavailable"),
+        "l_ctx": _t("Citra area sekitar", "Surrounding imagery"),
+        "l_water": _t("Air", "Water"),
+        "l_peak": _t("Kedalaman maksimum (puncak)", "Maximum depth (peak)"),
+        "l_out": _t("Garis batas area", "Study-area outline"),
+        "l_rain": _t("Efek hujan", "Rain effect"),
+        "s_vex": _t("Eksagerasi vertikal", "Vertical exaggeration"),
+        "s_scale": _t("Skala warna kedalaman", "Depth colour scale"),
+        "s_thr": _t("Ambang tampil air", "Water display threshold"),
+        "s_op": _t("Opasitas air", "Water opacity"),
+        "s_shade": _t("Bayangan relief", "Relief shading"),
+        "leg_depth": _t("Kedalaman air", "Water depth"),
+        "leg_peak": _t("Kedalaman maksimum selama simulasi", "Maximum depth during simulation"),
+        "t": _t("Waktu", "Time"),
+        "t_elev": _t("Elevasi", "Elevation"),
+        "t_depth": _t("Kedalaman saat ini", "Current depth"),
+        "t_peak": _t("Kedalaman maks.", "Peak depth"),
+        "u_s": _t("dtk", "s"), "u_min": _t("mnt", "min"), "u_h": _t("jam", "h"),
+    }
+
+
+# ---------------------------------------------------------------------------------------------
+# Antarmuka (Streamlit)
+# ---------------------------------------------------------------------------------------------
+try:
+    import streamlit.components.v1 as _wsim_components
+except Exception:
+    _wsim_components = None
+
+_WSIM_SRC_POINT = "Satu Titik (Point Source)"   # nilai selectbox 'source_type_*' di tab Erosion Mapping
+
+
+def _wsim_erosion_source(seg_results):
+    """Baca skenario sumber aliran yang SEDANG dipakai di tab Erosion Mapping (Section B):
+    jenis sumber, titik hulu (klik-peta / ketik manual / awal jalur aliran), dan tebal air awal.
+    Tidak ada input koordinat di tab simulasi -- semuanya diambil dari sini."""
+    ss = st.session_state
+    segs = ss.get("segments") or []
+    main_sid = segs[0] if segs else (next(iter(seg_results)) if seg_results else None)
+    out = {"main_sid": main_sid, "source_type": "Hujan (Uniform)", "point": None,
+           "point_origin": None, "point_depth": 0.20}
+    if main_sid is None:
+        return out
+    out["source_type"] = ss.get(f"source_type_{main_sid}", "Hujan (Uniform)")
+    try:
+        _d = ss.get(f"point_depth_{main_sid}")
+        if _d:
+            out["point_depth"] = float(_d)
+    except Exception:
+        pass
+    method = str(ss.get(f"point_method_{main_sid}", "Ketik Koordinat Manual"))
+    click = ss.get(f"flow_click_xy_{main_sid}")
+    mx, my = ss.get(f"point_x_{main_sid}"), ss.get(f"point_y_{main_sid}")
+    manual = None
+    try:
+        if mx is not None and my is not None and (abs(float(mx)) + abs(float(my))) > 0:
+            manual = (float(mx), float(my))
+    except Exception:
+        manual = None
+    cands = [(_t("klik di peta desain", "map click"), click), (_t("input koordinat manual", "manual coordinates"), manual)]
+    if not method.startswith("Klik"):
+        cands.reverse()
+    main_res = (seg_results or {}).get(main_sid) or {}
+    try:
+        _fp = main_res.get("flow_paths") or []
+        if _fp and len(_fp[0][0]) > 0:
+            cands.append((_t("awal jalur aliran hasil analisis", "start of analysed flow path"),
+                          (float(_fp[0][0][0]), float(_fp[0][1][0]))))
+    except Exception:
+        pass
+    bnd = main_res.get("boundary")
+    for origin, pt in cands:
+        if pt is None:
+            continue
+        try:
+            x, y = float(pt[0]), float(pt[1])
+        except Exception:
+            continue
+        if not (np.isfinite(x) and np.isfinite(y)):
+            continue
+        if bnd is not None:
+            try:
+                if not bnd.contains(Point(x, y)):
+                    continue
+            except Exception:
+                pass
+        out["point"] = (x, y)
+        out["point_origin"] = origin
+        break
+    return out
+
+
+def _wsim_defaults(seg):
+    """Nilai awal parameter dari hasil RUN ANALYSIS segmen (hujan R24, koef. limpasan C, debit rencana)."""
+    R, R_src = None, ""
+    try:
+        v = seg.get("r24_mm_extreme")
+        if v:
+            R, R_src = float(v), _t("R24 ekstrem (Erosion Mapping)", "extreme R24 (Erosion Mapping)")
+        if not R:
+            base = seg.get("online_rainfall")
+            if base:
+                R = float(base) * float(seg.get("rain_factor") or 1.0)
+                R_src = _t("hujan analisis × faktor ekstrem (Erosion Mapping)", "analysis rainfall × extreme factor (Erosion Mapping)")
+    except Exception:
+        R = None
+    if not R or R <= 0:
+        R, R_src = 100.0, _t("nilai bawaan (belum ada data hujan di Erosion Mapping)", "default (no rainfall data in Erosion Mapping yet)")
+    C, C_src = 0.70, _t("nilai bawaan", "default")
+    try:
+        ci = seg.get("cover_info") or {}
+        if ci.get("runoff_used") and ci.get("runoff_c_eff"):
+            C, C_src = float(ci["runoff_c_eff"]), _t("C efektif dgn cover (Surface/Cover)", "effective C with cover (Surface/Cover)")
+        elif seg.get("runoff_c_base"):
+            C, C_src = float(seg["runoff_c_base"]), _t("C dari Erosion Mapping", "C from Erosion Mapping")
+    except Exception:
+        pass
+    C = float(min(max(C, 0.05), 1.0))
+    Q, Q_src = 2.0, _t("nilai bawaan", "default")
+    try:
+        hr = seg.get("hydraulics_result") or {}
+        if hr.get("q_design_m3s"):
+            Q, Q_src = float(hr["q_design_m3s"]), _t("debit rencana (Rational, Erosion Mapping)", "design discharge (Rational, Erosion Mapping)")
+    except Exception:
+        pass
+    Q = float(min(max(Q, 0.05), 5000.0))
+    try:
+        vx = float(seg.get("vertical_exaggeration") or 2.0)
+    except Exception:
+        vx = 2.0
+    return {"R": float(min(max(R, 1.0), 2000.0)), "R_src": R_src, "C": C, "C_src": C_src,
+            "Q": round(Q, 2), "Q_src": Q_src, "vexag": float(min(max(vx, 1.0), 6.0))}
+
+
+def _wsim_get_imagery(seg, sid, choice, prep):
+    """Siapkan citra yang akan ditempel di medan. Return (dict|None, pesan|None)."""
+    if choice == "none":
+        return None, None
+    if choice == "ortho":
+        o = seg.get("orthophoto")
+        if o is None or "rgb" not in o:
+            return None, _t("Orthophoto tidak tersedia pada segmen ini.", "No orthophoto available for this segment.")
+        ext = [float(v) for v in o["extent"]]
+        x0, x1 = float(prep["xs"][0]), float(prep["xs"][-1])
+        y0, y1 = float(prep["ys"][0]), float(prep["ys"][-1])
+        if ext[1] < x0 or ext[0] > x1 or ext[3] < y0 or ext[2] > y1:
+            return None, _t("Orthophoto tidak beririsan dengan area kajian (cek sistem koordinat).",
+                            "The orthophoto does not overlap the study area (check the coordinate system).")
+        return {"rgb": o["rgb"], "extent": ext, "frame": "local"}, None
+    to_utm = globals().get("_grid_lokal_to_utm")
+    fetch = globals().get("_fetch_satellite_basemap_utm")
+    if to_utm is None or fetch is None:
+        return None, _t("Fungsi citra satelit belum tersedia (jalankan tab Erosion Mapping dulu).",
+                        "Satellite imagery helper is not available yet (open the Erosion Mapping tab first).")
+    xs, ys = prep["xs"], prep["ys"]
+    ex = np.concatenate([xs, xs, np.full_like(ys, xs[0]), np.full_like(ys, xs[-1])])
+    ey = np.concatenate([np.full_like(xs, ys[0]), np.full_like(xs, ys[-1]), ys, ys])
+    E, N = to_utm(ex, ey)
+    ext = (float(np.min(E)), float(np.max(E)), float(np.min(N)), float(np.max(N)))
+    sig = tuple(round(v, 1) for v in ext)
+    ck = f"wsim_sat_{sid}"
+    cached = st.session_state.get(ck)
+    sat = None
+    if cached is not None and cached.get("sig") == sig and cached.get("data") is not None:
+        sat = cached["data"]
+    else:
+        try:
+            sat = fetch(ext, out_size=2048, pad_frac=0.12)
+        except Exception:
+            sat = None
+        if sat is not None:
+            st.session_state[ck] = {"sig": sig, "data": sat}
+    msg = None
+    if sat is None:
+        sat = seg.get("satellite_basemap")
+        if sat is not None:
+            msg = _t("Citra online gagal diambil -- memakai citra satelit tersimpan dari Erosion Mapping.",
+                     "Online imagery failed -- using the satellite basemap stored by Erosion Mapping.")
+        else:
+            msg = _t("Citra satelit gagal diambil (cek internet). Simulasi tetap ditampilkan tanpa citra.",
+                     "Satellite imagery could not be fetched (check internet). The simulation is shown without imagery.")
+    if sat is None:
+        return None, msg
+    return {"rgb": sat["rgb"], "extent": [float(v) for v in sat["extent"]], "frame": "utm"}, msg
+
+
+def _wsim_top_ponds(sim, prep, to_utm, n=6):
+    pk = np.where(prep["inside"], sim["peak"], 0.0)
+    mf = _wsim_maxfilter(pk, size=7)
+    cand = np.argwhere((pk >= mf - 1e-9) & (pk > 0.05))
+    rows, taken = [], []
+    for ix, iy in sorted(cand.tolist(), key=lambda c: -pk[c[0], c[1]]):
+        if any(abs(ix - a) < 5 and abs(iy - b) < 5 for a, b in taken):
+            continue
+        taken.append((ix, iy))
+        x, y = float(prep["X"][ix, iy]), float(prep["Y"][ix, iy])
+        row = {"No": len(rows) + 1, "X (lokal)": round(x, 2), "Y (lokal)": round(y, 2)}
+        if to_utm is not None:
+            try:
+                e, nn = to_utm(np.array([x]), np.array([y]))
+                row["Easting (UTM)"] = round(float(np.asarray(e)[0]), 2)
+                row["Northing (UTM)"] = round(float(np.asarray(nn)[0]), 2)
+            except Exception:
+                pass
+        row["Elevasi (m)"] = round(float(prep["z"][ix, iy]), 2)
+        row["Kedalaman maks (m)"] = round(float(pk[ix, iy]), 3)
+        rows.append(row)
+        if len(rows) >= n:
             break
-        overflow_pts.append({
-            "X": float(grid_x[_iy, _ix]), "Y": float(grid_y[_iy, _ix]),
-            "Elevasi (m)": float(z[_iy, _ix]),
-            "Volume terlimpas (m³, kumulatif)": float(score[_iy, _ix]),
-        })
+    return rows
 
-    return h_frames, overflow_track, overflow_pts, z, dx, dy, cell_area
+
+def _wsim_show_result(res):
+    """Tampilkan hasil tersimpan: viewer 3D, ringkasan, hidrograf, titik genangan terdalam, unduhan."""
+    m = res["metrics"]
+    c1, c2, c3 = st.columns(3)
+    _metric_card(_t("Kedalaman maksimum", "Maximum depth"), f"{m['peak_max']:.2f} m", container=c1)
+    _metric_card(_t("Luas genangan > 5 cm", "Area flooded > 5 cm"), f"{m['wet_ha']:.2f} ha", container=c2)
+    _metric_card(_t("Debit keluar puncak", "Peak outflow"), f"{m['q_out_peak']:.2f} m³/s", container=c3)
+    c4, c5, c6 = st.columns(3)
+    _metric_card(_t("Volume air masuk", "Water volume in"), f"{m['v_in']:,.0f} m³", container=c4)
+    _metric_card(_t("Volume keluar area", "Volume leaving the area"), f"{m['v_out']:,.0f} m³", container=c5)
+    _metric_card(_t("Galat neraca massa", "Mass-balance error"), f"{m['bal']:.3f} %",
+                 help_text=_t("(masuk + awal − keluar − tersisa) / (masuk + awal). Harus ≈ 0.",
+                              "(in + initial − out − remaining) / (in + initial). Should be ≈ 0."), container=c6)
+
+    if hasattr(st, "iframe"):
+        # Streamlit baru: st.components.v1.html sudah deprecated -> pakai st.iframe (HTML string)
+        st.iframe(res["html"], width="stretch", height=int(res["height"]))
+    else:
+        _wsim_components.html(res["html"], height=int(res["height"]), scrolling=False)
+    st.caption(_t(
+        "Putar ▶ untuk animasi; seret = putar, klik kanan/Shift+seret = geser, scroll = zoom, klik ganda = reset. "
+        "Citra ditempel langsung di permukaan medan 3D; arahkan kursor ke medan untuk melihat elevasi & kedalaman air. "
+        "Centang 'Kedalaman maksimum' untuk peta genangan puncak. Model ilustratif, belum terkalibrasi.",
+        "Press ▶ to animate; drag = rotate, right-click/Shift+drag = pan, scroll = zoom, double-click = reset. "
+        "Imagery is draped directly on the 3D terrain; hover the terrain for elevation & water depth. "
+        "Tick 'Maximum depth' for the peak inundation map. Illustrative model, not calibrated."))
+
+    fig = go.Figure()
+    tmid = (res["times"][1:] + res["times"][:-1]) / 2.0 / 60.0
+    fig.add_trace(go.Scatter(x=tmid, y=res["q_in"], mode="lines", line=dict(color="#2f9bdb", width=2, shape="hv"),
+                             name=_t("Air masuk ke area (hujan efektif / titik)", "Water entering the area (excess rain / point)")))
+    fig.add_trace(go.Scatter(x=tmid, y=res["q_out"], mode="lines", line=dict(color="#e08a2b", width=2, shape="hv"),
+                             name=_t("Air keluar dari area", "Water leaving the area")))
+    fig.update_layout(height=300, margin=dict(l=10, r=10, t=30, b=10),
+                      title=_t("Hidrograf debit masuk & keluar area kajian", "Inflow & outflow hydrograph of the study area"),
+                      xaxis_title=_t("Waktu (menit)", "Time (min)"), yaxis_title="Q (m³/s)",
+                      legend=dict(orientation="h", y=-0.25))
+    st.plotly_chart(fig, width="stretch")
+
+    if res.get("ponds"):
+        st.markdown("**" + _t("Titik genangan terdalam (maksimum selama simulasi)", "Deepest ponding locations (maximum during simulation)") + "**")
+        st.dataframe(pd.DataFrame(res["ponds"]), width="stretch", hide_index=True)
+    st.download_button(
+        _t("Unduh peta kedalaman maksimum (CSV)", "Download maximum-depth map (CSV)"),
+        data=res["csv"], file_name="peta_kedalaman_maks_simulasi_air.csv", mime="text/csv",
+        key=f"wsim_dl_{res['sid']}")
 
 
 # =========================================================
-# =========== TAB 5: SIMULASI ALIRAN 3D (DEBRIS FLOW) =====
+# =========== TAB 8: SIMULASI AIR 3D (HUJAN / TITIK) ======
 # =========================================================
 with tab5:
 
-    _sub_header(_t("Simulasi Aliran 3D — Debris Flow / Longsoran", "3D Flow Simulation — Debris Flow / Landslide"))
-    st.caption(
-        "Simulasi penjalaran massa (debris flow/longsoran/aliran sedimen) menuruni medan 3D dari "
-        "hasil DEM segmen yang sudah dianalisis, lengkap dengan animasi seiring waktu."
-    )
-    _ui_warning(
-        "Ini model **cellular-automaton yang disederhanakan** (penyebaran berbasis kemiringan "
-        "& sudut friksi) untuk visualisasi ilustratif/edukatif — BUKAN solver fisika penuh "
-        "(beda dengan RAMMS/FLO-2D/DAN3D/r.avaflow). Jangan dipakai sebagai satu-satunya dasar "
-        "desain mitigasi tanpa dikonfirmasi model rekayasa yang tervalidasi."
-    )
+    _sub_header(_t("Simulasi Air 3D — Hujan / Titik Point", "3D Water Simulation — Rainfall / Point Source"))
+    st.caption(_t(
+        "Satu simulasi air di atas medan 3D hasil DEM segmen, dengan citra satelit/orthophoto ditempel langsung di "
+        "permukaan medan. Pilih skenario HUJAN (merata) atau TITIK (debit masuk di titik hulu) -- titik, curah hujan "
+        "dan koefisien limpasan diambil otomatis dari tab Erosion Mapping, tidak perlu input koordinat lagi.",
+        "A single water simulation over the segment's 3D DEM, with satellite/orthophoto imagery draped directly on the "
+        "terrain. Choose RAINFALL (uniform) or POINT (inflow at the upstream point) -- the point, rainfall and runoff "
+        "coefficient come automatically from the Erosion Mapping tab, no coordinate entry needed."))
+    _ui_warning(_t(
+        "Model shallow-water 2D sederhana (local-inertia, setara inti LISFLOOD-FP) untuk visualisasi & kajian awal -- "
+        "BUKAN pengganti HEC-RAS 2D / FLO-2D / TUFLOW dan belum dikalibrasi dengan kejadian aktual. Jangan dipakai "
+        "sendirian untuk desain mitigasi tanpa konfirmasi model hidraulik tervalidasi.",
+        "Simplified 2D shallow-water model (local-inertia, the LISFLOOD-FP core) for visualisation & screening -- NOT a "
+        "substitute for HEC-RAS 2D / FLO-2D / TUFLOW and not calibrated against real events. Do not use alone for "
+        "mitigation design without a validated hydraulic model."))
 
     _seg_results_sim = st.session_state.get("segment_results", {})
 
     if not _seg_results_sim:
-        _ui_info(
-            "Belum ada hasil RUN ANALYSIS tersimpan. Jalankan analisis di tab 'Erosion Mapping' "
-            "dulu untuk minimal satu segmen, baru kembali ke sini."
-        )
+        _ui_info(_t(
+            "Belum ada hasil RUN ANALYSIS tersimpan. Jalankan analisis di tab 'Erosion Mapping' dulu untuk minimal "
+            "satu segmen, baru kembali ke sini.",
+            "No saved RUN ANALYSIS results yet. Run the analysis in the 'Erosion Mapping' tab for at least one "
+            "segment first, then come back here."))
     else:
+        _em = _wsim_erosion_source(_seg_results_sim)
+        _sids = list(_seg_results_sim.keys())
+        if st.session_state.get("wsim_segment_choice") not in _sids:
+            st.session_state["wsim_segment_choice"] = _em["main_sid"] if _em["main_sid"] in _sids else _sids[0]
         _sim_sid = st.selectbox(
-            "Segmen (sumber DEM)",
-            list(_seg_results_sim.keys()),
-            format_func=lambda s: _seg_results_sim[s].get("label", s),
-            key="sim3d_segment_choice",
-        )
-        _sim_res = _seg_results_sim[_sim_sid]
-
-        _gx_full = _sim_res.get("grid_x")
-        _gy_full = _sim_res.get("grid_y")
-        _gz_full = _sim_res.get("grid_z")
-        _bnd_sim = _sim_res.get("boundary")
-        _inside_full = _sim_res.get("inside")
-
-        if _gx_full is None or _gz_full is None or _bnd_sim is None:
-            st.error(
-                "Hasil segmen ini tidak lengkap (grid elevasi/boundary tidak tersimpan) — jalankan "
-                "ulang RUN ANALYSIS untuk segmen ini."
-            )
+            _t("Segmen (sumber DEM)", "Segment (DEM source)"), _sids,
+            format_func=lambda s: _seg_results_sim[s].get("label", s), key="wsim_segment_choice")
+        _seg = _seg_results_sim[_sim_sid]
+        _seg_ok = (_seg.get("grid_x") is not None and _seg.get("grid_z") is not None
+                   and _seg.get("boundary") is not None)
+        if not _seg_ok:
+            st.error(_t("Hasil segmen ini tidak lengkap (grid elevasi/boundary tidak tersimpan) -- jalankan ulang RUN ANALYSIS.",
+                        "This segment's result is incomplete (elevation grid/boundary not stored) -- run RUN ANALYSIS again."))
         else:
-            _sub_header(_t("1. Setup Sumber Longsoran/Debris", "1. Landslide/Debris Source Setup"))
+            _dfl = _wsim_defaults(_seg)
+            _is_pt_em = (_em["source_type"] == _WSIM_SRC_POINT)
 
-            _res_native = _gx_full.shape[0]
-            _sim_res_n = st.slider(
-                "Resolusi grid simulasi (lebih tinggi = lebih detail, lebih lambat)",
-                min_value=25, max_value=min(140, _res_native), value=min(70, _res_native),
-                step=5, key=f"sim3d_res_{_sim_sid}",
-                help="Grid DEM asli di-downsample ke resolusi ini supaya animasi 3D tetap responsif.",
-            )
+            # ---- 1. skenario -------------------------------------------------------------
+            _sub_header(_t("1. Skenario simulasi", "1. Simulation scenario"))
+            _mode_key = f"wsim_mode_{_sim_sid}"
+            _last_key = f"wsim_lastsrc_{_sim_sid}"
+            if st.session_state.get(_last_key) != _em["source_type"]:
+                # ikuti pilihan sumber aliran di Erosion Mapping setiap kali pilihan itu berubah
+                st.session_state[_mode_key] = "point" if _is_pt_em else "rain"
+                st.session_state[_last_key] = _em["source_type"]
+            _mode = st.radio(
+                _t("Sumber air", "Water source"), ["rain", "point"], horizontal=True, key=_mode_key,
+                format_func=lambda k: (_t("🌧️ Hujan (merata di seluruh area)", "🌧️ Rainfall (uniform over the area)")
+                                       if k == "rain" else
+                                       _t("📍 Titik Point (dari Erosion Mapping)", "📍 Point source (from Erosion Mapping)")))
 
-            _step_n = max(1, _res_native // _sim_res_n)
-            _grid_x = _gx_full[::_step_n, ::_step_n]
-            _grid_y = _gy_full[::_step_n, ::_step_n]
-            _grid_z = _gz_full[::_step_n, ::_step_n]
-            _inside_sim = (
-                _inside_full[::_step_n, ::_step_n] if _inside_full is not None
-                else np.ones_like(_grid_z, dtype=bool)
-            )
-            _inside_sim = _inside_sim & ~np.isnan(_grid_z)
+            _pt = _em["point"]
+            _pt_in_seg = False
+            if _pt is not None:
+                try:
+                    _pt_in_seg = bool(_seg["boundary"].contains(Point(_pt[0], _pt[1])))
+                except Exception:
+                    _pt_in_seg = False
 
-            _bnds_sim = _bnd_sim.bounds
-
-            # --- siapkan koordinat UTM (utk overlay citra satelit, spt tab 1) ---
-            # Sumbu lokal DXF miring ~57° thd UTM sebenarnya, jadi citra satelit (yg
-            # north-up) hanya bisa dioverlay dgn benar kalau plot-nya juga dlm UTM,
-            # bukan koordinat lokal -- makanya semua trace di bawah pakai _utm_gx/_utm_gy.
-            _utm_gx, _utm_gy = _grid_lokal_to_utm(_grid_x, _grid_y)
-            _sbx_sim, _sby_sim = _boundary_xy_flat(_bnd_sim)
-            _utm_bx_sim, _utm_by_sim = _ring_lokal_to_utm(_sbx_sim, _sby_sim)
-
-            _sat_cache_key_sim = f"sim3d_sat_{_sim_sid}"
-            _sat_sig_sim = (round(float(_bnds_sim[0]), 1), round(float(_bnds_sim[1]), 1),
-                            round(float(_bnds_sim[2]), 1), round(float(_bnds_sim[3]), 1))
-            _cached_sat_sim = st.session_state.get(_sat_cache_key_sim)
-            if _cached_sat_sim is not None and _cached_sat_sim.get("sig") == _sat_sig_sim:
-                _sat_sim = _cached_sat_sim.get("data")
-            else:
-                _utm_ext_sim = (float(np.nanmin(_utm_gx)), float(np.nanmax(_utm_gx)),
-                                 float(np.nanmin(_utm_gy)), float(np.nanmax(_utm_gy)))
-                _sat_sim = _fetch_satellite_basemap_utm(_utm_ext_sim, out_size=512, pad_frac=0.15)
-                st.session_state[_sat_cache_key_sim] = {"sig": _sat_sig_sim, "data": _sat_sim}
-
-            def _sample_rgb_grid(_sat_data, _n=70):
-                """Bangun grid UTM kasar (n x n) sekitar boundary + sample warna RGB dari
-                citra satelit di tiap titiknya -- dipakai sbg 'lantai' konteks visual di
-                luar boundary pada scene 3D (Mesh3d w/ vertexcolor)."""
-                if _sat_data is None:
-                    return None
-                _xmin, _xmax, _ymin, _ymax = _sat_data["extent"]
-                _xs = np.linspace(_xmin, _xmax, _n)
-                _ys = np.linspace(_ymin, _ymax, _n)
-                _GXu, _GYu = np.meshgrid(_xs, _ys)
-                _rgb = _sat_data["rgb"]
-                _h, _w = _rgb.shape[0], _rgb.shape[1]
-                _col = np.clip(((_GXu - _xmin) / max(_xmax - _xmin, 1e-9) * (_w - 1)).astype(int), 0, _w - 1)
-                _row = np.clip(((_ymax - _GYu) / max(_ymax - _ymin, 1e-9) * (_h - 1)).astype(int), 0, _h - 1)
-                _colors = _rgb[_row, _col]
-                return _GXu, _GYu, _colors
-
-            def _make_satellite_plane_trace(_sat_data, _z_level, _n=70):
-                _sampled = _sample_rgb_grid(_sat_data, _n)
-                if _sampled is None:
-                    return None
-                _GXu, _GYu, _colors = _sampled
-                _Xf, _Yf = _GXu.ravel(), _GYu.ravel()
-                _Zf = np.full_like(_Xf, _z_level)
-                _vcolor = [f"rgb({r},{g},{b})" for r, g, b in _colors.reshape(-1, 3)]
-                _idx = np.arange(_n * _n).reshape(_n, _n)
-                _i, _j, _k = [], [], []
-                for _r in range(_n - 1):
-                    for _c in range(_n - 1):
-                        _a, _b2, _d, _e = _idx[_r, _c], _idx[_r, _c + 1], _idx[_r + 1, _c], _idx[_r + 1, _c + 1]
-                        _i += [_a, _b2]
-                        _j += [_b2, _e]
-                        _k += [_d, _d]
-                return go.Mesh3d(
-                    x=_Xf, y=_Yf, z=_Zf, i=_i, j=_j, k=_k, vertexcolor=_vcolor,
-                    lighting=dict(ambient=1.0, diffuse=0.0, specular=0.0),
-                    flatshading=False, name="Citra satelit", showlegend=False, hoverinfo="skip",
-                )
-
-            _erosion_mapping_pt = None
-            _main_sid_for_pt = (st.session_state.get("segments") or [None])[0]
-            if _main_sid_for_pt is not None and st.session_state.get(f"source_type_{_main_sid_for_pt}") == "Satu Titik (Point Source)":
-                _pt_x_em = st.session_state.get(f"point_x_{_main_sid_for_pt}")
-                _pt_y_em = st.session_state.get(f"point_y_{_main_sid_for_pt}")
-                if _pt_x_em is not None and _pt_y_em is not None:
-                    _erosion_mapping_pt = (float(_pt_x_em), float(_pt_y_em))
-
-            _src_method_sim = st.radio(
-                _t("Cara menentukan titik sumber", "Method to set source point"),
-                (
-                    [_t("Input Koordinat Manual", "Manual Coordinate Input"),
-                     _t("Ambil dari Titik Hulu (Erosion Mapping)", "Use Upstream Point (from Erosion Mapping)")]
-                    if _erosion_mapping_pt is not None
-                    else [_t("Input Koordinat Manual", "Manual Coordinate Input")]
-                ),
-                key=f"sim3d_src_method_{_sim_sid}",
-                horizontal=True,
-                help=_t(
-                    "'Ambil dari Titik Hulu' memakai koordinat yang sama dengan opsi 'Satu Titik (Point "
-                    "Source)' di Section B tab Erosion Mapping — supaya tidak perlu input dua kali titik "
-                    "yang sama. Hanya muncul kalau opsi tsb sedang aktif di sana.",
-                    "'Use Upstream Point' reuses the same coordinate as the 'Point Source' option in "
-                    "Section B of the Erosion Mapping tab — so you don't need to enter the same point "
-                    "twice. Only shown when that option is active there."
-                ),
-            )
-
-            if _src_method_sim.startswith(_t("Ambil dari Titik Hulu", "Use Upstream Point")):
-                _src_x, _src_y = _erosion_mapping_pt
-                st.caption(
-                    _t(
-                        f"Memakai titik hulu dari Erosion Mapping: X={_src_x:.3f}, Y={_src_y:.3f}. "
-                        "Ganti ke 'Input Koordinat Manual' kalau ingin titik sumber yang berbeda khusus "
-                        "untuk simulasi ini.",
-                        f"Using upstream point from Erosion Mapping: X={_src_x:.3f}, Y={_src_y:.3f}. "
-                        "Switch to 'Manual Coordinate Input' if this simulation needs a different source point."
-                    )
-                )
-            else:
-                _ui_info(
-                    "Titik sumber ditandai lewat input koordinat manual di bawah (opsi klik-di-peta "
-                    "sudah dihapus karena tidak reliable di semua environment browser/Streamlit)."
-                )
-                _mcs1, _mcs2 = st.columns(2)
-                with _mcs1:
-                    _src_x = st.number_input(
-                        "Koordinat X sumber", value=float((_bnds_sim[0] + _bnds_sim[2]) / 2),
-                        format="%.3f", key=f"sim3d_srcx_{_sim_sid}",
-                    )
-                with _mcs2:
-                    _src_y = st.number_input(
-                        "Koordinat Y sumber", value=float((_bnds_sim[1] + _bnds_sim[3]) / 2),
-                        format="%.3f", key=f"sim3d_srcy_{_sim_sid}",
-                    )
-            st.session_state[f"sim3d_click_xy_{_sim_sid}"] = (float(_src_x), float(_src_y))
-
-            _click_sim = st.session_state.get(f"sim3d_click_xy_{_sim_sid}")
-            if _click_sim is not None:
-                st.success(_t(f"Titik sumber saat ini: X={_click_sim[0]:.2f}, Y={_click_sim[1]:.2f}", f"Current source point: X={_click_sim[0]:.2f}, Y={_click_sim[1]:.2f}"))
-            else:
-                _ui_warning("Belum ada titik sumber ditandai.")
-
-            _sub_header(_t("2. Parameter Simulasi", "2. Simulation Parameters"))
-            _pc1, _pc2, _pc3 = st.columns(3)
-            with _pc1:
-                _src_radius = st.number_input(
-                    "Radius sumber material (m)", min_value=5.0, value=30.0, step=5.0,
-                    key=f"sim3d_radius_{_sim_sid}",
-                )
-                _vol_sim = st.number_input(
-                    "Volume material awal (m³)", min_value=10.0, value=2000.0, step=100.0,
-                    key=f"sim3d_vol_{_sim_sid}",
-                )
-            with _pc2:
-                _friction_deg = st.slider(
-                    "Sudut friksi/berhenti (°) — makin kecil, makin jauh larinya", 3, 30, 12,
-                    key=f"sim3d_friction_{_sim_sid}",
-                )
-                _mobility_sim = st.slider(
-                    "Mobilitas aliran (kecepatan penyebaran)", 0.1, 1.0, 0.6, step=0.05,
-                    key=f"sim3d_mobility_{_sim_sid}",
-                )
-            with _pc3:
-                _n_frames_sim = st.slider(
-                    _t("Jumlah frame animasi", "Number of animation frames"), 10, 50, 24, key=f"sim3d_nframes_{_sim_sid}",
-                )
-                _sec_per_frame = st.number_input(
-                    "Durasi tersimulasi per frame (detik)", min_value=0.5, value=3.0, step=0.5,
-                    key=f"sim3d_secframe_{_sim_sid}",
-                )
-                _vexag = st.slider(
-                    "Eksagerasi vertikal tampilan", 1.0, 4.0, 1.8, step=0.1,
-                    key=f"sim3d_vexag_{_sim_sid}",
-                )
-
-            _run_sim = st.button(_t("Jalankan Simulasi", "Run Simulation"), key=f"sim3d_run_{_sim_sid}", type="primary")
-
-            if _click_sim is None:
-                _ui_info("Tandai dulu lokasi sumber (klik peta / input koordinat) sebelum menjalankan simulasi.")
-            elif _run_sim:
-                _scx, _scy = _click_sim
-                if not _bnd_sim.contains(Point(_scx, _scy)):
-                    st.error(_t("Titik sumber berada di luar boundary area kajian.", "The source point is outside the study area boundary."))
+            if _mode == "point":
+                if _pt is None:
+                    _ui_warning(_t(
+                        "Belum ada titik aliran dari Erosion Mapping. Buka tab 'Erosion Mapping' → Skenario Sumber Aliran → "
+                        "pilih 'Satu Titik (Point Source)' lalu tentukan titiknya (ketik koordinat / klik di peta desain). "
+                        "Atau pilih skenario Hujan di atas.",
+                        "No flow point from Erosion Mapping yet. Open 'Erosion Mapping' → Flow Source Scenario → choose "
+                        "'Satu Titik (Point Source)' and set the point (type coordinates / click on the design map). "
+                        "Or choose the Rainfall scenario above."))
                 else:
-                    with st.spinner("Menjalankan simulasi penyebaran massa..."):
-                        _dx_sim = float(np.nanmean(np.abs(np.diff(_grid_x[:, 0])))) or 1.0
-                        _dy_sim = float(np.nanmean(np.abs(np.diff(_grid_y[0, :])))) or 1.0
+                    if not _pt_in_seg:
+                        _ui_warning(_t(
+                            f"Titik Erosion Mapping (X={_pt[0]:.2f}, Y={_pt[1]:.2f}) berada di luar boundary segmen ini -- "
+                            "pilih segmen Main (Segmen 1) yang memuat titik tersebut.",
+                            f"The Erosion Mapping point (X={_pt[0]:.2f}, Y={_pt[1]:.2f}) is outside this segment's boundary -- "
+                            "pick the Main segment (Segment 1) that contains it."))
+                    st.success(_t(
+                        f"Titik sumber otomatis dari Erosion Mapping ({_em['point_origin']}): X = {_pt[0]:.2f}, Y = {_pt[1]:.2f}",
+                        f"Source point taken automatically from Erosion Mapping ({_em['point_origin']}): X = {_pt[0]:.2f}, Y = {_pt[1]:.2f}"))
+                    if not _is_pt_em:
+                        st.caption(_t("Catatan: di Erosion Mapping sumber aliran saat ini 'Hujan'; titik di atas adalah titik "
+                                      "terakhir yang tersimpan di sana.",
+                                      "Note: Erosion Mapping currently uses 'Rainfall'; the point above is the last one stored there."))
+            else:
+                st.caption(_t(
+                    f"Hujan R = {_dfl['R']:.1f} mm ← {_dfl['R_src']}; koefisien limpasan C = {_dfl['C']:.2f} ← {_dfl['C_src']}. "
+                    "Ubah di bawah bila perlu.",
+                    f"Rainfall R = {_dfl['R']:.1f} mm ← {_dfl['R_src']}; runoff coefficient C = {_dfl['C']:.2f} ← {_dfl['C_src']}. "
+                    "Change below if needed."))
 
-                        _src_mask_sim = (
-                            (_grid_x - _scx) ** 2 + (_grid_y - _scy) ** 2
-                        ) <= _src_radius ** 2
-                        _src_mask_sim = _src_mask_sim & _inside_sim
-                        if not _src_mask_sim.any():
-                            _iix = int(np.abs(_grid_x[:, 0] - _scx).argmin())
-                            _iiy = int(np.abs(_grid_y[0, :] - _scy).argmin())
-                            _src_mask_sim = np.zeros_like(_inside_sim)
-                            _src_mask_sim[_iix, _iiy] = True
+            # ---- 2. parameter ------------------------------------------------------------
+            _sub_header(_t("2. Parameter", "2. Parameters"))
+            if _mode == "rain":
+                _p1, _p2, _p3 = st.columns(3)
+                with _p1:
+                    _R_mm = st.number_input(_t("Curah hujan total R (mm)", "Total rainfall R (mm)"),
+                                            min_value=1.0, max_value=2000.0, value=float(round(_dfl["R"], 1)), step=5.0,
+                                            help=_t("Diambil otomatis dari tab Erosion Mapping (R24 × faktor ekstrem).",
+                                                    "Taken automatically from the Erosion Mapping tab (R24 × extreme factor)."))
+                    _C_run = st.number_input(_t("Koefisien limpasan C", "Runoff coefficient C"),
+                                             min_value=0.05, max_value=1.0, value=float(round(_dfl["C"], 2)), step=0.05,
+                                             help=_t("Bagian hujan yang menjadi limpasan permukaan (sisanya meresap/tertahan).",
+                                                     "Fraction of rain that becomes surface runoff (the rest infiltrates/is stored)."))
+                with _p2:
+                    _Tr_min = st.number_input(_t("Durasi hujan (menit)", "Rain duration (min)"),
+                                              min_value=5.0, max_value=1440.0, value=120.0, step=5.0, key=f"wsim_tr_{_sim_sid}")
+                    _post_min = st.number_input(_t("Waktu setelah hujan berhenti (menit)", "Time after rain stops (min)"),
+                                                min_value=0.0, max_value=1440.0, value=45.0, step=5.0, key=f"wsim_post_{_sim_sid}",
+                                                help=_t("Agar terlihat air surut / mengalir keluar area.", "To see the water recede / drain out of the area."))
+                with _p3:
+                    _i_mmh = _C_run * _R_mm / max(_Tr_min / 60.0, 1e-6)
+                    st.metric(_t("Intensitas hujan efektif", "Effective rain intensity"), f"{_i_mmh:.1f} mm/jam")
+                    st.caption(_t(f"Volume limpasan ≈ {_C_run * _R_mm / 1000.0 * float(_seg['boundary'].area):,.0f} m³ "
+                                  "pada seluruh segmen.",
+                                  f"Runoff volume ≈ {_C_run * _R_mm / 1000.0 * float(_seg['boundary'].area):,.0f} m³ over the whole segment."))
+            else:
+                _p1, _p2, _p3 = st.columns(3)
+                with _p1:
+                    _Q_in = st.number_input(_t("Debit masuk di titik (m³/detik)", "Inflow at the point (m³/s)"),
+                                            min_value=0.05, max_value=5000.0, value=float(_dfl["Q"]), step=0.5,
+                                            help=_t(f"Bawaan: {_dfl['Q_src']}.", f"Default: {_dfl['Q_src']}."))
+                    _d0 = st.number_input(_t("Tebal air awal di titik (m)", "Initial water depth at the point (m)"),
+                                          min_value=0.0, max_value=10.0, value=float(min(max(_em["point_depth"], 0.0), 10.0)), step=0.05,
+                                          help=_t("Diambil dari 'Kedalaman/Ketebalan Air Awal di Titik Hulu' di Erosion Mapping.",
+                                                  "Taken from 'Initial Water Depth/Thickness at Upstream Point' in Erosion Mapping."))
+                with _p2:
+                    _Tin_min = st.number_input(_t("Durasi aliran masuk (menit)", "Inflow duration (min)"),
+                                               min_value=1.0, max_value=1440.0, value=30.0, step=5.0, key=f"wsim_tin_{_sim_sid}")
+                    _post_min = st.number_input(_t("Waktu setelah aliran berhenti (menit)", "Time after inflow stops (min)"),
+                                                min_value=0.0, max_value=1440.0, value=15.0, step=5.0, key=f"wsim_postp_{_sim_sid}")
+                with _p3:
+                    _rad_m = st.number_input(_t("Radius area sumber (m)", "Source area radius (m)"),
+                                             min_value=1.0, max_value=200.0, value=8.0, step=1.0, key=f"wsim_rad_{_sim_sid}")
+                    st.caption(_t(f"Volume masuk ≈ {_Q_in * _Tin_min * 60.0:,.0f} m³.", f"Inflow volume ≈ {_Q_in * _Tin_min * 60.0:,.0f} m³."))
 
-                        _z_fill = np.where(np.isnan(_grid_z), np.nanmin(_grid_z), _grid_z)
-                        # PERBAIKAN: elevasi mentah (_z_fill) sering punya cekungan kecil PALSU (artefak
-                        # interpolasi griddata di area data jarang) yg dulu bikin massa "berhenti"/menggenang
-                        # di situ alih-alih terus mengalir turun -- sekarang arah aliran dihitung dari versi
-                        # yg SUDAH di-fill (teknik priority-flood yg SAMA dipakai tab Erosion Mapping utk D8),
-                        # supaya alirannya konsisten & benar-benar menuruni lereng seperti di Erosion Mapping.
-                        # Elevasi ASLI (_z_fill) tetap dipakai apa adanya utk tampilan mesh 3D.
-                        _z_route = _dem_fill_depressions(_z_fill, _inside_sim)
+            with st.expander(_t("Pengaturan lanjutan (resolusi, citra, tampilan)", "Advanced settings (resolution, imagery, display)")):
+                _a1, _a2, _a3 = st.columns(3)
+                with _a1:
+                    _res_sim = st.slider(_t("Resolusi grid simulasi (sel sisi terpanjang)", "Simulation grid resolution (cells, long side)"),
+                                         40, 160, 90, 10, key=f"wsim_res_{_sim_sid}",
+                                         help=_t("Makin tinggi = lebih detail tapi lebih lambat.", "Higher = more detail but slower."))
+                    _nfr = st.slider(_t("Jumlah frame animasi", "Number of animation frames"), 24, 80, 48, 4, key=f"wsim_nfr_{_sim_sid}")
+                with _a2:
+                    _man_n = st.number_input(_t("Koefisien Manning (n)", "Manning coefficient (n)"),
+                                             min_value=0.010, max_value=0.300, value=0.035, step=0.005, format="%.3f",
+                                             key=f"wsim_n_{_sim_sid}",
+                                             help=_t("≈0.03–0.04 tanah/sungai alami, ≈0.02 beton, ≈0.05–0.08 vegetasi lebat.",
+                                                     "≈0.03–0.04 natural soil/river, ≈0.02 concrete, ≈0.05–0.08 dense vegetation."))
+                    _fill = st.checkbox(_t("Isi cekungan palsu DEM (konsisten dgn Erosion Mapping)", "Fill spurious DEM pits (consistent with Erosion Mapping)"),
+                                        value=True, key=f"wsim_fill_{_sim_sid}",
+                                        help=_t("Cekungan kecil hasil artefak interpolasi kontur dinaikkan agar air tidak tertahan palsu. "
+                                                "Matikan bila cekungan di DEM memang kolam/sump nyata.",
+                                                "Small pits caused by contour-interpolation artefacts are raised so water is not trapped falsely. "
+                                                "Turn off if pits in the DEM are real ponds/sumps."))
+                with _a3:
+                    _vex_def = st.slider(_t("Eksagerasi vertikal awal", "Initial vertical exaggeration"), 1.0, 6.0,
+                                         float(_dfl["vexag"] if _dfl["vexag"] <= 6 else 2.0), 0.5, key=f"wsim_vex_{_sim_sid}")
+                    _detail = st.select_slider(_t("Detail permukaan 3D", "3D surface detail"),
+                                               options=[140, 200, 260, 320], value=200, key=f"wsim_det_{_sim_sid}")
+                    _view_h = st.slider(_t("Tinggi viewer (px)", "Viewer height (px)"), 480, 960, 700, 20, key=f"wsim_vh_{_sim_sid}")
+                _img_opts = ["sat"] + (["ortho"] if _seg.get("orthophoto") is not None else []) + ["none"]
+                _img_fmt = {"sat": _t("Citra satelit online (Esri World Imagery)", "Online satellite imagery (Esri World Imagery)"),
+                            "ortho": _t("Orthophoto yang diupload di Erosion Mapping", "Orthophoto uploaded in Erosion Mapping"),
+                            "none": _t("Tanpa citra (warna elevasi)", "No imagery (elevation colours)")}
+                _img_choice = st.radio(_t("Citra yang ditempel di medan 3D", "Imagery draped on the 3D terrain"), _img_opts,
+                                       index=(1 if "ortho" in _img_opts else 0), horizontal=True,
+                                       format_func=lambda k: _img_fmt[k], key=f"wsim_img_{_sim_sid}_{len(_img_opts)}")
+                if st.button(_t("Ambil ulang citra satelit", "Re-fetch satellite imagery"), key=f"wsim_refetch_{_sim_sid}"):
+                    st.session_state.pop(f"wsim_sat_{_sim_sid}", None)
+                    try:
+                        globals()["_fetch_satellite_basemap_utm"].clear()
+                    except Exception:
+                        pass
+                    st.rerun()
 
-                        _sub_steps_sim = 4
-                        _h = np.zeros_like(_z_fill, dtype=float)
-                        _src_area_sim = _src_mask_sim.sum() * _dx_sim * _dy_sim
-                        _h[_src_mask_sim] = _vol_sim / max(_src_area_sim, 1e-6)
-                        _h[~_inside_sim] = 0.0
+            _can_run = not (_mode == "point" and (_pt is None or not _pt_in_seg))
+            _run = st.button(_t("▶ Jalankan simulasi air 3D", "▶ Run 3D water simulation"), type="primary",
+                             key=f"wsim_run_{_sim_sid}", disabled=not _can_run)
 
-                        _friction_slope_sim = np.tan(np.radians(_friction_deg))
-                        _offsets_sim = [(-1, 0), (1, 0), (0, -1), (0, 1),
-                                        (-1, -1), (-1, 1), (1, -1), (1, 1)]
-
-                        _h_frames = [_h.copy()]
-                        for _f in range(_n_frames_sim):
-                            for _s in range(_sub_steps_sim):
-                                _surf = _z_route + _h
-                                _weights = []
-                                _tot_w = np.zeros_like(_h)
-                                for (_oy, _ox) in _offsets_sim:
-                                    # tetangga di luar grid diberi elevasi +inf (tembok, bukan wrap-around)
-                                    # supaya materi tidak "meloncat" dari tepi seberang, dan juga tidak
-                                    # dipaksa keluar dari grid krn dianggap curam ke arah yg tak ada datanya.
-                                    _nsurf = _grid_shift_no_wrap(_surf, _oy, _ox, np.inf)
-                                    _dist = float(np.hypot(_oy * _dy_sim, _ox * _dx_sim))
-                                    _slope_local = (_surf - _nsurf) / _dist
-                                    _w = np.clip(_slope_local, 0, None)
-                                    _w = np.where(_w > _friction_slope_sim, _w, 0.0)
-                                    _weights.append(_w)
-                                    _tot_w += _w
-                                _safe_tot = np.where(_tot_w > 0, _tot_w, 1.0)
-                                _outflow_frac = np.clip(_mobility_sim * _tot_w, 0, 0.5)
-                                _h_new = _h * (1 - _outflow_frac)
-                                for (_oy, _ox), _w in zip(_offsets_sim, _weights):
-                                    _flow = _h * _outflow_frac * (_w / _safe_tot)
-                                    # PERBAIKAN BUG ARAH: _flow[i,j] = jumlah yg dikirim dari sel (i,j) ke
-                                    # tetangga (i-_oy, j-_ox) -- jadi sel penerima yg benar itu (i+_oy,
-                                    # j+_ox), diambil dgn shift (-_oy,-_ox), BUKAN (_oy,_ox) spt kode lama.
-                                    # Kode lama memakai shift yg sama dgn arah pengiriman -> materi
-                                    # dikreditkan ke sel yg SALAH (bukan tetangga sebenarnya), sehingga
-                                    # sebarannya tidak benar2 mengikuti kemiringan turun spt yg terlihat
-                                    # di tab Erosion Mapping. Sel penerima yg tak punya pengirim sah (di
-                                    # tepi grid) diisi 0, bukan wrap-around dari tepi seberang.
-                                    _received = _grid_shift_no_wrap(_flow, -_oy, -_ox, 0.0)
-                                    _h_new = _h_new + _received
-                                _h_new[~_inside_sim] = 0.0
-                                _h = _h_new
-                            _h_frames.append(_h.copy())
-
-                        st.session_state[f"sim3d_result_{_sim_sid}"] = {
-                            "h_frames": _h_frames,
-                            "grid_x": _grid_x, "grid_y": _grid_y, "z_fill": _z_fill,
-                            "inside": _inside_sim, "sec_per_frame": _sec_per_frame,
-                            "cell_area": _dx_sim * _dy_sim,
-                            "vexag": _vexag,
-                        }
-
-            _sim_out = st.session_state.get(f"sim3d_result_{_sim_sid}")
-
-            if _sim_out is not None:
-                _sub_header(_t("3. Hasil Animasi 3D", "3. 3D Animation Results"))
-
-                _hf = _sim_out["h_frames"]
-                _gx3 = _sim_out["grid_x"]
-                _gy3 = _sim_out["grid_y"]
-                _z3 = _sim_out["z_fill"]
-                _ins3 = _sim_out["inside"]
-                _utm_gx3, _utm_gy3 = _grid_lokal_to_utm(_gx3, _gy3)
-                _spf = _sim_out["sec_per_frame"]
-                _vex = _sim_out["vexag"]
-                _cell_area_sim = _sim_out.get("cell_area", 1.0)
-
-                _zmin, _zmax = float(np.nanmin(_z3)), float(np.nanmax(_z3))
-                _zrange = max(_zmax - _zmin, 1e-6)
-                _depth_max = max(float(np.max([hf.max() for hf in _hf])), 1e-6)
-                _depth_thresh = _depth_max * 0.02
-
-                _terrain_colorscale = [
-                    [0.00, "#8b0000"], [0.15, "#c1440e"], [0.32, "#e08a2b"], [0.48, "#e8c93d"],
-                    [0.65, "#a8c93d"], [0.799, "#1b5e28"],
-                    [0.80, "#aee9ff"], [0.87, "#2f9bdb"], [0.94, "#0b4c91"], [1.00, "#021a49"],
-                ]
-
-                def _make_surfacecolor(_h_layer):
-                    _elev_norm = np.clip((_z3 - _zmin) / _zrange, 0, 1) * 0.799
-                    _flow_norm = np.clip(_h_layer / _depth_max, 0, 1)
-                    _disp = np.where(
-                        _h_layer > _depth_thresh,
-                        0.80 + _flow_norm * 0.20,
-                        _elev_norm,
-                    )
-                    _disp = np.where(_ins3, _disp, np.nan)
-                    return _disp
-
-                _z_display = _z3 * _vex
-                # Sembunyikan mesh permukaan animasi DI LUAR boundary kajian -- z diberi NaN
-                # dan connectgaps=False supaya Plotly benar-benar membuat lubang di situ
-                # (bukan sekadar mewarnainya NaN, yang sebelumnya malah tampil merah solid).
-                _z_display = np.where(_ins3, _z_display, np.nan)
-
-                _sat_z_level_debris = float(np.nanmin(_z_display)) - 0.05 * (
-                    float(np.nanmax(_z_display)) - float(np.nanmin(_z_display)) + 1e-6
-                )
-                _sat_trace_debris = _make_satellite_plane_trace(_sat_sim, _sat_z_level_debris, _n=60)
-                _debris_data = ([_sat_trace_debris] if _sat_trace_debris is not None else []) + [go.Surface(
-                    x=_utm_gx3, y=_utm_gy3, z=_z_display,
-                    surfacecolor=_make_surfacecolor(_hf[0]),
-                    colorscale=_terrain_colorscale, cmin=0, cmax=1,
-                    showscale=False, connectgaps=False,
-                    lighting=dict(ambient=0.55, diffuse=0.7, specular=0.15, roughness=0.9),
-                )]
-                _surf_idx_debris = len(_debris_data) - 1
-
-                _fig3d = go.Figure(
-                    data=_debris_data,
-                    layout=go.Layout(
-                        height=560,
-                        margin=dict(l=0, r=0, t=30, b=0),
-                        scene=dict(
-                            xaxis_title="Easting (m)", yaxis_title="Northing (m)", zaxis_title="Elevasi (m)",
-                            aspectmode="data",
-                            camera=dict(eye=dict(x=1.2, y=-1.6, z=0.9)),
-                        ),
-                        title=f"t = 0 s",
-                        updatemenus=[dict(
-                            type="buttons", showactive=False,
-                            y=1, x=0.05, xanchor="left", yanchor="top",
-                            buttons=[
-                                dict(label="▶ Play", method="animate",
-                                     args=[None, dict(frame=dict(duration=250, redraw=True),
-                                                       fromcurrent=True, transition=dict(duration=0))]),
-                                dict(label="⏸ Pause", method="animate",
-                                     args=[[None], dict(frame=dict(duration=0, redraw=False),
-                                                         mode="immediate")]),
-                            ],
-                        )],
-                        sliders=[dict(
-                            active=0, x=0.1, y=0, len=0.85,
-                            steps=[
-                                dict(label=f"{int(i * _spf)}s", method="animate",
-                                     args=[[str(i)], dict(mode="immediate",
-                                                           frame=dict(duration=0, redraw=True))])
-                                for i in range(len(_hf))
-                            ],
-                        )],
-                    ),
-                    frames=[
-                        go.Frame(
-                            data=[go.Surface(
-                                z=_z_display, surfacecolor=_make_surfacecolor(_hf[i]),
-                                colorscale=_terrain_colorscale, cmin=0, cmax=1, connectgaps=False,
-                            )],
-                            traces=[_surf_idx_debris],
-                            name=str(i),
-                            layout=go.Layout(title=f"t = {int(i * _spf)} s"),
-                        )
-                        for i in range(len(_hf))
-                    ],
-                )
-
-                st.plotly_chart(_fig3d, width="stretch")
-                st.caption(
-                    "Drag untuk rotasi, scroll untuk zoom. Tekan ▶ Play untuk animasi, atau geser "
-                    "slider di bawah plot untuk lompat ke waktu tertentu. Warna merah→kuning→hijau "
-                    "menandai elevasi medan (rendah→tinggi); biru muda→biru tua menandai keberadaan "
-                    "& ketebalan relatif material/air yang bergerak. Area di luar boundary kajian "
-                    "ditampilkan sbg citra satelit sebagai konteks lokasi."
-                )
-
-                _final_depth = _hf[-1]
-                _c_a, _c_b, _c_c = st.columns(3)
-                _metric_card("Kedalaman maks. tersisa", f"{_final_depth.max():.2f} m", container=_c_a)
-                _metric_card("Total volume (cek konservasi)",
-                            f"{float(_final_depth[_ins3].sum() * _cell_area_sim):.0f} m³", container=_c_b)
-                _metric_card("Durasi tersimulasi total", f"{int((len(_hf)-1) * _spf)} s", container=_c_c)
-
-            # =================================================================
-            # MODE BARU: SIMULASI GENANGAN BANJIR (diffusive-wave, bukan CA)
-            # =================================================================
-            st.markdown("---")
-            _sub_header(_t("Simulasi Genangan Banjir (Shallow-Water — mengikuti kontur)", "Flood Inundation Simulation (Shallow-Water — contour-following)"))
-            _ui_info(
-                "Mode terpisah dari simulasi debris-flow di atas. Di sini arah & besar aliran "
-                "dihitung dari **beda elevasi muka air** (bed + kedalaman) memakai persamaan "
-                "Manning — bukan aturan penyebaran sederhana. Air baru menyeberang ke sel "
-                "tetangga begitu muka airnya melebihi titik tertinggi di antara keduanya, "
-                "sehingga **lokasi limpasan/overtopping tanggul atau punggungan muncul otomatis** "
-                "dari hasil hitungan, dan batas genangan mengikuti kontur medan secara halus."
-            )
-
-            _fc1, _fc2, _fc3 = st.columns(3)
-            with _fc1:
-                _flood_src_mode = st.radio(
-                    "Sumber air",
-                    ["Muka air awal (reservoir / dam-break)", "Debit masuk kontinu (inflow sungai)"],
-                    key=f"flood_srcmode_{_sim_sid}",
-                )
-                _flood_radius = st.number_input(
-                    "Radius area sumber (m)", min_value=5.0, value=30.0, step=5.0,
-                    key=f"flood_radius_{_sim_sid}",
-                    help="Pakai titik sumber yang sama dengan yang ditandai di bagian '1. Setup' di atas.",
-                )
-            with _fc2:
-                if _flood_src_mode.startswith("Muka air"):
-                    # PERBAIKAN: dulu default-nya dipatok ke elevasi TERTINGGI DI SELURUH
-                    # DOMAIN -- kalau titik sumber yang diklik tidak persis di puncak
-                    # tertinggi itu (kasus paling umum), kedalaman awal jadi nyaris NOL,
-                    # sehingga air nyaris tidak mengalir sama sekali (persis keluhan
-                    # "airnya dikit banget"). Sekarang dipatok relatif ke elevasi DI TITIK
-                    # SUMBER itu sendiri + kedalaman awal wajar, supaya selalu ada air yang
-                    # benar-benar bisa mengalir berapa pun titik sumbernya.
-                    if _click_sim is not None:
-                        _z_at_src_default = float(griddata(
-                            (_grid_x.ravel(), _grid_y.ravel()), _grid_z.ravel(),
-                            (_click_sim[0], _click_sim[1]), method="linear"
-                        ))
-                        if np.isnan(_z_at_src_default):
-                            _z_at_src_default = float(np.nanmax(_grid_z[_inside_sim])) if _inside_sim.any() else float(np.nanmax(_grid_z))
+            _res_key = f"wsim_result_{_sim_sid}"
+            if _run:
+                try:
+                    _prog = st.progress(0.0, text=_t("Menyiapkan grid & DEM...", "Preparing grid & DEM..."))
+                    _prep = _wsim_prepare_grid(_seg, _res_sim, _fill)
+                    _dxs, _dys = _prep["dx"], _prep["dy"]
+                    if _mode == "rain":
+                        _rate = _C_run * (_R_mm / 1000.0) / (_Tr_min * 60.0)
+                        _T_tot = (_Tr_min + _post_min) * 60.0
+                        _kw = dict(rain_rate_ms=_rate, rain_dur_s=_Tr_min * 60.0)
+                        _title = _t("Simulasi Hujan", "Rainfall simulation")
+                        _sub = _t(f"{_seg.get('label', _sim_sid)} · R = {_R_mm:.0f} mm · C = {_C_run:.2f} · {_Tr_min:.0f} menit",
+                                  f"{_seg.get('label', _sim_sid)} · R = {_R_mm:.0f} mm · C = {_C_run:.2f} · {_Tr_min:.0f} min")
+                        _src_xy = None
+                        _rain_dur = _Tr_min * 60.0
                     else:
-                        _z_at_src_default = float(np.nanmax(_grid_z[_inside_sim])) if _inside_sim.any() else float(np.nanmax(_grid_z))
-                    _flood_level = st.number_input(
-                        "Elevasi muka air awal di sumber (m)",
-                        value=_z_at_src_default + 2.0,
-                        format="%.2f", key=f"flood_level_{_sim_sid}",
-                        help=(
-                            "Mis. elevasi puncak tampungan/dam sebelum meluap atau jebol. "
-                            "Default = elevasi tanah di titik sumber + 2 m (supaya ada kedalaman "
-                            "awal yang cukup untuk benar-benar mengalir) — sesuaikan kalau elevasi "
-                            "tampungan sebenarnya berbeda."
-                        ),
-                    )
-                    _flood_q = None
-                else:
-                    _flood_level = None
-                    _flood_q = st.number_input(
-                        "Debit masuk (m³/detik)", min_value=0.1, value=20.0, step=1.0,
-                        key=f"flood_q_{_sim_sid}",
-                    )
-                _manning_n = st.number_input(
-                    "Koefisien kekasaran Manning (n)", min_value=0.010, max_value=0.200,
-                    value=0.035, step=0.005, format="%.3f", key=f"flood_manning_{_sim_sid}",
-                    help="≈0.030–0.040 sungai alami/tanah, ≈0.020–0.025 saluran beton, "
-                         "≈0.050–0.080 semak/vegetasi lebat.",
-                )
-            with _fc3:
-                _flood_nframes = st.slider(
-                    _t("Jumlah frame animasi", "Number of animation frames"), 10, 60, 30, key=f"flood_nframes_{_sim_sid}",
-                )
-                _flood_secpf = st.number_input(
-                    "Durasi tersimulasi per frame (detik)", min_value=1.0, value=60.0, step=5.0,
-                    key=f"flood_secpf_{_sim_sid}",
-                    help=(
-                        "Air yang mengalir dangkal (model shallow-water) butuh waktu nyata yang "
-                        "cukup untuk merambat jauh — durasi terlalu pendek (mis. 10 detik/frame) "
-                        "membuat air terkesan 'diam'/hampir tidak bergerak walau perhitungannya "
-                        "benar. Default 60 detik/frame x 30 frame = 30 menit tersimulasi, cukup "
-                        "untuk air merambat mengikuti kontur secara terlihat jelas."
-                    ),
-                )
-                _flood_vexag = st.slider(
-                    "Eksagerasi vertikal tampilan", 1.0, 4.0, 1.8, step=0.1,
-                    key=f"flood_vexag_{_sim_sid}",
-                )
+                        _rr = max(_rad_m, 1.5 * max(_dxs, _dys))
+                        _smask = ((_prep["X"] - _pt[0]) ** 2 + (_prep["Y"] - _pt[1]) ** 2) <= _rr ** 2
+                        if not (_smask & _prep["inside"]).any():
+                            _ix = int(np.abs(_prep["xs"] - _pt[0]).argmin())
+                            _iy = int(np.abs(_prep["ys"] - _pt[1]).argmin())
+                            _smask = np.zeros_like(_prep["inside"])
+                            _smask[_ix, _iy] = True
+                        _T_tot = (_Tin_min + _post_min) * 60.0
+                        _kw = dict(src_mask=_smask, src_q=_Q_in, src_dur_s=_Tin_min * 60.0, init_depth=_d0)
+                        _title = _t("Simulasi Titik Point", "Point-source simulation")
+                        _sub = _t(f"{_seg.get('label', _sim_sid)} · Q = {_Q_in:.2f} m³/s · {_Tin_min:.0f} menit · X={_pt[0]:.1f}, Y={_pt[1]:.1f}",
+                                  f"{_seg.get('label', _sim_sid)} · Q = {_Q_in:.2f} m³/s · {_Tin_min:.0f} min · X={_pt[0]:.1f}, Y={_pt[1]:.1f}")
+                        _src_xy = _pt
+                        _rain_dur = 0.0
 
-            _flood_run = st.button(
-                "Jalankan Simulasi Genangan", key=f"flood_run_{_sim_sid}", type="primary",
-            )
+                    def _wsim_cb(f):
+                        _prog.progress(min(max(f, 0.0), 1.0), text=_t(f"Menghitung aliran air... {int(f * 100)}%",
+                                                                      f"Computing water flow... {int(f * 100)}%"))
+                    _sim = _wsim_solve(_prep["z_route"], _prep["inside"], _dxs, _dys, _man_n, _T_tot, _nfr,
+                                       progress_cb=_wsim_cb, **_kw)
+                    _prog.progress(1.0, text=_t("Menyusun scene 3D + citra...", "Building 3D scene + imagery..."))
+                    _imagery, _img_msg = _wsim_get_imagery(_seg, _sim_sid, _img_choice, _prep)
+                    _to_utm = globals().get("_grid_lokal_to_utm")
+                    _html, _info = _wsim_build_scene_html(
+                        seg=_seg, prep=_prep, sim=_sim, mode=_mode, title=_title, subtitle=_sub, imagery=_imagery,
+                        to_utm=_to_utm, labels=_wsim_labels(), vexag=_vex_def, nd_long=int(_detail),
+                        rain_dur_s=_rain_dur, source_xy=_src_xy, three_inline=_wsim_find_local_three())
+                    _inside = _prep["inside"]
+                    _pk = _sim["peak"]
+                    _cell_a = _sim["cell_area"]
+                    _ponds = _wsim_top_ponds(_sim, _prep, _to_utm)
+                    # CSV peta kedalaman maksimum (sel basah saja)
+                    _wet = _inside & (_pk > 0.001)
+                    _csv_df = pd.DataFrame({"X_lokal": _prep["X"][_wet], "Y_lokal": _prep["Y"][_wet],
+                                            "Elevasi_m": _prep["z"][_wet], "Kedalaman_maks_m": _pk[_wet]})
+                    if _to_utm is not None and _wet.any():
+                        _ee, _nn = _to_utm(_prep["X"][_wet], _prep["Y"][_wet])
+                        _csv_df.insert(2, "Easting_UTM", np.asarray(_ee))
+                        _csv_df.insert(3, "Northing_UTM", np.asarray(_nn))
+                    st.session_state[_res_key] = {
+                        "sid": _sim_sid, "html": _html, "height": int(_view_h), "times": _sim["times"],
+                        "q_in": _sim["q_in"], "q_out": _sim["q_out"], "ponds": _ponds,
+                        "csv": _csv_df.to_csv(index=False).encode("utf-8"),
+                        "metrics": {
+                            "peak_max": float(_pk[_inside].max()) if _inside.any() else 0.0,
+                            "wet_ha": float((_pk[_inside] > 0.05).sum() * _cell_a / 10000.0),
+                            "q_out_peak": float(np.max(_sim["q_out"])) if len(_sim["q_out"]) else 0.0,
+                            "v_in": float(_sim["v_in"] + _sim["v_init"]), "v_out": float(_sim["v_out"]),
+                            "bal": float(_sim["balance_err_pct"]),
+                        },
+                        "img_msg": _img_msg, "steps": _sim["steps"], "mode": _mode,
+                    }
+                    _prog.empty()
+                except Exception as _e_wsim:
+                    st.error(_t(f"Simulasi gagal: {_e_wsim}", f"Simulation failed: {_e_wsim}"))
 
-            if _click_sim is None:
-                st.caption(
-                    "Tandai dulu titik sumber (klik peta / input koordinat) di bagian "
-                    "'1. Setup Sumber Longsoran/Debris' di atas — titik yang sama dipakai "
-                    "sebagai lokasi sumber air di sini."
-                )
-            elif _flood_run:
-                _fcx, _fcy = _click_sim
-                if not _bnd_sim.contains(Point(_fcx, _fcy)):
-                    st.error(_t("Titik sumber berada di luar boundary area kajian.", "The source point is outside the study area boundary."))
-                else:
-                    with st.spinner("Menjalankan simulasi shallow-water (diffusive-wave)..."):
-                        (_fh_frames, _flood_overflow_track, _flood_overflow_pts,
-                         _z_flood, _dx_flood, _dy_flood, _cell_area_flood) = _simulate_flood_diffusive(
-                            grid_x=_grid_x, grid_y=_grid_y, grid_z=_grid_z, inside=_inside_sim,
-                            src_xy=(_fcx, _fcy), src_radius=_flood_radius,
-                            src_mode=("level" if _flood_src_mode.startswith("Muka air") else "inflow"),
-                            src_level=_flood_level, src_q=_flood_q, manning_n=_manning_n,
-                            n_frames=_flood_nframes, sec_per_frame=_flood_secpf,
-                        )
-                        st.session_state[f"flood_result_{_sim_sid}"] = {
-                            "h_frames": _fh_frames, "grid_x": _grid_x, "grid_y": _grid_y,
-                            "z_fill": _z_flood, "inside": _inside_sim,
-                            "sec_per_frame": _flood_secpf, "vexag": _flood_vexag,
-                            "cell_area": _cell_area_flood, "overflow_pts": _flood_overflow_pts,
-                            "boundary": _bnd_sim,
-                        }
+            _res_out = st.session_state.get(_res_key)
+            if _res_out is not None:
+                _sub_header(_t("3. Hasil simulasi air 3D", "3. 3D water simulation results"))
+                if _res_out.get("img_msg"):
+                    _ui_warning(_res_out["img_msg"])
+                _wsim_show_result(_res_out)
+            elif _can_run:
+                _ui_info(_t("Atur parameter lalu tekan 'Jalankan simulasi air 3D'.",
+                            "Set the parameters, then press 'Run 3D water simulation'."))
 
-            _flood_out = st.session_state.get(f"flood_result_{_sim_sid}")
-
-            if _flood_out is not None:
-                st.markdown("###### " + _t("Hasil Animasi 3D — Genangan", "3D Animation Results — Inundation"))
-
-                _ffh = _flood_out["h_frames"]
-                _fgx = _flood_out["grid_x"]
-                _fgy = _flood_out["grid_y"]
-                _fz = _flood_out["z_fill"]
-                _fins = _flood_out["inside"]
-                _fspf = _flood_out["sec_per_frame"]
-                _fvex = _flood_out["vexag"]
-                _f_cell_area = _flood_out.get("cell_area", 1.0)
-                _utm_fgx, _utm_fgy = _grid_lokal_to_utm(_fgx, _fgy)
-
-                _fzmin, _fzmax = float(np.nanmin(_fz)), float(np.nanmax(_fz))
-                _fzrange = max(_fzmax - _fzmin, 1e-6)
-                _fdepth_max = max(float(np.max([hf.max() for hf in _ffh])), 1e-6)
-                _fdepth_thresh = _fdepth_max * 0.02
-
-                _water_colorscale = [
-                    [0.00, "#8b0000"], [0.15, "#c1440e"], [0.32, "#e08a2b"], [0.48, "#e8c93d"],
-                    [0.65, "#a8c93d"], [0.799, "#1b5e28"],
-                    [0.80, "#aee9ff"], [0.87, "#2f9bdb"], [0.94, "#0b4c91"], [1.00, "#021a49"],
-                ]
-
-                def _make_flood_surfacecolor(_h_layer):
-                    _elev_norm = np.clip((_fz - _fzmin) / _fzrange, 0, 1) * 0.799
-                    _flow_norm = np.clip(_h_layer / _fdepth_max, 0, 1)
-                    _disp = np.where(
-                        _h_layer > _fdepth_thresh, 0.80 + _flow_norm * 0.20, _elev_norm,
-                    )
-                    return np.where(_fins, _disp, np.nan)
-
-                _fz_display = _fz * _fvex
-                _fz_display = np.where(_fins, _fz_display, np.nan)
-
-                _sat_z_level_flood = float(np.nanmin(_fz_display)) - 0.05 * (
-                    float(np.nanmax(_fz_display)) - float(np.nanmin(_fz_display)) + 1e-6
-                )
-                _sat_trace_flood = _make_satellite_plane_trace(_sat_sim, _sat_z_level_flood, _n=60)
-                _flood_data = ([_sat_trace_flood] if _sat_trace_flood is not None else []) + [go.Surface(
-                    x=_utm_fgx, y=_utm_fgy, z=_fz_display,
-                    surfacecolor=_make_flood_surfacecolor(_ffh[0]),
-                    colorscale=_water_colorscale, cmin=0, cmax=1, showscale=False, connectgaps=False,
-                    lighting=dict(ambient=0.55, diffuse=0.7, specular=0.15, roughness=0.9),
-                )]
-                _surf_idx_flood = len(_flood_data) - 1
-
-                _fig_flood = go.Figure(
-                    data=_flood_data,
-                    layout=go.Layout(
-                        height=560, margin=dict(l=0, r=0, t=30, b=0),
-                        scene=dict(
-                            xaxis_title="Easting (m)", yaxis_title="Northing (m)", zaxis_title="Elevasi (m)",
-                            aspectmode="data", camera=dict(eye=dict(x=1.2, y=-1.6, z=0.9)),
-                        ),
-                        title="t = 0 s",
-                        updatemenus=[dict(
-                            type="buttons", showactive=False, y=1, x=0.05, xanchor="left", yanchor="top",
-                            buttons=[
-                                dict(label="▶ Play", method="animate",
-                                     args=[None, dict(frame=dict(duration=250, redraw=True),
-                                                       fromcurrent=True, transition=dict(duration=0))]),
-                                dict(label="⏸ Pause", method="animate",
-                                     args=[[None], dict(frame=dict(duration=0, redraw=False), mode="immediate")]),
-                            ],
-                        )],
-                        sliders=[dict(
-                            active=0, x=0.1, y=0, len=0.85,
-                            steps=[
-                                dict(label=f"{int(i * _fspf)}s", method="animate",
-                                     args=[[str(i)], dict(mode="immediate", frame=dict(duration=0, redraw=True))])
-                                for i in range(len(_ffh))
-                            ],
-                        )],
-                    ),
-                    frames=[
-                        go.Frame(
-                            data=[go.Surface(
-                                z=_fz_display, surfacecolor=_make_flood_surfacecolor(_ffh[i]),
-                                colorscale=_water_colorscale, cmin=0, cmax=1, connectgaps=False,
-                            )],
-                            traces=[_surf_idx_flood],
-                            name=str(i), layout=go.Layout(title=f"t = {int(i * _fspf)} s"),
-                        )
-                        for i in range(len(_ffh))
-                    ],
-                )
-                st.plotly_chart(_fig_flood, width="stretch")
-                st.caption(
-                    "Biru muda→biru tua = kedalaman genangan relatif; warna dasar merah→kuning→hijau "
-                    "= elevasi medan asli (rendah→tinggi). Karena fluks dihitung dari gradien muka air "
-                    "(bukan CA), genangan menjalar mengikuti kontur secara halus. Area di luar boundary "
-                    "kajian ditampilkan sbg citra satelit sebagai konteks lokasi."
-                )
-
-                st.markdown("###### " + _t("Peta Genangan Halus (mengikuti kontur) & Titik Limpasan", "Smooth Inundation Map (contour-following) & Overflow Points"))
-                _final_h_flood = _ffh[-1]
-                _fig_contour = go.Figure()
-
-                # Latar citra satelit (koordinat LOKAL) -- dibuat sbg layer Scattergl padat
-                # berwarna hasil sampling piksel citra satelit (via transform lokal->UTM per
-                # titik), supaya area DI LUAR boundary/genangan tetap menampilkan citra asli
-                # sbg konteks, bukan kosong putih. go.Contour butuh grid axis-aligned jadi
-                # tidak bisa langsung dipindah ke sumbu UTM (sumbu lokal miring ~57° thd UTM).
-                if _sat_sim is not None:
-                    _padx = (_fgx.max() - _fgx.min()) * 0.15
-                    _pady = (_fgy.max() - _fgy.min()) * 0.15
-                    _sxl = np.linspace(_fgx.min() - _padx, _fgx.max() + _padx, 110)
-                    _syl = np.linspace(_fgy.min() - _pady, _fgy.max() + _pady, 110)
-                    _SXl, _SYl = np.meshgrid(_sxl, _syl)
-                    _SXu, _SYu = _grid_lokal_to_utm(_SXl, _SYl)
-                    _sat_xmin, _sat_xmax, _sat_ymin, _sat_ymax = _sat_sim["extent"]
-                    _sat_rgb = _sat_sim["rgb"]
-                    _sat_h, _sat_w = _sat_rgb.shape[0], _sat_rgb.shape[1]
-                    _col_i = np.clip(((_SXu - _sat_xmin) / max(_sat_xmax - _sat_xmin, 1e-9) * (_sat_w - 1)).astype(int), 0, _sat_w - 1)
-                    _row_i = np.clip(((_sat_ymax - _SYu) / max(_sat_ymax - _sat_ymin, 1e-9) * (_sat_h - 1)).astype(int), 0, _sat_h - 1)
-                    _sat_colors_2d = _sat_rgb[_row_i, _col_i]
-                    _fig_contour.add_trace(go.Scattergl(
-                        x=_SXl.ravel(), y=_SYl.ravel(), mode="markers",
-                        marker=dict(
-                            size=9, opacity=1.0,
-                            color=[f"rgb({r},{g},{b})" for r, g, b in _sat_colors_2d.reshape(-1, 3)],
-                        ),
-                        name="Citra satelit", showlegend=False, hoverinfo="skip",
-                    ))
-
-                _fig_contour.add_trace(go.Contour(
-                    x=_fgx[:, 0], y=_fgy[0, :], z=np.where(_fins, _final_h_flood, np.nan).T,
-                    colorscale="Blues", showscale=True, colorbar=dict(title="Kedalaman (m)"),
-                    line_smoothing=1.3, contours=dict(coloring="heatmap"),
-                    opacity=0.85, connectgaps=False,
-                    hovertemplate="X=%{x:.2f}, Y=%{y:.2f}<br>Kedalaman=%{z:.2f}m<extra></extra>",
-                ))
-                _fbx, _fby = _boundary_xy_flat(_bnd_sim)
-                _fig_contour.add_trace(go.Scatter(
-                    x=_fbx, y=_fby, mode="lines", line=dict(color="magenta", width=2),
-                    name="Boundary", hoverinfo="skip",
-                ))
-                _flood_pts_list = _flood_out.get("overflow_pts", [])
-                if _flood_pts_list:
-                    _fig_contour.add_trace(go.Scatter(
-                        x=[p["X"] for p in _flood_pts_list], y=[p["Y"] for p in _flood_pts_list],
-                        mode="markers+text",
-                        marker=dict(size=14, color="red", symbol="star",
-                                    line=dict(color="black", width=1)),
-                        text=[str(i + 1) for i in range(len(_flood_pts_list))],
-                        textposition="top center", name="Titik limpasan",
-                        hovertemplate="Titik limpasan #%{text}<br>X=%{x:.2f}, Y=%{y:.2f}<extra></extra>",
-                    ))
-                _fig_contour.update_layout(
-                    height=480, xaxis_title="Easting (m)", yaxis_title="Northing (m)",
-                    yaxis=dict(scaleanchor="x", scaleratio=1),
-                    margin=dict(l=10, r=10, t=10, b=10),
-                )
-                st.plotly_chart(_fig_contour, width="stretch")
-
-                if _flood_pts_list:
-                    st.markdown("**" + _t("Titik-titik limpasan terdeteksi", "Detected overflow points") + "** (" + _t("diurutkan dari volume terlimpas terbesar", "sorted by largest overflow volume") + "):")
-                    st.dataframe(pd.DataFrame(_flood_pts_list), width="stretch", hide_index=True)
-                    st.caption(
-                        "Titik-titik ini adalah sel yang berbatasan langsung dengan area sumber (dam/"
-                        "reservoir) dan tercatat menerima aliran keluar terbesar selama simulasi — "
-                        "kandidat lokasi limpasan/overtopping paling mungkin secara fisik."
-                    )
-                else:
-                    st.caption(
-                        "Belum terdeteksi limpasan keluar dari area sumber pada durasi & parameter "
-                        "simulasi ini — coba naikkan elevasi muka air awal / debit masuk, atau "
-                        "perpanjang durasi simulasi."
-                    )
-
-                _final_depth_flood = _ffh[-1]
-                _fca, _fcb, _fcc = st.columns(3)
-                _metric_card("Kedalaman maks. genangan", f"{_final_depth_flood.max():.2f} m", container=_fca)
-                _metric_card("Total volume genangan",
-                            f"{float(_final_depth_flood[_fins].sum() * _f_cell_area):.0f} m³", container=_fcb)
-                _metric_card("Durasi tersimulasi total", f"{int((len(_ffh) - 1) * _fspf)} s", container=_fcc)
 
 import os
 import pandas as pd
