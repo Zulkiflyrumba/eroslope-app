@@ -19349,7 +19349,94 @@ def _wsim_fill_nan_nearest(a):
     return a[tuple(ind)], ~bad
 
 
-def _wsim_prepare_grid(seg, n_long=90, fill_pits=True):
+def _wsim_enforce_min_slope(zf, inside, dx, dy, min_slope):
+    """Samakan perilaku aliran dgn tab Erosion Mapping (D8 steepest-descent di DEM yg sudah di-fill):
+    di sana air SELALU lanjut turun lewat area datar/cekungan terisi, sedangkan solver hidrodinamik
+    akan menggenang di dataran yg gradiennya ~0 (hanya epsilon 1e-4 m dari priority-flood).
+    Di sini tiap sel dipaksa minimal `min_slope` lebih tinggi dari penerima D8-nya (ke arah outlet):
+        z_eff[sel] = max(z_fill[sel], z_eff[penerima] + min_slope*jarak)
+    Hanya area yg lebih landai dari min_slope yg terangkat; lereng curam tidak berubah."""
+    nx, ny = zf.shape
+    ok = inside & np.isfinite(zf)
+    big = np.inf
+    best_s = np.zeros((nx, ny))
+    recv = np.full((nx, ny), -1, dtype=np.int64)
+    rec_d = np.zeros((nx, ny))
+    idx = np.arange(nx * ny).reshape(nx, ny)
+    zpad = np.pad(np.where(ok, zf, big), 1, mode="constant", constant_values=big)
+    for (oi, oj) in ((-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)):
+        zn = zpad[1 + oi:1 + oi + nx, 1 + oj:1 + oj + ny]
+        d = float(np.hypot(oi * dx, oj * dy))
+        s = (zf - zn) / d
+        better = ok & np.isfinite(zn) & (s > best_s + 1e-12)
+        best_s = np.where(better, s, best_s)
+        recv = np.where(better, idx + oi * ny + oj, recv)
+        rec_d = np.where(better, d, rec_d)
+    order = np.argsort(np.where(ok, zf, big), axis=None, kind="stable")
+    zf_flat = zf.ravel()
+    z_eff = zf_flat.copy()
+    recv_f = recv.ravel()
+    rec_d_f = rec_d.ravel()
+    ok_f = ok.ravel()
+    for k in order:
+        if not ok_f[k]:
+            break
+        r = recv_f[k]
+        if r >= 0:
+            need = z_eff[r] + min_slope * rec_d_f[k]
+            if need > z_eff[k]:
+                z_eff[k] = need
+    return z_eff.reshape(nx, ny)
+
+
+def _wsim_burn_paths(zr, inside, xs, ys, dx, dy, paths, slope):
+    """'Burn' jalur aliran hasil Erosion Mapping (D8) ke DEM routing: di sepanjang jalur elevasi dipaksa
+    turun minimal `slope`*jarak dari sel sebelumnya, jadi air dari titik sumber PASTI mengikuti jalur yang
+    sama dgn tab 1 (menembus bench/cekungan/punggungan kecil), lalu menyebar sesuai kedalamannya."""
+    zr = np.array(zr, dtype=float, copy=True)
+    nx, ny = zr.shape
+    step = float(min(dx, dy))
+    for (px, py) in (paths or []):
+        px = np.asarray(px, dtype=float)
+        py = np.asarray(py, dtype=float)
+        ok = np.isfinite(px) & np.isfinite(py)
+        px, py = px[ok], py[ok]
+        if px.size < 2:
+            continue
+        seglen = np.hypot(np.diff(px), np.diff(py))
+        cum = np.r_[0.0, np.cumsum(seglen)]
+        total = float(cum[-1])
+        if total <= 0:
+            continue
+        n = int(total / (0.5 * step)) + 2
+        s = np.linspace(0.0, total, n)
+        qx = np.interp(s, cum, px)
+        qy = np.interp(s, cum, py)
+        ii = np.clip(np.rint((qx - xs[0]) / dx).astype(int), 0, nx - 1)
+        jj = np.clip(np.rint((qy - ys[0]) / dy).astype(int), 0, ny - 1)
+        cells = []
+        for a_, b_ in zip(ii.tolist(), jj.tolist()):
+            if cells and cells[-1] == (a_, b_):
+                continue
+            if cells and a_ != cells[-1][0] and b_ != cells[-1][1]:
+                pa, pb = cells[-1]
+                c1, c2 = (a_, pb), (pa, b_)
+                cells.append(c1 if zr[c1] <= zr[c2] else c2)   # jaga keterhubungan 4-arah
+            cells.append((a_, b_))
+        prev = None
+        for (a_, b_) in cells:
+            if not inside[a_, b_]:
+                continue
+            if prev is None:
+                prev = zr[a_, b_]
+                continue
+            tgt = min(zr[a_, b_], prev - slope * step)
+            zr[a_, b_] = tgt
+            prev = tgt
+    return zr
+
+
+def _wsim_prepare_grid(seg, n_long=90, fill_pits=True, min_slope=0.01, paths=None):
     """Resample DEM segmen ke grid simulasi (sel ~persegi) + mask boundary + DEM routing.
     Sumbu 0 = X (Easting lokal), sumbu 1 = Y -- sama dgn konvensi grid Erosion Mapping."""
     gx, gy, gz = seg["grid_x"], seg["grid_y"], seg["grid_z"]
@@ -19359,14 +19446,19 @@ def _wsim_prepare_grid(seg, n_long=90, fill_pits=True):
     y0, y1 = float(np.nanmin(ys_n)), float(np.nanmax(ys_n))
     ex, ey = max(x1 - x0, 1e-6), max(y1 - y0, 1e-6)
     n_long = int(max(20, n_long))
-    if ex >= ey:
-        nxs = n_long
-        cell = ex / (nxs - 1)
-        nys = max(10, int(round(ey / cell)) + 1)
-    else:
-        nys = n_long
-        cell = ey / (nys - 1)
-        nxs = max(10, int(round(ex / cell)) + 1)
+    # Resolusi mengikuti LUAS area kajian (bukan bounding box): area memanjang/sempit (mis. lereng
+    # tambang diagonal) tetap mendapat ~0.6*n_long^2 sel DI DALAM boundary, sehingga alur sempit
+    # tidak jadi 'tangga' kasar. Sisi terpanjang dibatasi 320 sel agar tetap bisa dihitung.
+    try:
+        area_in = float(seg["boundary"].area)
+    except Exception:
+        area_in = 0.0
+    if not (area_in > 0):
+        area_in = 0.5 * ex * ey
+    cell = float(np.sqrt(area_in / (0.6 * n_long ** 2))) if n_long > 0 else ex / 90.0
+    cell = max(cell, max(ex, ey) / 319.0, 1e-3)
+    nxs = max(10, int(round(ex / cell)) + 1)
+    nys = max(10, int(round(ey / cell)) + 1)
     xs = np.linspace(x0, x1, nxs)
     ys = np.linspace(y0, y1, nys)
     dx = ex / (nxs - 1)
@@ -19393,8 +19485,12 @@ def _wsim_prepare_grid(seg, n_long=90, fill_pits=True):
         try:
             z_route = np.asarray(_dem_fill_depressions(z.copy(), inside), dtype=float)
             z_route = np.where(np.isfinite(z_route), z_route, z)
+            if min_slope and min_slope > 0:
+                z_route = _wsim_enforce_min_slope(z_route, inside, dx, dy, float(min_slope))
         except Exception:
             z_route = z.copy()
+    if paths:
+        z_route = _wsim_burn_paths(z_route, inside, xs, ys, dx, dy, paths, max(float(min_slope or 0.0), 0.003))
     return {"xs": xs, "ys": ys, "X": X, "Y": Y, "z": z, "z_route": z_route, "inside": inside,
             "dx": float(dx), "dy": float(dy), "native": (xs_n, ys_n, z_native)}
 
@@ -19805,6 +19901,14 @@ var outline = new T.Group(); world.add(outline);
   outline.add(new T.Line(g, new T.LineBasicMaterial({color:0xff5fd2})));
 });
 
+var pathsG = new T.Group(); world.add(pathsG);
+(P.paths || []).forEach(function(ring){
+  var arr = new Float32Array(ring.length);
+  for (var q=0;q<ring.length;q+=3){ arr[q]=ring[q]; arr[q+1]=ring[q+1]-zmin+0.35; arr[q+2]=-ring[q+2]; }
+  var g = new T.BufferGeometry(); g.setAttribute('position', new T.BufferAttribute(arr,3));
+  pathsG.add(new T.Line(g, new T.LineBasicMaterial({color:0xffe14d})));
+});
+
 // ---------------------------------------------------------------- water
 var lift = Math.max(0.02, span*0.00025);
 var wpos = new Float32Array(pos);
@@ -20002,6 +20106,7 @@ var cCtx = addCheck('cCtx', L.l_ctx, hasTex, function(c){ if (ctx) ctx.visible =
 addCheck('cWater', L.l_water, true, function(c){ showWater = c; water.visible = c; });
 addCheck('cPeak', L.l_peak, false, function(c){ peakMode = c; waterMat.uniforms.uPeak.value = c ? 1 : 0; lastKey=''; drawLegend(); $('tl').disabled = c; });
 addCheck('cOut', L.l_out, true, function(c){ outline.visible = c; });
+if ((P.paths||[]).length) addCheck('cPaths', L.l_paths, true, function(c){ pathsG.visible = c; });
 if (meta.mode === 'rain') addCheck('cRain', L.l_rain, true, function(c){ rainOn = c; });
 var rainOn = true;
 var hr = document.createElement('hr'); lay.appendChild(hr);
@@ -20214,7 +20319,7 @@ def _wsim_signed_distance_cells(inside, X, Y, boundary, cell):
 
 def _wsim_build_scene_html(*, seg, prep, sim, mode, title, subtitle, imagery, to_utm, labels,
                            vexag=2.0, nd_long=200, rain_dur_s=0.0, source_xy=None,
-                           play_seconds=24.0, three_inline=None):
+                           play_seconds=24.0, three_inline=None, paths=None):
     """Susun HTML viewer WebGL: medan 3D (DEM) + citra yg ditempel + air animasi."""
     xs_n, ys_n, z_native = prep["native"]
     x0, x1 = float(prep["xs"][0]), float(prep["xs"][-1])
@@ -20275,6 +20380,25 @@ def _wsim_build_scene_html(*, seg, prep, sim, mode, title, subtitle, imagery, to
         trip = np.column_stack([np.asarray(er) - E0, zr, np.asarray(nr) - N0]).ravel()
         outline.append([round(float(v), 2) for v in trip])
 
+    # ---- jalur aliran dari Erosion Mapping (pembanding sinkronisasi) ----
+    path_out = []
+    for (pxs, pys) in (paths or []):
+        pxs = np.asarray(pxs, dtype=float)
+        pys = np.asarray(pys, dtype=float)
+        if pxs.size < 2:
+            continue
+        stp = max(1, int(np.ceil(pxs.size / 600.0)))
+        pxs, pys = pxs[::stp], pys[::stp]
+        fi = _wsim_axis_index(xs_n, pxs)
+        fj = _wsim_axis_index(ys_n, pys)
+        zr = _wsim_map_coordinates(z_native, [fi, fj], order=1, mode="nearest")
+        if frame == "utm":
+            er, nr = to_utm(pxs, pys)
+        else:
+            er, nr = pxs, pys
+        trip = np.column_stack([np.asarray(er) - E0, zr, np.asarray(nr) - N0]).ravel()
+        path_out.append([round(float(v), 2) for v in trip])
+
     # ---- frame kedalaman (mm, uint16) + puncak ----
     frames_mm = [np.clip(np.rint(f.astype(np.float64) * 1000.0), 0, 65535).astype(np.uint16) for f in sim["frames"]]
     peak_mm = np.clip(np.rint(sim["peak"].astype(np.float64) * 1000.0), 0, 65535).astype(np.uint16)
@@ -20320,6 +20444,7 @@ def _wsim_build_scene_html(*, seg, prep, sim, mode, title, subtitle, imagery, to
                 "times": [float(t) for t in sim["times"]], "frames": _wsim_b64(all_mm, "<u2")},
         "imagery": img_payload,
         "outline": outline,
+        "paths": path_out,
         "source": src_payload,
         "meta": {"mode": mode, "title": title, "subtitle": subtitle, "frame": frame,
                  "vexag": float(vexag), "hscale": hscale, "thr_m": float(thr_m),
@@ -20358,6 +20483,7 @@ def _wsim_labels():
         "l_water": _t("Air", "Water"),
         "l_peak": _t("Kedalaman maksimum (puncak)", "Maximum depth (peak)"),
         "l_out": _t("Garis batas area", "Study-area outline"),
+        "l_paths": _t("Jalur aliran Erosion Mapping", "Erosion Mapping flow path"),
         "l_rain": _t("Efek hujan", "Rain effect"),
         "s_vex": _t("Eksagerasi vertikal", "Vertical exaggeration"),
         "s_scale": _t("Skala warna kedalaman", "Depth colour scale"),
@@ -20442,6 +20568,17 @@ def _wsim_erosion_source(seg_results):
         out["point"] = (x, y)
         out["point_origin"] = origin
         break
+    return out
+
+
+def _wsim_em_paths(seg, em):
+    """Jalur aliran hasil Erosion Mapping (tab 1) untuk ditumpuk di 3D sbg pembanding (mode titik)."""
+    out = []
+    try:
+        for fp in (seg.get("flow_paths") or [])[:12]:
+            out.append((list(fp[0]), list(fp[1])))
+    except Exception:
+        pass
     return out
 
 
@@ -20776,6 +20913,18 @@ with tab5:
                                                 "Matikan bila cekungan di DEM memang kolam/sump nyata.",
                                                 "Small pits caused by contour-interpolation artefacts are raised so water is not trapped falsely. "
                                                 "Turn off if pits in the DEM are real ponds/sumps."))
+                    _minslope = st.slider(_t("Kemiringan minimum di area datar/cekungan (%)", "Minimum slope on flats/pits (%)"),
+                                          0.0, 5.0, 1.0, 0.25, key=f"wsim_ms_{_sim_sid}",
+                                          help=_t("Menyamakan aliran dgn Erosion Mapping (D8): air tetap mengalir turun lewat dataran/bench/cekungan "
+                                                  "terisi, tidak menggenang. 0 = DEM apa adanya (air akan tertahan di cekungan).",
+                                                  "Matches the Erosion Mapping (D8) behaviour: water keeps flowing downhill across flats/benches/filled pits "
+                                                  "instead of ponding. 0 = DEM as is (water will be trapped in pits)."))
+                    _follow = st.checkbox(_t("Ikuti jalur aliran Erosion Mapping (mode titik)", "Follow the Erosion Mapping flow path (point mode)"),
+                                          value=True, key=f"wsim_follow_{_sim_sid}",
+                                          help=_t("Jalur aliran D8 dari tab 1 'dibakar' ke DEM simulasi sehingga air dari titik sumber mengalir "
+                                                  "melalui jalur yang sama persis (menembus bench/cekungan kecil), lalu menyebar sesuai kedalamannya.",
+                                                  "The D8 flow path from tab 1 is burned into the simulation DEM so water from the source follows exactly "
+                                                  "the same path (cutting through benches/small pits), then spreads according to its depth."))
                 with _a3:
                     _vex_def = st.slider(_t("Eksagerasi vertikal awal", "Initial vertical exaggeration"), 1.0, 6.0,
                                          float(_dfl["vexag"] if _dfl["vexag"] <= 6 else 2.0), 0.5, key=f"wsim_vex_{_sim_sid}")
@@ -20805,7 +20954,8 @@ with tab5:
             if _run:
                 try:
                     _prog = st.progress(0.0, text=_t("Menyiapkan grid & DEM...", "Preparing grid & DEM..."))
-                    _prep = _wsim_prepare_grid(_seg, _res_sim, _fill)
+                    _prep = _wsim_prepare_grid(_seg, _res_sim, _fill, _minslope / 100.0,
+                                               paths=(_wsim_em_paths(_seg, _em) if (_mode == 'point' and _follow) else None))
                     _dxs, _dys = _prep["dx"], _prep["dy"]
                     if _mode == "rain":
                         _rate = _C_run * (_R_mm / 1000.0) / (_Tr_min * 60.0)
@@ -20843,7 +20993,8 @@ with tab5:
                     _html, _info = _wsim_build_scene_html(
                         seg=_seg, prep=_prep, sim=_sim, mode=_mode, title=_title, subtitle=_sub, imagery=_imagery,
                         to_utm=_to_utm, labels=_wsim_labels(), vexag=_vex_def, nd_long=int(_detail),
-                        rain_dur_s=_rain_dur, source_xy=_src_xy, three_inline=_wsim_find_local_three())
+                        rain_dur_s=_rain_dur, source_xy=_src_xy, three_inline=_wsim_find_local_three(),
+                        paths=_wsim_em_paths(_seg, _em))
                     _inside = _prep["inside"]
                     _pk = _sim["peak"]
                     _cell_a = _sim["cell_area"]
