@@ -353,7 +353,7 @@ _PROJECT_EXCLUDE_KEYS = {
 
 # Mode "ringan" pada download: lewati citra hasil olahan yang otomatis dibuat ulang dari
 # file input (orthophoto) / internet (basemap satelit) saat project dibuka lagi.
-_PROJECT_LIGHT_EXCLUDE_PREFIXES = ("orthophoto_parsed_", "sat_basemap_", "sim3d_sat_", "wsim_sat_", "wsim_result_")
+_PROJECT_LIGHT_EXCLUDE_PREFIXES = ("orthophoto_parsed_", "sat_basemap_", "sim3d_sat_")
 # Mode "INPUT SAJA": project hanya berisi apa yang diisi user SEBELUM menekan RUN ANALYSIS
 # (nilai parameter/properties, file DXF, titik aliran, garis section yang digambar, dsb).
 # Semua hasil running (grid, peta risiko, hasil tiap segmen/section, cache, simulasi, dst) TIDAK
@@ -369,7 +369,7 @@ _PROJECT_RESULT_KEYS = {
 }
 _PROJECT_RESULT_PREFIXES = (
     "_flow_cache_", "_dem_cache_", "_d8_cache_", "orthophoto_parsed_", "sat_basemap_",
-    "sim3d_sat_", "ai_reco_cache_", "dxf_regrade_bytes_", "flood_result_", "sim3d_result_", "wsim_sat_", "wsim_result_",
+    "sim3d_sat_", "ai_reco_cache_", "dxf_regrade_bytes_", "flood_result_", "sim3d_result_",
     "ba_erosi_boundary_",
 )
 _PROJECT_LAST_SIZES = {}  # key -> ukuran (byte) pada pemanggilan _collect_project_state terakhir
@@ -1456,10 +1456,7 @@ def _field_lokal_to_utm(x_local, y_local):
 
 
 def _field_savefig_datauri(fig, transparent=True):
-    """PERBAIKAN bug 'Gagal membuat paket: name '_plt' is not defined' -- fungsi ini
-    dipanggil dari _field_composite_layers, tapi sebagai fungsi Python TERPISAH ia
-    TIDAK ikut mewarisi `import matplotlib.pyplot as _plt` yang cuma lokal di dalam
-    _field_composite_layers. Import sendiri di sini supaya _plt selalu ada."""
+    """(dipertahankan utk kompatibilitas) Simpan figure matplotlib ke data-URI PNG."""
     import matplotlib.pyplot as _plt
     buf = _io_mod.BytesIO()
     fig.savefig(buf, format="png", transparent=transparent)
@@ -1467,128 +1464,339 @@ def _field_savefig_datauri(fig, transparent=True):
     return "data:image/png;base64," + _b64_mod.b64encode(buf.getvalue()).decode("ascii")
 
 
-def _field_composite_layers(grid_x, grid_y, zone_map, sediment_map, boundary, satellite_basemap, inside):
-    """Susun peta risiko utk Mini Avenza sbg BEBERAPA LAYER PNG TRANSPARAN TERPISAH (bukan 1 gambar
-    gepeng spt sebelumnya) + titik kritis/sedimentasi sbg data VEKTOR (bukan digambar ke raster) --
-    supaya tiap kategori di legenda viewer bisa ditampilkan/disembunyikan sendiri2 (mis. sembunyikan
-    kelas 'Merah (Kritis)' saja saat banyak simbol/warna saling menumpuk di satu area), tanpa perlu
-    render ulang gambar apa pun -- viewer offline tinggal tampilkan/sembunyikan layer & filter titik.
-    'base' (citra satelit/latar) dan 'boundary' (garis batas DXF) SELALU tampil, tidak ada di legenda
-    (bukan "simbol" yg perlu ditoggle, tapi konteks orientasi peta)."""
-    import matplotlib.pyplot as _plt
-    from matplotlib.colors import ListedColormap
+# =====================================================================================================
+# EROMAPS v2 -- pembangun paket data lapangan
+#   * semua geometri diekspor dalam LAT/LON (WGS84) -> viewer memakai peta web (tile) online/offline
+#   * zona erosi/sedimentasi di-raster pada grid UTM halus (tepi mulus) + dikirim juga sbg grid kelas
+#     ringkas (RLE) utk pengecekan "posisi saya ada di zona apa" (geofence) TANPA internet
+#   * kontur zona kritis dikirim sbg garis vektor (tajam di zoom berapa pun)
+# =====================================================================================================
+_FIELD_TX_CACHE = {}
+
+# kelas zona (HARUS sama dgn definisi legenda lama): erosi 0..3 dari zone_map, sedimentasi 0..2
+_FIELD_ZONE_CLASSES = [("zone_0", "Hijau (Normal)", "#3DBF8C"), ("zone_1", "Kuning (Waspada)", "#D3D95C"),
+                       ("zone_2", "Oranye (Siaga)", "#e08a2b"), ("zone_3", "Merah (Kritis)", "#d8483f")]
+_FIELD_SED_CLASSES = [("sed_1", "Potensi sedimentasi (>0.7)", "#6fb1ff"), ("sed_2", "Sedimentasi tinggi (>0.85)", "#1f5fe0")]
+
+
+def _field_epsg_zone(epsg):
+    try:
+        code = int(str(epsg).split(":")[1])
+    except Exception:
+        return 50, True
+    if code >= 32700:
+        return code - 32700, True
+    if code >= 32600:
+        return code - 32600, False
+    return 50, True
+
+
+def _field_utm_to_latlon(E, N, epsg=None):
+    """UTM (meter) -> (lat, lon) WGS84. Pakai pyproj kalau ada (tepat); cadangan: rumus Krueger/seri
+    (galat < 1 mm di dalam zona)."""
+    if epsg is None:
+        epsg = globals().get("_COORD_UTM_EPSG") or _FIELD_COORD_UTM_EPSG
+    E = np.asarray(E, dtype=float)
+    N = np.asarray(N, dtype=float)
+    try:
+        from pyproj import Transformer as _Tr
+        tr = _FIELD_TX_CACHE.get(epsg)
+        if tr is None:
+            tr = _Tr.from_crs(epsg, "EPSG:4326", always_xy=True)
+            _FIELD_TX_CACHE[epsg] = tr
+        lon, lat = tr.transform(E, N)
+        return np.asarray(lat, dtype=float), np.asarray(lon, dtype=float)
+    except Exception:
+        pass
+    zone, south = _field_epsg_zone(epsg)
+    a = 6378137.0
+    e2 = 0.00669437999014
+    ep2 = e2 / (1 - e2)
+    k0 = 0.9996
+    e1 = (1 - np.sqrt(1 - e2)) / (1 + np.sqrt(1 - e2))
+    x = E - 500000.0
+    y = N - (10000000.0 if south else 0.0)
+    M = y / k0
+    mu = M / (a * (1 - e2 / 4 - 3 * e2 ** 2 / 64 - 5 * e2 ** 3 / 256))
+    phi1 = (mu + (3 * e1 / 2 - 27 * e1 ** 3 / 32) * np.sin(2 * mu) + (21 * e1 ** 2 / 16 - 55 * e1 ** 4 / 32) * np.sin(4 * mu)
+            + (151 * e1 ** 3 / 96) * np.sin(6 * mu) + (1097 * e1 ** 4 / 512) * np.sin(8 * mu))
+    N1 = a / np.sqrt(1 - e2 * np.sin(phi1) ** 2)
+    T1 = np.tan(phi1) ** 2
+    C1 = ep2 * np.cos(phi1) ** 2
+    R1 = a * (1 - e2) / (1 - e2 * np.sin(phi1) ** 2) ** 1.5
+    D = x / (N1 * k0)
+    lat = phi1 - (N1 * np.tan(phi1) / R1) * (D ** 2 / 2 - (5 + 3 * T1 + 10 * C1 - 4 * C1 ** 2 - 9 * ep2) * D ** 4 / 24
+                                           + (61 + 90 * T1 + 298 * C1 + 45 * T1 ** 2 - 252 * ep2 - 3 * C1 ** 2) * D ** 6 / 720)
+    lon0 = np.radians((zone - 1) * 6 - 180 + 3)
+    lon = lon0 + (D - (1 + 2 * T1 + C1) * D ** 3 / 6 + (5 - 2 * C1 + 28 * T1 - 3 * C1 ** 2 + 8 * ep2 + 24 * T1 ** 2) * D ** 5 / 120) / np.cos(phi1)
+    return np.degrees(lat), np.degrees(lon)
+
+
+def _field_utm_to_lokal(E, N):
+    """Kebalikan _field_lokal_to_utm (affine murni)."""
+    A, B = _FIELD_COORD_ALPHA, _FIELD_COORD_BETA
+    det = A * A + B * B
+    dE = np.asarray(E, dtype=float) - _FIELD_COORD_DE
+    dN = np.asarray(N, dtype=float) - _FIELD_COORD_DN
+    return (A * dE + B * dN) / det, (-B * dE + A * dN) / det
+
+
+def _field_contains_xy(geom, X, Y):
+    X = np.asarray(X, dtype=float)
+    Y = np.asarray(Y, dtype=float)
+    try:
+        import shapely as _shp
+        return np.asarray(_shp.contains_xy(geom, X.ravel(), Y.ravel())).reshape(X.shape)
+    except Exception:
+        from shapely import vectorized as _shpv
+        return np.asarray(_shpv.contains(geom, X, Y)).reshape(X.shape)
+
+
+def _field_axis_index(coords, query):
+    coords = np.asarray(coords, dtype=float)
+    idx = np.arange(coords.size, dtype=float)
+    if coords.size < 2:
+        return np.zeros_like(np.asarray(query, dtype=float))
+    if coords[0] <= coords[-1]:
+        return np.interp(query, coords, idx)
+    return np.interp(query, coords[::-1], idx[::-1])
+
+
+def _field_png_uri(rgba):
+    im = PILImage.fromarray(np.ascontiguousarray(rgba, dtype=np.uint8), "RGBA")
+    buf = _io_mod.BytesIO()
+    im.save(buf, format="PNG", optimize=True)
+    return "data:image/png;base64," + _b64_mod.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _field_jpeg_uri(rgb, max_side=1600, quality=82):
+    im = PILImage.fromarray(np.asarray(rgb, dtype=np.uint8)).convert("RGB")
+    w, h = im.size
+    if max(w, h) > max_side:
+        sc = max_side / float(max(w, h))
+        im = im.resize((max(2, int(round(w * sc))), max(2, int(round(h * sc)))), PILImage.LANCZOS)
+    buf = _io_mod.BytesIO()
+    im.save(buf, format="JPEG", quality=quality, optimize=True)
+    return "data:image/jpeg;base64," + _b64_mod.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _field_hex_rgb(h):
+    h = h.lstrip("#")
+    return [int(h[i:i + 2], 16) for i in (0, 2, 4)]
+
+
+def _field_rle(arr):
+    flat = np.asarray(arr, dtype=np.uint8).ravel()
+    if flat.size == 0:
+        return []
+    chg = np.flatnonzero(np.diff(flat))
+    starts = np.r_[0, chg + 1]
+    ends = np.r_[chg + 1, flat.size]
+    out = np.empty(2 * starts.size, dtype=np.int64)
+    out[0::2] = flat[starts]
+    out[1::2] = ends - starts
+    return out.tolist()
+
+
+def _field_ll(lat, lon):
+    return [round(float(lat), 6), round(float(lon), 6)]
+
+
+def _field_corners(xmin, xmax, ymin, ymax, epsg):
+    la, lo = _field_utm_to_latlon(np.array([xmin, xmax, xmin, xmax]), np.array([ymax, ymax, ymin, ymin]), epsg)
+    return {"tl": _field_ll(la[0], lo[0]), "tr": _field_ll(la[1], lo[1]), "bl": _field_ll(la[2], lo[2])}
+
+
+def _field_class_layers(grid_x, grid_y, zone_map, sediment_map, boundary, satellite_basemap, epsg, max_px=1000):
+    """Raster zona pada grid UTM north-up yg halus + grid kelas utk geofence + garis kontur + titik pusat.
+    Return (layers, outlines, crit_ll, sed_ll, geo, stats, bbox_ll, boundary_ll)."""
     from scipy import ndimage as _ndi
+    gx = np.asarray(grid_x, dtype=float)
+    gy = np.asarray(grid_y, dtype=float)
+    xs_n, ys_n = gx[:, 0], gy[0, :]
 
-    _gx, _gy = np.asarray(grid_x, float), np.asarray(grid_y, float)
-    _utm_x, _utm_y = _field_lokal_to_utm(_gx, _gy)
+    # ---- ring boundary (lokal -> UTM -> lat/lon) ----
+    geoms = []
+    if boundary is not None:
+        geoms = list(boundary.geoms) if hasattr(boundary, "geoms") else [boundary]
+    ring_utm_all = []
+    boundary_ll = []
+    for g in geoms:
+        if getattr(g, "geom_type", "") != "Polygon" or g.is_empty:
+            continue
+        poly_rings = []
+        for k, ring in enumerate([g.exterior] + list(g.interiors)):
+            bx, by = ring.xy
+            E, N = _field_lokal_to_utm(np.asarray(bx), np.asarray(by))
+            la, lo = _field_utm_to_latlon(E, N, epsg)
+            poly_rings.append([_field_ll(a, b) for a, b in zip(la, lo)])
+            if k == 0:
+                ring_utm_all.append((E, N))
+        boundary_ll.append(poly_rings)
 
-    xmin, xmax = float(np.nanmin(_utm_x)), float(np.nanmax(_utm_x))
-    ymin, ymax = float(np.nanmin(_utm_y)), float(np.nanmax(_utm_y))
-    if satellite_basemap is not None and satellite_basemap.get("extent") is not None:
-        sxmin, sxmax, symin, symax = satellite_basemap["extent"]
-        xmin, xmax = min(xmin, sxmin), max(xmax, sxmax)
-        ymin, ymax = min(ymin, symin), max(ymax, symax)
-    aspect_hw = (ymax - ymin) / max(xmax - xmin, 1e-6)
+    # ---- ekstensi UTM raster: bounding box boundary (atau grid) + sedikit margin ----
+    if ring_utm_all:
+        ex = np.concatenate([r[0] for r in ring_utm_all])
+        ey = np.concatenate([r[1] for r in ring_utm_all])
+    else:
+        ex, ey = _field_lokal_to_utm(gx, gy)
+    xmin, xmax = float(np.nanmin(ex)), float(np.nanmax(ex))
+    ymin, ymax = float(np.nanmin(ey)), float(np.nanmax(ey))
+    span = max(xmax - xmin, ymax - ymin, 1.0)
+    cell = max(span / float(max_px), 0.5)
+    pad = 2.0 * cell
+    xmin -= pad
+    ymin -= pad
+    xmax += pad
+    ymax += pad
+    nx = int(np.ceil((xmax - xmin) / cell))
+    ny = int(np.ceil((ymax - ymin) / cell))
+    xmax = xmin + nx * cell
+    ymin = ymax - ny * cell
 
-    def _new_ax():
-        fig = _plt.figure(figsize=(7, max(7 * aspect_hw, 3)), dpi=120)
-        ax = fig.add_axes([0, 0, 1, 1]); ax.axis("off")
-        ax.set_xlim(xmin, xmax); ax.set_ylim(ymin, ymax)
-        return fig, ax
+    Ec = xmin + (np.arange(nx) + 0.5) * cell
+    Nc = ymax - (np.arange(ny) + 0.5) * cell
+    EE, NN = np.meshgrid(Ec, Nc)                 # (ny, nx): baris 0 = utara
+    e_loc, n_loc = _field_utm_to_lokal(EE, NN)
+    fi = _field_axis_index(xs_n, e_loc)
+    fj = _field_axis_index(ys_n, n_loc)
+    inside_poly = _field_contains_xy(boundary, e_loc, n_loc) if boundary is not None else np.ones((ny, nx), dtype=bool)
+
+    def _sample(arr):
+        a = np.asarray(arr, dtype=float)
+        bad = ~np.isfinite(a)
+        if bad.all():
+            return np.full((ny, nx), np.nan)
+        if bad.any():
+            ind = _ndi.distance_transform_edt(bad, return_distances=False, return_indices=True)
+            a = a[tuple(ind)]
+        return _ndi.map_coordinates(a, [fi, fj], order=1, mode="nearest")
 
     layers = {}
-
-    # ---- base: citra satelit (kalau ada) -- SELALU tampil ----
-    fig, ax = _new_ax()
-    if satellite_basemap is not None and satellite_basemap.get("rgb") is not None:
-        ax.imshow(satellite_basemap["rgb"], extent=satellite_basemap.get("extent"),
-                  origin="upper", aspect="auto")
-        _overlay_alpha = 0.55
+    outlines = {}
+    stats = {"area_ha": {}, "cell_m": round(cell, 3)}
+    ero = np.full((ny, nx), 15, dtype=np.uint8)   # 15 = di luar boundary
+    sed = np.zeros((ny, nx), dtype=np.uint8)
+    zs = _sample(zone_map) if zone_map is not None else None
+    ss = _sample(sediment_map) if sediment_map is not None else None
+    if zs is not None:
+        cls = np.digitize(zs, [0.5, 1.0, 2.0]).astype(np.uint8)
+        ero = np.where(inside_poly, cls, 15).astype(np.uint8)
     else:
-        ax.set_facecolor("#0a1f24")
-        _overlay_alpha = 0.9
-    layers["base"] = _field_savefig_datauri(fig, transparent=False)
+        ero = np.where(inside_poly, 0, 15).astype(np.uint8)
+    if ss is not None:
+        sc = np.digitize(np.nan_to_num(ss, nan=0.0), [0.7, 0.85]).astype(np.uint8)
+        sed = np.where(inside_poly, sc, 0).astype(np.uint8)
 
-    # ---- zona risiko TARP: 1 PNG transparan TERPISAH per kelas warna -> tiap kelas bisa ditoggle
-    # sendiri2 dari legenda (mis. sembunyikan "Merah (Kritis)" saja) ----
-    critical_points = []
+    def _soft_alpha(mask, a_max):
+        blur = _ndi.gaussian_filter(mask.astype(float), 0.9)
+        return np.clip((blur - 0.3) / 0.4, 0.0, 1.0) * a_max
+
+    def _contours(mask, key, min_cells=4):
+        try:
+            blur = _ndi.gaussian_filter(np.pad(mask.astype(float), 2), 1.0)
+            rings = []
+            for c in measure.find_contours(blur, 0.5):
+                if len(c) < 5:
+                    continue
+                c = measure.approximate_polygon(c, 0.7)
+                if len(c) < 4:
+                    continue
+                r = c[:, 0] - 2
+                q = c[:, 1] - 2
+                Eg = xmin + (q + 0.5) * cell
+                Ng = ymax - (r + 0.5) * cell
+                la, lo = _field_utm_to_latlon(Eg, Ng, epsg)
+                rings.append([_field_ll(a, b) for a, b in zip(la, lo)])
+            rings.sort(key=len, reverse=True)
+            if rings:
+                outlines[key] = rings[:60]
+        except Exception:
+            pass
+
     if zone_map is not None:
-        _zm = np.asarray(zone_map, dtype=float)
-        _zmax = float(np.nanmax(_zm)) if np.isfinite(np.nanmax(_zm)) else 3.0
-        _classes = [("zone_0", "#3DBF8C", 0.0, 0.5), ("zone_1", "#D3D95C", 0.5, 1.0),
-                    ("zone_2", "#e08a2b", 1.0, 2.0), ("zone_3", "#d8483f", 2.0, max(_zmax + 0.01, 2.5))]
-        for _key, _color, _lo, _hi in _classes:
-            _mask = (_zm >= _lo) & (_zm <= _hi if _key == "zone_3" else _zm < _hi)
-            if not _mask.any():
+        for k, (key, _lbl, color) in enumerate(_FIELD_ZONE_CLASSES):
+            m = (ero == k)
+            if not m.any():
                 continue
-            fig, ax = _new_ax()
-            _zmc = np.where(_mask, 1.0, np.nan)
-            ax.pcolormesh(_utm_x, _utm_y, _zmc, cmap=ListedColormap([_color]), vmin=0, vmax=1,
-                         alpha=_overlay_alpha, shading="auto")
-            layers[_key] = _field_savefig_datauri(fig, transparent=True)
-
-        # titik pusat area erosi kritis (zone_map >= 2, Oranye+Merah) -- disimpan sbg titik VEKTOR
-        # (bukan digambar ke raster) supaya bisa ditoggle & tetap tajam di zoom berapa pun
-        _crit_mask = (_zm >= 2.0)
-        if inside is not None:
-            _crit_mask &= np.asarray(inside, dtype=bool)
-        _lab, _n = _ndi.label(_crit_mask)
-        if _n:
-            for (_cy, _cx) in _ndi.center_of_mass(_crit_mask, _lab, range(1, _n + 1)):
-                _iy = min(max(int(round(_cy)), 0), _utm_x.shape[0] - 1)
-                _ix = min(max(int(round(_cx)), 0), _utm_x.shape[1] - 1)
-                critical_points.append({"x": float(_utm_x[_iy, _ix]), "y": float(_utm_y[_iy, _ix])})
-
-    # ---- sedimentasi: garis ambang batas sbg layer togglable, titik tinggi sbg titik vektor ----
-    sediment_points = []
+            rgba = np.zeros((ny, nx, 4), dtype=np.uint8)
+            rgba[..., :3] = _field_hex_rgb(color)
+            rgba[..., 3] = (_soft_alpha(m, 0.66) * 255).astype(np.uint8)
+            layers[key] = dict(uri=_field_png_uri(rgba))
+            stats["area_ha"][key] = round(float(m.sum()) * cell * cell / 10000.0, 3)
+            if k >= 2:
+                _contours(m, key)
     if sediment_map is not None:
-        _sm = np.asarray(sediment_map, dtype=float)
-        fig, ax = _new_ax()
-        try:
-            ax.contour(_utm_x, _utm_y, _sm, levels=[0.7], colors=["#2b7fff"], linewidths=1.6, linestyles="--")
-        except Exception:
-            pass
-        layers["sediment_line"] = _field_savefig_datauri(fig, transparent=True)
+        for k, (key, _lbl, color) in enumerate(_FIELD_SED_CLASSES, start=1):
+            m = (sed >= k)
+            if not m.any():
+                continue
+            rgba = np.zeros((ny, nx, 4), dtype=np.uint8)
+            rgba[..., :3] = _field_hex_rgb(color)
+            rgba[..., 3] = (_soft_alpha(m, 0.42 if k == 1 else 0.58) * 255).astype(np.uint8)
+            layers[key] = dict(uri=_field_png_uri(rgba))
+            stats["area_ha"][key] = round(float(m.sum()) * cell * cell / 10000.0, 3)
+            _contours(m, key)
 
-        _high = np.nan_to_num(_sm, nan=0.0) >= 0.85
-        _lab2, _n2 = _ndi.label(_high)
-        if _n2:
-            for (_cy, _cx) in _ndi.center_of_mass(_high, _lab2, range(1, _n2 + 1)):
-                _iy = min(max(int(round(_cy)), 0), _utm_x.shape[0] - 1)
-                _ix = min(max(int(round(_cx)), 0), _utm_x.shape[1] - 1)
-                sediment_points.append({"x": float(_utm_x[_iy, _ix]), "y": float(_utm_y[_iy, _ix])})
+    corners = _field_corners(xmin, xmax, ymin, ymax, epsg)
+    for key in list(layers.keys()):
+        layers[key].update(corners)
 
-    # ---- boundary DXF: SELALU tampil (referensi orientasi), tidak ada di legenda ----
-    # PERBAIKAN: selain digambar sbg raster PNG (utk ditampilkan), garis boundary ini SEKARANG
-    # juga diekspor sbg data VEKTOR (boundary_rings, dlm meter UTM) -- supaya viewer lapangan bisa
-    # menghitung jarak sebenarnya dari posisi GPS/titik yang diketuk user ke TEPI desain (bukan cuma
-    # ke rectangle bounds_utm), dan tahu pasti user ada di DALAM atau LUAR area desain.
-    boundary_rings = []
-    if boundary is not None:
-        fig, ax = _new_ax()
-        try:
-            _geoms = list(boundary.geoms) if hasattr(boundary, "geoms") else [boundary]
-            for _g in _geoms:
-                _bx, _by = _g.exterior.xy
-                _bE, _bN = _field_lokal_to_utm(np.asarray(_bx), np.asarray(_by))
-                ax.plot(_bE, _bN, color="#ffffff", linewidth=1.4)
-                boundary_rings.append([{"x": float(_ex), "y": float(_ey)} for _ex, _ey in zip(_bE, _bN)])
-                for _hole in _g.interiors:
-                    _hx, _hy = _hole.xy
-                    _hE, _hN = _field_lokal_to_utm(np.asarray(_hx), np.asarray(_hy))
-                    ax.plot(_hE, _hN, color="#ffffff", linewidth=1.0, linestyle=":")
-        except Exception:
-            pass
-        layers["boundary"] = _field_savefig_datauri(fig, transparent=True)
+    # ---- satelit tersimpan (kalau ada): ekstensinya SENDIRI (bukan sama dgn raster zona) ----
+    if satellite_basemap is not None and satellite_basemap.get("rgb") is not None and satellite_basemap.get("extent") is not None:
+        sx0, sx1, sy0, sy1 = [float(v) for v in satellite_basemap["extent"]]
+        d = dict(uri=_field_jpeg_uri(satellite_basemap["rgb"]))
+        d.update(_field_corners(sx0, sx1, sy0, sy1, epsg))
+        layers["base"] = d
 
-    return layers, critical_points, sediment_points, (xmin, xmax, ymin, ymax), boundary_rings
+    # ---- titik pusat blob kritis / sedimentasi tinggi (disnap ke dalam blob) ----
+    def _blob_points(mask, cap=80, min_cells=3):
+        lab, n = _ndi.label(mask)
+        pts = []
+        if n == 0:
+            return pts
+        sizes = _ndi.sum(mask, lab, range(1, n + 1))
+        order = np.argsort(-np.asarray(sizes))[:cap]
+        coms = _ndi.center_of_mass(mask, lab, range(1, n + 1))
+        for idx in order:
+            if sizes[idx] < min_cells:
+                continue
+            r, q = coms[idx]
+            ri, qi = int(round(r)), int(round(q))
+            if not (0 <= ri < ny and 0 <= qi < nx and lab[ri, qi] == idx + 1):
+                rr, qq = np.nonzero(lab == idx + 1)
+                j = int(np.argmin((rr - r) ** 2 + (qq - q) ** 2))
+                ri, qi = int(rr[j]), int(qq[j])
+            la, lo = _field_utm_to_latlon(Ec[qi], Nc[ri], epsg)
+            pts.append(_field_ll(la, lo))
+        return pts
+
+    crit_ll = _blob_points(ero == 3) if zone_map is not None else []
+    sed_ll = _blob_points(sed >= 2) if sediment_map is not None else []
+
+    # ---- grid kelas ringkas (RLE) utk geofence offline: byte = (sedimentasi<<4) | erosi ----
+    code = ((sed.astype(np.uint16) << 4) | ero.astype(np.uint16)).astype(np.uint8)
+    zone_utm, south = _field_epsg_zone(epsg)
+    geo = {"epsg": epsg, "zone": zone_utm, "south": bool(south), "xmin": xmin, "ymax": ymax,
+           "cell": cell, "nx": nx, "ny": ny, "rle": _field_rle(code)}
+
+    # ---- bbox lat/lon (boundary; cadangan: ekstensi raster) ----
+    if boundary_ll:
+        allp = [p for poly in boundary_ll for p in poly[0]]
+        las = [p[0] for p in allp]
+        los = [p[1] for p in allp]
+        bbox = {"south": min(las), "north": max(las), "west": min(los), "east": max(los)}
+    else:
+        la, lo = _field_utm_to_latlon(np.array([xmin, xmax]), np.array([ymin, ymax]), epsg)
+        bbox = {"south": float(min(la)), "north": float(max(la)), "west": float(min(lo)), "east": float(max(lo))}
+    return layers, outlines, crit_ll, sed_ll, geo, stats, bbox, boundary_ll
 
 
 def _field_package_build(seg_results, active_sid, xs_draw_lines):
-    """Susun paket data (.json) untuk Erosion Field Viewer: 1 entri per segmen berisi peta risiko
-    ter-georeferensi (UTM) + cross section yang sudah disimpan (garis 'xs_draw_lines') di segmen
-    yang sedang aktif di tab ini. Segmen lain ikut disertakan (peta risikonya saja) supaya file
-    tetap satu paket untuk semua segmen proyek."""
+    """Paket data Eromaps v2 (.json): peta risiko ter-georeferensi (lat/lon), kontur zona vektor, grid kelas
+    utk peringatan zona, dan bounding box wilayah utk unduhan peta offline."""
+    epsg = globals().get("_COORD_UTM_EPSG") or _FIELD_COORD_UTM_EPSG
+    zone, south = _field_epsg_zone(epsg)
     segments = []
     for sid, s in seg_results.items():
         gx, gy, gz = s.get("grid_x"), s.get("grid_y"), s.get("grid_z")
@@ -1596,53 +1804,35 @@ def _field_package_build(seg_results, active_sid, xs_draw_lines):
             continue
         zone_map = s.get("zone_map")
         sediment_map = s.get("sediment_map")
-        boundary = s.get("boundary")
-        satellite_basemap = s.get("satellite_basemap")
-        inside = s.get("inside")
-        layers, critical_pts, sediment_pts, (uxmin, uxmax, uymin, uymax), boundary_rings = _field_composite_layers(
-            gx, gy, zone_map, sediment_map, boundary, satellite_basemap, inside)
-        bounds = {"xmin": uxmin, "xmax": uxmax, "ymin": uymin, "ymax": uymax}
-        # NB: fitur cross section sudah DIHAPUS dari Eromaps (field viewer) atas permintaan --
-        # jadi paket data ini sengaja tidak lagi menyertakan "cross_sections" (parameter xs_draw_lines
-        # di atas jadi tidak terpakai lagi, dibiarkan saja di signature supaya pemanggilnya tak perlu diubah).
-        # legend: tiap baris punya "key" yg cocok dgn nama layer PNG (type "layer") atau daftar titik
-        # vektor (type "points") -- inilah yg dipakai viewer utk toggle tampil/sembunyi per kategori.
-        # "base"/"boundary" SENGAJA tidak dimasukkan ke legenda (selalu tampil, bukan simbol yg
-        # perlu ditoggle -- lihat catatan di _field_composite_layers).
+        layers, outlines, crit_ll, sed_ll, geo, stats, bbox, boundary_ll = _field_class_layers(
+            gx, gy, zone_map, sediment_map, s.get("boundary"), s.get("satellite_basemap"), epsg)
         legend = []
         if zone_map is not None:
-            for _key, _lbl, _color in [("zone_0", "Hijau (Normal)", "#3DBF8C"), ("zone_1", "Kuning (Waspada)", "#D3D95C"),
-                                        ("zone_2", "Oranye (Siaga)", "#e08a2b"), ("zone_3", "Merah (Kritis)", "#d8483f")]:
-                if _key in layers:
-                    legend.append({"key": _key, "type": "layer", "label": _lbl, "color": _color})
-            if critical_pts:
+            for key, lbl, color in _FIELD_ZONE_CLASSES:
+                if key in layers:
+                    legend.append({"key": key, "type": "layer", "label": lbl, "color": color})
+            if crit_ll:
                 legend.append({"key": "critical_points", "type": "points", "label": "Titik erosi kritis", "color": "#8a0000"})
         if sediment_map is not None:
-            if sediment_pts:
-                legend.append({"key": "sediment_points", "type": "points", "label": "Titik potensi sedimentasi tinggi", "color": "#2b7fff"})
-            if "sediment_line" in layers:
-                legend.append({"key": "sediment_line", "type": "layer", "label": "Batas potensi sedimentasi (>0.7)", "color": "#2b7fff"})
+            for key, lbl, color in _FIELD_SED_CLASSES:
+                if key in layers:
+                    legend.append({"key": key, "type": "layer", "label": lbl, "color": color})
+            if sed_ll:
+                legend.append({"key": "sediment_points", "type": "points", "label": "Titik sedimentasi tinggi", "color": "#2b7fff"})
         segments.append({
-            "id": sid, "label": s.get("label", sid), "layers": layers, "bounds_utm": bounds,
-            "legend": legend,
-            "critical_points": critical_pts,
-            "sediment_points": sediment_pts,
-            "boundary_points": boundary_rings,
-            "has_satellite": satellite_basemap is not None,
-            "coord_note": "utm_true",
+            "id": sid, "label": s.get("label", sid), "layers": layers, "legend": legend, "outlines": outlines,
+            "boundary_ll": boundary_ll, "critical_ll": crit_ll, "sediment_ll": sed_ll, "geo": geo, "stats": stats,
+            "bbox": bbox, "has_satellite": "base" in layers, "coord_note": "latlon_v2",
         })
-    _epsg = _COORD_UTM_EPSG if "_COORD_UTM_EPSG" in globals() else "EPSG:32750"
-    _code = int(_epsg.split(":")[1])
-    if _code >= 32700:
-        _zone, _south = _code - 32700, True
-    elif _code >= 32600:
-        _zone, _south = _code - 32600, False
+    if segments:
+        region = {"south": min(g["bbox"]["south"] for g in segments), "north": max(g["bbox"]["north"] for g in segments),
+                  "west": min(g["bbox"]["west"] for g in segments), "east": max(g["bbox"]["east"] for g in segments)}
     else:
-        _zone, _south = 50, True
+        region = None
     return {
-        "epsg": _epsg, "utm_zone": _zone, "utm_south": _south,
+        "version": 2, "epsg": epsg, "utm_zone": zone, "utm_south": bool(south),
         "generated_at": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
-        "segments": segments,
+        "region": region, "segments": segments,
     }
 
 
@@ -4681,14 +4871,14 @@ def _hub_module_specs():
              tags=[_t("Laju Drawdown", "Drawdown Rate"), _t("Muka Air (WL)", "Water Level (WL)"), _t("Faktor Keamanan", "Factor of Safety")]),
         dict(common, header_gradient="linear-gradient(135deg, #FEEB97 0%, #4FB783 100%)", badge_text=_t("MODUL 04: SIMULASI 3D", "MODULE 04: 3D SIMULATION"),
              badge_color="amber", fmt_text=_t("Animasi 3D", "3D Animation"), title=_t("Simulasi Aliran 3D", "3D Flow Simulation"),
-             subtitle=_t("Simulasi aliran air (hujan atau titik point) di atas medan 3D hasil DEM segmen, citra satelit ditempel langsung di permukaan, lengkap animasi waktu.",
-                         "Water-flow simulation (rainfall or point source) over the segment's 3D DEM terrain, with imagery draped on the surface and time animation."),
-             intro_text=_t("Pilih skenario Hujan atau Titik Point -- titik, curah hujan dan koefisien limpasan diambil otomatis dari Erosion Mapping. Solver shallow-water 2D (local-inertia) pada DEM, divisualisasikan sebagai scene WebGL 3D. Bersifat ilustratif, belum terkalibrasi.",
-                           "Choose Rainfall or Point source -- the point, rainfall and runoff coefficient come automatically from Erosion Mapping. A 2D shallow-water (local-inertia) solver on the DEM, shown as a 3D WebGL scene. Illustrative, not yet calibrated."),
-             features=[(_t("Input Otomatis", "Automatic Inputs"), _t("Titik, hujan & C dibaca dari Erosion Mapping, tanpa input koordinat.", "Point, rainfall & C are read from Erosion Mapping, no coordinate entry.")),
-                       (_t("Hujan / Titik Point", "Rainfall / Point Source"), _t("Satu simulasi air: hujan merata atau debit masuk di titik hulu.", "One water simulation: uniform rainfall or inflow at the upstream point.")),
-                       (_t("3D + Citra Menempel", "3D + Draped Imagery"), _t("Citra satelit/orthophoto ditempel di permukaan medan 3D.", "Satellite/orthophoto imagery draped on the 3D terrain.")),
-                       (_t("Animasi & Hidrograf", "Animation & Hydrograph"), _t("Playback waktu, kedalaman maksimum, hidrograf & neraca massa.", "Time playback, maximum depth, hydrograph & mass balance."))],
+             subtitle=_t("Simulasi penjalaran debris/longsoran dan genangan banjir menuruni medan 3D hasil DEM segmen, lengkap animasi waktu.",
+                         "Simulates debris/landslide flow and flood inundation across the segment's 3D DEM terrain, with time-based animation."),
+             intro_text=_t("Dari titik sumber di peta interaktif, menjalankan cellular-automaton (debris/longsoran) atau shallow-water diffusive-wave (genangan banjir) di atas medan 3D, divisualisasikan sebagai animasi. Bersifat ilustratif, belum terkalibrasi.",
+                           "From a source point on an interactive map, runs a cellular-automaton (debris/landslide) or shallow-water diffusive-wave (flood) model over 3D terrain, shown as an animation. Illustrative, not yet calibrated."),
+             features=[(_t("Klik Peta Interaktif", "Interactive Map Click"), _t("Tandai titik sumber di peta DEM ber-citra satelit.", "Mark the source point on the satellite-imagery DEM map.")),
+                       (_t("Debris/Longsoran", "Debris/Landslide"), _t("Cellular-automaton penyebaran material berbasis kemiringan.", "Slope-based cellular-automaton material spreading.")),
+                       (_t("Genangan Banjir", "Flood Inundation"), _t("Shallow-water diffusive-wave mengikuti kontur.", "Shallow-water diffusive-wave following the terrain.")),
+                       (_t("Animasi 3D + Citra Satelit", "3D Animation + Satellite"), _t("Playback waktu di atas medan 3D dengan konteks citra satelit.", "Time playback over 3D terrain with satellite context."))],
              tags=["Manning's n", _t("Radius Sumber", "Source Radius"), _t("Eksagerasi Vertikal", "Vertical Exaggeration")]),
         dict(common, header_gradient="linear-gradient(135deg, #4FB783 0%, #409D9B 100%)", badge_text=_t("MODUL 05: DESAIN CHANNEL", "MODULE 05: CHANNEL DESIGN"),
              badge_color="green", fmt_text="DXF 3D", title=_t("Rekonstruksi Desain", "Design Reconstruction"),
@@ -4758,8 +4948,8 @@ def _render_module_workflow():
             "2. Upload training data, choose the target (FS) and features, set cleaning (optional IQR outliers).\n3. Review correlation & scatter, run Check Best Model, then Train Model.\n4. Read the evaluation (R², MAE, RMSE / accuracy) — valid only within the training range.\n"
             "5. Upload new scenario/monitoring data → predicted FS + FAIL/CRITICAL/STABLE status.\n6. Review the FS vs water-level time series and verify critical scenarios with the Channel/Drainage Stability module.")),
         (_t("Modul 04 — Simulasi Aliran 3D", "Module 04 — 3D Flow Simulation"), False, _t(
-            "1. Pastikan Erosion Mapping segmen terkait sudah dijalankan (sumber DEM).\n2. Pilih segmen & skenario: Hujan atau Titik Point (titik, hujan & C otomatis dari Erosion Mapping).\n3. Cek/ubah parameter (durasi, debit, Manning's n).\n4. Jalankan simulasi air 3D.\n5. Putar animasi di scene 3D ber-citra, aktifkan 'Kedalaman maksimum', tinjau hidrograf & titik genangan terdalam.",
-            "1. Make sure Erosion Mapping for the relevant segment has been run (DEM source).\n2. Select the segment & scenario: Rainfall or Point source (point, rainfall & C automatic from Erosion Mapping).\n3. Check/adjust parameters (duration, discharge, Manning's n).\n4. Run the 3D water simulation.\n5. Play the animation in the imagery-draped 3D scene, enable 'Maximum depth', review the hydrograph & deepest ponding points.")),
+            "1. Pastikan Erosion Mapping segmen terkait sudah dijalankan (sumber DEM).\n2. Pilih segmen & jenis simulasi (Debris/Longsoran atau Genangan Banjir).\n3. Tandai titik sumber: klik di peta DEM atau input koordinat.\n4. Isi parameter (radius sumber, Manning's n, frame, eksagerasi vertikal).\n5. Jalankan Simulasi.\n6. Putar animasi dan tinjau kedalaman maksimum, volume, titik limpasan.",
+            "1. Make sure Erosion Mapping for the relevant segment has been run (DEM source).\n2. Select the segment & simulation type (Debris/Landslide or Flood Inundation).\n3. Mark the source point: click on the DEM map or enter coordinates.\n4. Fill the parameters (source radius, Manning's n, frames, vertical exaggeration).\n5. Run the simulation.\n6. Play the animation and review max depth, volume, overflow points.")),
         (_t("Modul 05 — Rekonstruksi Desain", "Module 05 — Design Reconstruction"), False, _t(
             "1. Pilih sumber geometri: upload DXF channel baru atau ambil dari hasil Erosion Mapping.\n2. Ubah parameter: sudut slope, lebar dasar, kedalaman, bench (grading).\n3. Tinjau volume cut-fill dan saran kapasitas Manning.\n4. Unduh DXF 3D desain revisi sebagai acuan.",
             "1. Choose the geometry source: upload a new channel DXF or use Erosion Mapping results.\n2. Change parameters: slope angles, bottom width, depth, benches (grading).\n3. Review cut-fill volumes and Manning capacity suggestions.\n4. Download the revised design as a 3D DXF reference.")),
@@ -5577,864 +5767,1301 @@ if not st.session_state["authenticated"]:
 
     st.stop()
 
-_MINI_AVENZA_HTML = """<!DOCTYPE html>
+_MINI_AVENZA_HTML = r"""<!DOCTYPE html>
 <html lang="id">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#04242a">
 <title>Eromaps — Erosion Field Viewer</title>
 <style>
   :root{
-    --bg:#00151a; --bg2:#02111d; --panel:#0a1f24; --panel2:#0e262c;
-    --line:rgba(255,255,255,0.12); --txt:#eaf4f2; --sub:#9fb8b3;
-    --teal:#178C9C; --green:#3DBF8C; --yellow:#D3D95C; --orange:#e08a2b; --red:#d8483f;
+    --ink:#04242a; --ink2:#0a343c; --ink3:#12454e; --line:rgba(255,255,255,.14);
+    --paper:#f3f6f0; --paper2:#e4eadf; --pink:#10282c; --muted:#5b7076;
+    --txt:#eaf4f2; --sub:#a6bdb9; --lime:#d3d95c; --teal:#1aa0b2;
+    --z0:#3DBF8C; --z1:#D3D95C; --z2:#e08a2b; --z3:#d8483f; --sed1:#6fb1ff; --sed2:#1f5fe0;
+    --sat:env(safe-area-inset-top,0px); --sab:env(safe-area-inset-bottom,0px);
   }
   *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
-  html,body{height:100%; margin:0; background:var(--bg); color:var(--txt);
-    font:15px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,sans-serif;
-    overscroll-behavior:none;}
-  #app{display:flex; flex-direction:column; height:100%; height:100dvh;
-    padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);}
+  html,body{height:100%; margin:0; background:var(--ink); color:var(--txt);
+    font:15px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif; overscroll-behavior:none;}
+  button,select,input{font:inherit; color:inherit;}
+  button{cursor:pointer;}
+  .num{font-variant-numeric:tabular-nums;}
+  #app{position:fixed; inset:0; display:flex; flex-direction:column;}
+  main{position:relative; flex:1 1 auto; min-height:0;}
+  .view{position:absolute; inset:0; display:none;}
+  .view.active{display:block;}
 
-  header{flex:0 0 auto; padding:10px 14px; background:var(--bg2); border-bottom:1px solid var(--line);
-    display:flex; align-items:center; gap:10px;}
-  header h1{font-size:15px; margin:0; font-weight:650; letter-spacing:.2px; flex:1;}
-  select{background:var(--panel2); color:var(--txt); border:1px solid var(--line); border-radius:8px;
-    padding:7px 10px; font-size:13.5px; max-width:44vw;}
-  button{background:var(--panel2); color:var(--txt); border:1px solid var(--line); border-radius:8px;
-    padding:7px 11px; font-size:13.5px; cursor:pointer;}
-  button:active{background:var(--teal);}
-  .iconbtn{width:38px; height:38px; padding:0; display:flex; align-items:center; justify-content:center; font-size:17px;}
+  /* ---------- peta ---------- */
+  #map{position:absolute; inset:0; width:100%; height:100%; display:block; touch-action:none; background:#06161a;}
+  #frame{position:absolute; inset:0; pointer-events:none; border:0 solid transparent; transition:border-color .25s;}
+  #frame.on-erosi{border:5px solid var(--z3); animation:pulse 1.3s ease-in-out infinite;}
+  #frame.on-sed{border:5px solid var(--sed2); animation:pulse 1.3s ease-in-out infinite;}
+  @keyframes pulse{50%{box-shadow:inset 0 0 38px 4px currentColor; opacity:.55;}}
+  #frame.on-erosi{color:var(--z3);} #frame.on-sed{color:var(--sed2);}
+  @media (prefers-reduced-motion:reduce){#frame.on-erosi,#frame.on-sed{animation:none;}}
 
-  main{flex:1 1 auto; position:relative; overflow:hidden; background:#001014;}
-  #mapView, #infoView{position:absolute; inset:0; display:none;}
-  #mapView.active, #infoView.active{display:block;}
+  #topbar{position:absolute; left:0; right:0; top:0; padding:calc(8px + var(--sat)) 10px 0; display:flex; gap:8px; align-items:center; pointer-events:none;}
+  #topbar > *{pointer-events:auto;}
+  #segSelect{flex:1 1 auto; min-width:0; max-width:52vw; background:rgba(4,36,42,.88); border:1px solid var(--line); border-radius:12px; padding:9px 12px; font-weight:600; font-size:14px; text-overflow:ellipsis;}
+  #segSelect option{color:#000;}
+  .chips{margin-left:auto; display:flex; gap:6px;}
+  .chip{background:rgba(4,36,42,.88); border:1px solid var(--line); border-radius:999px; padding:7px 11px; font-size:12.5px; display:flex; align-items:center; gap:6px; white-space:nowrap;}
+  .chip i{width:9px; height:9px; border-radius:50%; background:#777; display:inline-block;}
+  .chip.ok i{background:var(--z0);} .chip.mid i{background:var(--z1);} .chip.low i{background:var(--z2);} .chip.bad i{background:var(--z3);} .chip.off i{background:#8aa;}
 
-  canvas{display:block; touch-action:none;}
+  #alertBanner{position:absolute; left:10px; right:10px; top:calc(56px + var(--sat)); border-radius:14px; padding:12px 14px; display:none; gap:12px; align-items:flex-start; color:#fff; box-shadow:0 8px 28px rgba(0,0,0,.45); z-index:6;}
+  #alertBanner.show{display:flex;}
+  #alertBanner.erosi{background:#a8261d;} #alertBanner.sed{background:#1a49b8;} #alertBanner.warn{background:#9a5a0c;} #alertBanner.info{background:#0d5560;}
+  #alertBanner .ico{font-size:26px; line-height:1;}
+  #alertBanner .tx{flex:1; min-width:0;}
+  #alertBanner .tt{font-weight:700; font-size:16px; line-height:1.25;}
+  #alertBanner .sb{font-size:12.5px; opacity:.92; margin-top:2px;}
+  #alertBanner button{background:rgba(255,255,255,.18); border:1px solid rgba(255,255,255,.4); border-radius:9px; padding:7px 11px; font-weight:600; font-size:13px;}
 
-  .hud{position:absolute; left:10px; top:10px; right:10px; display:flex; justify-content:space-between;
-    gap:8px; pointer-events:none;}
-  .badge{pointer-events:auto; background:rgba(10,31,36,0.85); border:1px solid var(--line); border-radius:9px;
-    padding:6px 10px; font-size:12px; color:var(--sub);}
-  .badge b{color:var(--txt); font-weight:650;}
-  .zoomctl{position:absolute; right:10px; bottom:92px; display:flex; flex-direction:column; gap:6px;}
-  .zoomctl button{width:40px; height:40px; font-size:19px; border-radius:10px;}
-  .leftctl{position:absolute; left:10px; bottom:92px; display:flex; flex-direction:column; gap:6px;}
-  .iconbtn.on{background:var(--teal); border-color:var(--teal);}
+  #ctl{position:absolute; right:10px; bottom:calc(var(--sheetH,150px) + 14px); display:flex; flex-direction:column; gap:8px; z-index:3;}
+  .cbtn{width:44px; height:44px; border-radius:13px; background:rgba(4,36,42,.9); border:1px solid var(--line); font-size:19px; display:flex; align-items:center; justify-content:center; padding:0;}
+  .cbtn:active,.cbtn.on{background:var(--teal); border-color:var(--teal);}
+  .cbtn.txt{font-size:12px; font-weight:700; line-height:1.05; text-align:center;}
 
-  .designbadge{position:absolute; left:10px; right:10px; top:54px; background:rgba(10,31,36,0.9);
-    border:1px solid var(--line); border-radius:9px; padding:7px 10px; font-size:12px; color:var(--sub);
-    line-height:1.55; display:none;}
-  .designbadge b{color:var(--txt);}
-  .designbadge .in{color:var(--green); font-weight:650;}
-  .designbadge .out{color:var(--orange); font-weight:650;}
+  #layerPop{position:absolute; right:62px; bottom:calc(var(--sheetH,150px) + 14px); width:min(300px,calc(100vw - 80px)); max-height:56vh; overflow:auto; background:rgba(4,36,42,.96); border:1px solid var(--line); border-radius:14px; padding:12px; display:none; z-index:5;}
+  #layerPop.show{display:block;}
+  #layerPop h4{margin:10px 0 6px; font-size:12.5px; color:var(--sub); font-weight:600;}
+  #layerPop h4:first-child{margin-top:0;}
+  .seg3{display:flex; border:1px solid var(--line); border-radius:10px; overflow:hidden;}
+  .seg3 button{flex:1; background:transparent; border:0; padding:8px 4px; font-size:13px; color:var(--sub);}
+  .seg3 button.on{background:var(--teal); color:#fff; font-weight:600;}
+  #layerPop input[type=range]{width:100%;}
+  .lrow{display:flex; align-items:center; gap:9px; padding:8px 8px; border-radius:9px; cursor:pointer; user-select:none; font-size:13.5px;}
+  .lrow:active{background:rgba(255,255,255,.08);}
+  .lrow.off{opacity:.42;} .lrow.off .lbl{text-decoration:line-through;}
+  .sw{width:14px; height:14px; border-radius:4px; flex:0 0 auto;} .lrow[data-type=points] .sw{border-radius:50%;}
 
-  .legend{position:absolute; left:60px; bottom:92px; right:60px; display:none;}
-  .legend .row{display:flex; align-items:center; gap:8px; background:rgba(10,31,36,0.85); border:1px solid var(--line);
-    border-radius:9px; padding:6px 10px; font-size:11.5px; margin-bottom:0; cursor:pointer; user-select:none;
-    transition:opacity .15s;}
-  .legend .row:active{opacity:0.7;}
-  .legend .row.off{opacity:0.4; text-decoration:line-through;}
-  .sw{width:12px; height:12px; border-radius:3px; flex:0 0 auto;}
-  .legend .row[data-type="points"] .sw{border-radius:50%;}
+  #sheet{position:absolute; left:0; right:0; bottom:0; background:var(--paper); color:var(--pink); border-radius:20px 20px 0 0; padding:12px 16px 12px; box-shadow:0 -6px 24px rgba(0,0,0,.35); z-index:4; max-height:62%; overflow:auto;}
+  #sheet .grab{width:38px; height:4px; border-radius:2px; background:#b8c4bb; margin:0 auto 10px; cursor:pointer;}
+  #sheet .big{font-size:30px; font-weight:750; letter-spacing:-.4px; line-height:1.05;}
+  #sheet .big small{font-size:14px; font-weight:600; letter-spacing:0; color:var(--muted); margin-left:6px;}
+  #sheet .dirrow{display:flex; align-items:center; gap:10px; margin-top:6px; color:var(--muted); font-size:14px;}
+  #sheet .arrow{width:30px; height:30px; flex:0 0 auto;}
+  .zrow{display:flex; flex-wrap:wrap; gap:6px; margin-top:10px;}
+  .zchip{display:inline-flex; align-items:center; gap:7px; background:var(--paper2); border-radius:999px; padding:6px 11px; font-size:13px; font-weight:600;}
+  .zchip i{width:11px; height:11px; border-radius:50%; display:inline-block;}
+  .zchip.hot{background:#fbe3e0; color:#8f1d15;} .zchip.hotsed{background:#dfe9fb; color:#173f94;}
+  #sheet .meta{margin-top:9px; font-size:12.5px; color:var(--muted); line-height:1.5;}
+  #sheet .meta b{color:var(--pink);}
+  #sheet .pin{margin-top:9px; padding-top:9px; border-top:1px solid #d3dccf; font-size:13.5px;}
+  #sheet .btnrow{display:flex; gap:8px; margin-top:10px; flex-wrap:wrap;}
+  .btn{background:var(--ink2); color:var(--txt); border:1px solid var(--ink3); border-radius:10px; padding:9px 14px; font-weight:600; font-size:13.5px;}
+  .btn:active{background:var(--teal);}
+  .btn.primary{background:var(--teal); border-color:var(--teal); color:#fff;}
+  .btn.ghost{background:transparent; color:var(--txt); border-color:var(--line);}
+  .btn.danger{background:#7b1f19; border-color:#a8261d;}
+  #sheet .btn.ghost{color:var(--pink); border-color:#b8c4bb;}
+  #tileNote{position:absolute; left:10px; top:calc(104px + var(--sat)); font-size:11.5px; background:rgba(4,36,42,.82); border:1px solid var(--line); border-radius:8px; padding:4px 8px; color:var(--sub); display:none; z-index:2; pointer-events:none;}
+  #empty{position:absolute; inset:0; display:none; align-items:center; justify-content:center; text-align:center; padding:40px; color:var(--sub); z-index:7; background:rgba(4,36,42,.88);}
 
-  nav{flex:0 0 auto; display:flex; background:var(--bg2); border-top:1px solid var(--line);}
-  nav button{flex:1; background:transparent; border:none; border-radius:0; padding:10px 4px 8px;
-    font-size:11.5px; color:var(--sub); display:flex; flex-direction:column; align-items:center; gap:3px;}
-  nav button .ic{font-size:19px;}
-  nav button.active{color:var(--teal);}
+  /* ---------- tab lain ---------- */
+  .panel{position:absolute; inset:0; overflow:auto; padding:calc(14px + var(--sat)) 14px 22px; background:var(--ink);}
+  .card{background:var(--ink2); border:1px solid var(--line); border-radius:16px; padding:14px 14px 12px; margin-bottom:12px;}
+  .card h3{margin:0 0 4px; font-size:15.5px; font-weight:700;}
+  .card p{margin:4px 0 8px; color:var(--sub); font-size:13px; line-height:1.5;}
+  .card .hint{font-size:12px; color:var(--sub);}
+  .row{display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:8px;}
+  .field{background:var(--ink); border:1px solid var(--line); border-radius:10px; padding:9px 11px; font-size:14px; flex:1; min-width:120px;}
+  select.field option{color:#000;}
+  .status{font-size:12.5px; color:var(--sub); margin-top:8px; line-height:1.45;} .status.ok{color:var(--z0);} .status.err{color:#ff8f86;} .status.warn{color:var(--z2);}
+  .drop{display:block; border:1.5px dashed var(--line); border-radius:12px; padding:20px 12px; text-align:center; color:var(--sub); font-size:13.5px;}
+  .drop b{color:var(--txt);} input[type=file]{display:none;}
+  .tg{display:flex; align-items:center; gap:10px; padding:11px 0; border-top:1px solid var(--line);}
+  .tg:first-of-type{border-top:0;}
+  .tg .l{flex:1; font-size:14px;} .tg .l small{display:block; color:var(--sub); font-size:12px;}
+  .sw2{appearance:none; -webkit-appearance:none; width:46px; height:27px; border-radius:14px; background:#42595e; position:relative; flex:0 0 auto; outline:none;}
+  .sw2::after{content:""; position:absolute; top:3px; left:3px; width:21px; height:21px; border-radius:50%; background:#fff; transition:transform .15s;}
+  .sw2:checked{background:var(--teal);} .sw2:checked::after{transform:translateX(19px);}
+  .bar{height:9px; background:var(--ink); border-radius:5px; overflow:hidden; margin-top:10px; border:1px solid var(--line);}
+  .bar i{display:block; height:100%; width:0%; background:var(--lime); transition:width .2s;}
+  .kv{display:grid; grid-template-columns:auto 1fr; gap:5px 12px; font-size:13.5px; margin-top:6px;}
+  .kv span:nth-child(odd){color:var(--sub);} .kv span:nth-child(even){text-align:right; word-break:break-word;}
+  .log{margin:8px 0 0; padding:0; list-style:none; font-size:13px;}
+  .log li{padding:9px 0; border-top:1px solid var(--line); display:flex; gap:10px;}
+  .log li:first-child{border-top:0;}
+  .log .dot{width:10px; height:10px; border-radius:50%; margin-top:5px; flex:0 0 auto;}
+  .log small{color:var(--sub); display:block;}
+  a{color:var(--lime);}
 
-  .panel{position:absolute; inset:0; overflow:auto; padding:14px; background:var(--bg);}
-  .card{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px; margin-bottom:12px;}
-  .card h3{margin:0 0 8px; font-size:13.5px; color:var(--teal);}
-  .card p{margin:0 0 6px; color:var(--sub); font-size:13px;}
-  .drop{border:1.5px dashed var(--line); border-radius:12px; padding:22px 14px; text-align:center; color:var(--sub);
-    font-size:13px;}
-  .drop b{color:var(--txt);}
-  input[type=file]{display:none;}
-  .rowbtns{display:flex; gap:8px; margin-top:10px; flex-wrap:wrap;}
-  .status{font-size:11.5px; color:var(--sub); margin-top:8px;}
-  .status.ok{color:var(--green);}
-  .status.err{color:var(--red);}
-  .empty{position:absolute; inset:0; display:flex; align-items:center; justify-content:center; text-align:center;
-    color:var(--sub); font-size:13px; padding:30px;}
+  nav{flex:0 0 auto; display:flex; background:var(--ink); border-top:1px solid var(--line); padding-bottom:var(--sab);}
+  nav button{flex:1; background:transparent; border:0; padding:9px 4px 8px; color:var(--sub); font-size:12px; display:flex; flex-direction:column; align-items:center; gap:3px;}
+  nav button svg{width:23px; height:23px; stroke:currentColor; fill:none; stroke-width:1.9; stroke-linecap:round; stroke-linejoin:round;}
+  nav button.active{color:var(--lime);}
+  nav button .badge{position:absolute; margin:-4px 0 0 16px; min-width:16px; height:16px; border-radius:8px; background:var(--z3); color:#fff; font-size:10.5px; font-weight:700; display:none; align-items:center; justify-content:center; padding:0 4px;}
+  nav button{position:relative;}
+  :focus-visible{outline:2px solid var(--lime); outline-offset:2px;}
 </style>
 </head>
 <body>
 <div id="app">
+<main>
 
-  <header>
-    <h1 id="segTitle">Erosion Field Viewer</h1>
-    <select id="segSelect"></select>
-  </header>
+  <!-- ===================== PETA ===================== -->
+  <section id="mapView" class="view active">
+    <canvas id="map"></canvas>
+    <div id="frame"></div>
 
-  <main>
-
-    <div id="mapView" class="active">
-      <canvas id="mapCanvas"></canvas>
-      <div class="hud">
-        <button class="badge" id="gpsBadge" style="cursor:pointer;">📍 Ketuk utk aktifkan GPS</button>
-        <div class="badge" id="coordBadge">—</div>
-      </div>
-      <div class="designbadge" id="designBadge"></div>
-      <div class="zoomctl">
-        <button id="zoomIn">+</button>
-        <button id="zoomOut">−</button>
-      </div>
-      <div class="leftctl">
-        <button class="iconbtn" id="fitBtn" title="Fit ke seluruh area">⤢</button>
-        <button class="iconbtn" id="meBtn" title="Pusatkan peta ke lokasi GPS saya">🎯</button>
-        <button class="iconbtn" id="measureBtn" title="Mode ukur jarak -- ketuk peta utk taruh target">📏</button>
-      </div>
-      <div class="legend" id="legendBox"></div>
-      <div class="empty" id="mapEmpty" style="display:none;">
-        Belum ada data proyek dimuat.<br>Buka tab <b>Info / Data</b> untuk memuat file proyek (.json).
+    <div id="topbar">
+      <select id="segSelect" aria-label="Segmen"></select>
+      <div class="chips">
+        <button class="chip off" id="netChip"><i></i><span>Online</span></button>
+        <button class="chip off" id="gpsChip"><i></i><span>GPS mati</span></button>
       </div>
     </div>
+    <div id="tileNote"></div>
 
-    <div id="infoView">
-      <div class="panel">
-
-        <div class="card">
-          <h3>Muat data proyek</h3>
-          <p>Muat file paket lapangan (.json) yang diekspor dari aplikasi Erosion Mapping utama. Sekali dimuat, data
-             tersimpan di HP ini (offline) — tidak perlu sinyal lagi setelahnya.</p>
-          <label class="drop" for="fileInput">
-            <b>Ketuk untuk pilih file .json</b><br>atau tarik &amp; taruh di sini
-          </label>
-          <input type="file" id="fileInput" accept=".json,application/json">
-          <div class="rowbtns">
-            <button id="loadSampleBtn">Muat contoh data</button>
-            <button id="clearDataBtn">Hapus data tersimpan</button>
-          </div>
-          <div class="status" id="loadStatus"></div>
-        </div>
-
-        <div class="card">
-          <h3>Plot koordinat &amp; ukur jarak ke desain</h3>
-          <p>Cek jarak dari suatu koordinat (GPS live, titik yang diketuk di peta, atau koordinat yang
-             diketik manual di sini) ke batas desain / titik risiko terdekat -- tanpa harus berdiri
-             persis di lokasinya. Tekan tombol 📏 di peta lalu ketuk peta utk taruh target dgn cepat,
-             atau ketik koordinatnya di sini.</p>
-          <select id="coordFormat" style="width:100%; margin-bottom:8px;">
-            <option value="latlon">Lat, Lon (WGS84) -- disalin dari Google Maps/GPS lain</option>
-            <option value="utm">UTM X (Timur), Y (Utara) -- meter, zona sama dgn proyek</option>
-          </select>
-          <div class="rowbtns">
-            <input type="text" id="coordInput1" placeholder="Lat  (mis. -2.123456)"
-                   style="flex:1; min-width:130px; background:var(--panel2); color:var(--txt);
-                          border:1px solid var(--line); border-radius:8px; padding:7px 10px; font-size:13.5px;">
-            <input type="text" id="coordInput2" placeholder="Lon  (mis. 113.987654)"
-                   style="flex:1; min-width:130px; background:var(--panel2); color:var(--txt);
-                          border:1px solid var(--line); border-radius:8px; padding:7px 10px; font-size:13.5px;">
-          </div>
-          <div class="rowbtns">
-            <button id="plotCoordBtn">📌 Plot ke peta</button>
-            <button id="clearTargetBtn">Hapus target</button>
-          </div>
-          <div class="status" id="coordStatus"></div>
-        </div>
-
-        <div class="card">
-          <h3>Tentang app ini</h3>
-          <p>Satu file HTML mandiri — tidak butuh server, tidak butuh instal dari Play Store/App Store. Setelah
-             dibuka sekali, semua data proyek yang sudah dimuat tersimpan di penyimpanan browser HP (IndexedDB),
-             jadi bisa dibuka lagi tanpa sinyal.</p>
-          <p><b>Cara pasang di HP (Android/Chrome):</b> buka file ini di Chrome → menu titik tiga → "Add to Home
-             screen" / "Tambahkan ke layar utama" — jadi ada ikonnya seperti app biasa.</p>
-          <p><b>Posisi GPS</b> dibaca dari browser (izin lokasi HP), dikonversi ke koordinat UTM proyek secara lokal
-             di HP — tidak mengirim data ke server manapun.</p>
-        </div>
-
-        <div class="card">
-          <h3>Status data</h3>
-          <p id="dataInfo">Belum ada data.</p>
-        </div>
-
-      </div>
+    <div id="alertBanner" role="alert" aria-live="assertive">
+      <div class="ico" id="abIco">⚠</div>
+      <div class="tx"><div class="tt" id="abTitle"></div><div class="sb" id="abSub"></div></div>
+      <button id="abOk">Mengerti</button>
     </div>
 
-  </main>
+    <div id="ctl">
+      <button class="cbtn" id="zoomIn" aria-label="Perbesar">+</button>
+      <button class="cbtn" id="zoomOut" aria-label="Perkecil">−</button>
+      <button class="cbtn" id="fitBtn" aria-label="Lihat seluruh desain" title="Lihat seluruh desain">⤢</button>
+      <button class="cbtn txt" id="modeBtn" aria-label="Mode kamera" title="Mode kamera">Auto</button>
+      <button class="cbtn" id="pinBtn" aria-label="Taruh pin" title="Taruh pin / ukur jarak">📍</button>
+      <button class="cbtn" id="layerBtn" aria-label="Lapisan" title="Lapisan peta">☰</button>
+    </div>
 
-  <nav>
-    <button class="active" data-view="mapView"><span class="ic">🗺️</span>Peta</button>
-    <button data-view="infoView"><span class="ic">ℹ️</span>Info / Data</button>
-  </nav>
+    <div id="layerPop">
+      <h4>Peta dasar</h4>
+      <div class="seg3" id="bmSeg"></div>
+      <h4>Kepekatan warna zona</h4>
+      <input type="range" id="riskOp" min="15" max="100" value="100">
+      <h4>Tampilkan di peta</h4>
+      <div id="legendRows"></div>
+    </div>
 
+    <div id="sheet">
+      <div class="grab" id="grab" title="Ketuk untuk melihat detail"></div>
+      <div id="sheetBody"></div>
+    </div>
+
+    <div id="empty"><div>Belum ada data proyek.<br>Buka tab <b>Data</b> untuk memuat file paket (.json) dari aplikasi Erosion Mapping.</div></div>
+  </section>
+
+  <!-- ===================== PERINGATAN ===================== -->
+  <section id="alertView" class="view">
+    <div class="panel">
+      <div class="card">
+        <h3>Peringatan masuk zona</h3>
+        <p>Aplikasi membandingkan posisi GPS Anda dengan zona hasil Erosion Mapping yang tersimpan di HP ini. Berjalan tanpa internet; GPS tetap bekerja di area tanpa sinyal.</p>
+        <div id="alertToggles"></div>
+      </div>
+
+      <div class="card">
+        <h3>Cara memberi tahu</h3>
+        <div class="tg"><div class="l">Getar<small>Android; iPhone tidak mendukung getar di browser</small></div><input class="sw2" type="checkbox" id="setVib"></div>
+        <div class="tg"><div class="l">Bunyi peringatan</div><input class="sw2" type="checkbox" id="setSnd"></div>
+        <div class="tg"><div class="l">Jaga layar tetap menyala saat GPS aktif<small>Browser menghentikan GPS saat layar mati</small></div><input class="sw2" type="checkbox" id="setWake"></div>
+        <div class="tg"><div class="l">Notifikasi sistem<small id="notifState">Belum diizinkan</small></div><button class="btn ghost" id="notifBtn">Izinkan</button></div>
+        <div class="row">
+          <label style="flex:1; min-width:150px;"><span class="hint">Peringatkan saat jarak ke zona kurang dari</span>
+            <select class="field" id="setApproach" style="width:100%; margin-top:4px;">
+              <option value="0">Jangan beri peringatan dini</option><option value="15">15 m</option><option value="30">30 m</option><option value="50">50 m</option><option value="100">100 m</option>
+            </select></label>
+          <label style="flex:1; min-width:150px;"><span class="hint">Abaikan posisi dengan akurasi lebih buruk dari</span>
+            <select class="field" id="setAcc" style="width:100%; margin-top:4px;">
+              <option value="15">±15 m</option><option value="25">±25 m</option><option value="40">±40 m</option><option value="75">±75 m</option><option value="150">±150 m</option>
+            </select></label>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Uji peringatan</h3>
+        <p>Coba tanpa harus berjalan ke lokasi. Simulasi memindahkan posisi Anda ke titik kritis terdekat.</p>
+        <div class="row">
+          <button class="btn primary" id="testBtn">Uji bunyi &amp; getar</button>
+          <button class="btn" id="simBtn">Simulasi masuk zona</button>
+          <button class="btn ghost" id="simStopBtn" style="display:none">Hentikan simulasi</button>
+        </div>
+        <div class="status" id="testStatus"></div>
+      </div>
+
+      <div class="card">
+        <h3>Riwayat peringatan</h3>
+        <ul class="log" id="logList"></ul>
+        <div class="row"><button class="btn ghost" id="logCsv">Unduh CSV</button><button class="btn ghost" id="logClear">Hapus riwayat</button></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== DATA & LOKASI ===================== -->
+  <section id="dataView" class="view">
+    <div class="panel">
+
+      <div class="card">
+        <h3>Data proyek</h3>
+        <p>Muat file paket lapangan (.json) dari Erosion Mapping. Setelah dimuat, data tersimpan di HP ini dan bisa dibuka tanpa sinyal.</p>
+        <label class="drop" for="fileInput"><b>Ketuk untuk memilih file .json</b></label>
+        <input type="file" id="fileInput" accept=".json,application/json">
+        <div class="row"><button class="btn ghost" id="loadSampleBtn">Muat contoh</button><button class="btn ghost" id="clearDataBtn">Hapus data tersimpan</button></div>
+        <div class="status" id="loadStatus"></div>
+        <div class="status" id="dataInfo"></div>
+      </div>
+
+      <div class="card">
+        <h3>Peta offline</h3>
+        <p>Unduh peta dasar sekarang saat ada internet, supaya tetap tampil di lokasi tanpa sinyal. Cakupan otomatis meliputi desain, posisi Anda saat ini, dan jarak di antaranya.</p>
+        <div class="row">
+          <label style="flex:1; min-width:140px;"><span class="hint">Peta dasar</span>
+            <select class="field" id="offBm" style="width:100%; margin-top:4px;"></select></label>
+          <label style="flex:1; min-width:140px;"><span class="hint">Radius di sekitar desain</span>
+            <select class="field" id="offRad" style="width:100%; margin-top:4px;">
+              <option value="5">5 km</option><option value="15" selected>15 km</option><option value="30">30 km</option><option value="60">60 km</option>
+            </select></label>
+        </div>
+        <div class="tg" style="border-top:0"><div class="l">Sertakan posisi saya sekarang<small id="offGpsNote">Aktifkan GPS dulu</small></div><input class="sw2" type="checkbox" id="offGps" checked></div>
+        <div class="row"><input class="field" id="offExtra" placeholder="Titik lain (opsional): lat, lon  mis. -2.160, 115.380"></div>
+        <div class="status" id="offPlan"></div>
+        <div class="row"><button class="btn primary" id="offGo">Unduh peta offline</button><button class="btn ghost" id="offCancel" style="display:none">Batalkan</button><button class="btn ghost" id="offClear">Hapus peta offline</button></div>
+        <div class="bar" id="offBarWrap" style="display:none"><i id="offBar"></i></div>
+        <div class="status" id="offStatus"></div>
+        <details style="margin-top:8px"><summary class="hint" style="cursor:pointer">Sumber peta &amp; ketentuan</summary>
+          <p class="hint" style="margin-top:8px">Satelit: Esri World Imagery. Peta jalan: OpenStreetMap. Kedua penyedia membatasi pengunduhan massal; gunakan cakupan secukupnya. Untuk pemakaian besar atau tim, isi alamat server peta sendiri di bawah (format <code>https://server/{z}/{x}/{y}.png</code>).</p>
+          <input class="field" id="customUrl" placeholder="https://tiles.example.com/{z}/{x}/{y}.png (opsional)" style="width:100%">
+        </details>
+      </div>
+
+      <div class="card">
+        <h3>Lokasi &amp; keakuratan</h3>
+        <div class="kv" id="diag"></div>
+        <div class="status" id="diagNote"></div>
+        <div class="row" id="diagLinks"></div>
+      </div>
+
+      <div class="card">
+        <h3>Taruh pin dari koordinat</h3>
+        <p>Cek jarak dan zona di suatu koordinat tanpa harus berada di sana.</p>
+        <select class="field" id="coordFormat" style="width:100%">
+          <option value="latlon">Lat, Lon (WGS84), dari Google Maps</option>
+          <option value="utm">UTM Timur, Utara (meter), zona proyek</option>
+        </select>
+        <div class="row">
+          <input class="field" id="coordInput1" placeholder="Lat  (mis. -2.190000)" inputmode="text">
+          <input class="field" id="coordInput2" placeholder="Lon  (mis. 115.450000)" inputmode="text">
+        </div>
+        <div class="row"><button class="btn primary" id="plotCoordBtn">Taruh di peta</button><button class="btn ghost" id="clearTargetBtn">Hapus pin</button></div>
+        <div class="status" id="coordStatus"></div>
+      </div>
+
+      <div class="card">
+        <h3>Tentang</h3>
+        <p>Satu file HTML mandiri. Data proyek, peta offline, pengaturan, dan riwayat peringatan disimpan di penyimpanan browser (IndexedDB) HP ini dan tidak dikirim ke server.</p>
+        <p>Peringatan berjalan selama halaman terbuka dan layar menyala. Browser tidak bisa membunyikan peringatan saat layar terkunci; untuk itu dibutuhkan aplikasi native.</p>
+        <p class="hint" id="storeInfo"></p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<nav>
+  <button class="active" data-view="mapView"><svg viewBox="0 0 24 24"><path d="M9 4 3 6.5v13L9 17l6 3 6-2.5v-13L15 7zM9 4v13M15 7v13"/></svg>Peta</button>
+  <button data-view="alertView"><svg viewBox="0 0 24 24"><path d="M6 17V11a6 6 0 0 1 12 0v6l1.5 2h-15zM10 21h4"/></svg>Peringatan<span class="badge" id="navBadge">0</span></button>
+  <button data-view="dataView"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>Data</button>
+</nav>
 </div>
 
 <script>
 "use strict";
+/* =====================================================================================================
+   EROMAPS v2 -- peta lapangan online/offline.
+   Paket data (.json) v2: tiap segmen berisi layers {key:{uri,tl,tr,bl}} (sudut gambar dlm [lat,lon]),
+   outlines, boundary_ll, critical_ll, sediment_ll, geo {grid kelas RLE utk peringatan zona}, bbox, stats.
+   Paket v1 (lama: bounds_utm + layers berupa string) tetap bisa dibuka; peringatan zona butuh paket v2.
+   ===================================================================================================== */
+const $ = id => document.getElementById(id);
+const TILE = 256, DEG = Math.PI / 180, R_LAT = 111194.9266;
+const BASEMAPS = [
+  {id:"sat", label:"Satelit", url:"https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", maxNative:17, minZ:3, kb:26, attr:"Citra: Esri, Maxar, Earthstar Geographics"},
+  {id:"osm", label:"Peta jalan", url:"https://tile.openstreetmap.org/{z}/{x}/{y}.png", maxNative:19, minZ:3, kb:14, attr:"© OpenStreetMap contributors", capTiles:1500},
+  {id:"none", label:"Tanpa"}
+];
+const ALERT_DEFS = [
+  {id:"E3", label:"Erosi kritis (merah)", short:"zona erosi kritis", color:"#d8483f", kind:"erosi", test:z => z.ero === 3},
+  {id:"S2", label:"Sedimentasi tinggi (>0.85)", short:"zona sedimentasi tinggi", color:"#1f5fe0", kind:"sed", test:z => z.sed >= 2},
+  {id:"E2", label:"Erosi siaga (oranye)", short:"zona erosi siaga", color:"#e08a2b", kind:"erosi", test:z => z.ero === 2},
+  {id:"S1", label:"Potensi sedimentasi (>0.7)", short:"zona potensi sedimentasi", color:"#6fb1ff", kind:"sed", test:z => z.sed === 1}
+];
+const ERO_NAMES = ["Hijau (normal)", "Kuning (waspada)", "Oranye (siaga)", "Merah (kritis)"];
+const ERO_COLORS = ["#3DBF8C", "#D3D95C", "#e08a2b", "#d8483f"];
+const SED_NAMES = ["", "Potensi sedimentasi", "Sedimentasi tinggi"];
+const COMPASS = ["Utara", "Timur Laut", "Timur", "Tenggara", "Selatan", "Barat Daya", "Barat", "Barat Laut"];
 
-/* =====================================================================
-   SKEMA PAKET DATA (.json) yang dimuat app ini -- lihat catatan di bawah
-   untuk format lengkap yang akan diekspor dari app Erosion Mapping utama.
-   {
-     "epsg": "EPSG:32750",
-     "utm_zone": 50, "utm_south": true,
-     "segments": [{
-        "id": "seg1", "label": "Channel A",
-        "layers": {                                    // PNG transparan terpisah per kategori --
-          "base": "data:image/png;base64,....",         // citra satelit/latar, SELALU tampil
-          "boundary": "data:image/png;base64,....",     // garis batas DXF, SELALU tampil
-          "zone_0": "...", "zone_1": "...",              // tiap kelas TARP layer sendiri2 --
-          "zone_2": "...", "zone_3": "...",              // bisa ditoggle lewat legenda (key cocok)
-          "sediment_line": "..."                         // garis ambang sedimentasi, bisa ditoggle
-        },
-        // format LAMA "image": "data:..." (1 gambar gepeng) masih didukung sbg fallback (semua
-        // digambar sbg layer "base", tidak ada yg bisa ditoggle) -- utk file lama yg sudah tersimpan.
-        "bounds_utm": {"xmin":..,"xmax":..,"ymin":..,"ymax":..},
-        // "key"+"type" dipakai viewer utk tombol toggle tampil/sembunyi per baris legenda:
-        // type "layer" -> sembunyikan/tampilkan layers[key]; type "points" -> filter titik vektor.
-        "legend": [{"key":"zone_3","type":"layer","label":"Merah (Kritis)","color":"#d8483f"},
-                   {"key":"critical_points","type":"points","label":"Titik erosi kritis","color":"#8a0000"}, ...],
-        "critical_points": [{"x":..,"y":..}, ...],   // titik VEKTOR (bukan raster) -- tajam di zoom apa pun
-        "sediment_points": [{"x":..,"y":..}, ...],
-        "boundary_points": [[{"x":..,"y":..}, ...], ...]   // poligon desain (per ring), dipakai fitur
-                                                             // "jarak ke desain" (📍/🎯 badge) -- paket
-                                                             // lama tanpa field ini masih jalan, cuma
-                                                             // info jarak-ke-batas tidak ditampilkan.
-        // (fitur "cross_sections" sudah DIHAPUS dari Eromaps -- field lama di paket .json lama
-        // diabaikan begitu saja kalau masih ada, tidak masalah)
-     }]
-   }
-   ===================================================================== */
-
-const DB_NAME = "erosion_field_viewer";
-const STORE = "kv";
-
-function idbOpen(){
-  return new Promise((res, rej) => {
-    const req = indexedDB.open(DB_NAME, 1);
-    req.onupgradeneeded = () => req.result.createObjectStore(STORE);
-    req.onsuccess = () => res(req.result);
-    req.onerror = () => rej(req.error);
+/* ---------------------------------------------------------------- penyimpanan (IndexedDB) */
+let _dbp = null;
+function db(){
+  if(_dbp) return _dbp;
+  _dbp = new Promise((res, rej) => {
+    const r = indexedDB.open("erosion_field_viewer", 2);
+    r.onupgradeneeded = () => { const d = r.result;
+      if(!d.objectStoreNames.contains("kv")) d.createObjectStore("kv");
+      if(!d.objectStoreNames.contains("tiles")) d.createObjectStore("tiles"); };
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+    r.onblocked = () => rej(new Error("IndexedDB terblokir"));
   });
+  _dbp.catch(() => { _dbp = null; });
+  return _dbp;
 }
-async function idbSet(key, val){
-  try{
-    const db = await idbOpen();
-    return new Promise((res, rej) => {
-      const tx = db.transaction(STORE, "readwrite");
-      tx.objectStore(STORE).put(val, key);
-      tx.oncomplete = () => res(true);
-      tx.onerror = () => rej(tx.error);
-    });
-  }catch(e){ console.error(e); return false; }
+function idb(store, mode, fn){
+  return db().then(d => new Promise((res, rej) => {
+    const tx = d.transaction(store, mode); const rq = fn(tx.objectStore(store));
+    tx.oncomplete = () => res(rq ? rq.result : undefined);
+    tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error);
+  }));
 }
-async function idbGet(key){
-  try{
-    const db = await idbOpen();
-    return new Promise((res, rej) => {
-      const tx = db.transaction(STORE, "readonly");
-      const r = tx.objectStore(STORE).get(key);
-      r.onsuccess = () => res(r.result || null);
-      r.onerror = () => rej(r.error);
-    });
-  }catch(e){ console.error(e); return null; }
+const kvGet = k => idb("kv", "readonly", s => s.get(k)).then(v => v === undefined ? null : v).catch(() => null);
+const kvSet = (k, v) => idb("kv", "readwrite", s => s.put(v, k)).then(() => true).catch(() => false);
+const kvDel = k => idb("kv", "readwrite", s => s.delete(k)).then(() => true).catch(() => false);
+const tileGet = k => idb("tiles", "readonly", s => s.get(k)).then(v => v === undefined ? null : v);
+const tilePut = (k, v) => idb("tiles", "readwrite", s => s.put(v, k));
+const tileHas = k => idb("tiles", "readonly", s => s.count(k)).then(n => n > 0).catch(() => false);
+const tileCount = () => idb("tiles", "readonly", s => s.count()).catch(() => 0);
+const tileClear = () => idb("tiles", "readwrite", s => s.clear());
+
+/* ---------------------------------------------------------------- geodesi */
+function lonToX(lon, z){ return (lon + 180) / 360 * TILE * Math.pow(2, z); }
+function latToY(lat, z){ const s = Math.sin(Math.max(-85.0511, Math.min(85.0511, lat)) * DEG); return (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * TILE * Math.pow(2, z); }
+function xToLon(x, z){ return x / (TILE * Math.pow(2, z)) * 360 - 180; }
+function yToLat(y, z){ const n = Math.PI - 2 * Math.PI * y / (TILE * Math.pow(2, z)); return Math.atan(Math.sinh(n)) / DEG; }
+function mpp(lat, z){ return 156543.03392 * Math.cos(lat * DEG) / Math.pow(2, z); }
+
+function haversine(la1, lo1, la2, lo2){
+  const R = 6371008.8, dφ = (la2 - la1) * DEG, dλ = (lo2 - lo1) * DEG;
+  const a = Math.sin(dφ / 2) ** 2 + Math.cos(la1 * DEG) * Math.cos(la2 * DEG) * Math.sin(dλ / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
 }
-async function idbDel(key){
-  try{
-    const db = await idbOpen();
-    return new Promise((res) => {
-      const tx = db.transaction(STORE, "readwrite");
-      tx.objectStore(STORE).delete(key);
-      tx.oncomplete = () => res(true);
-    });
-  }catch(e){ return false; }
+/* jarak elipsoid WGS84 (Vincenty inverse); jatuh ke haversine bila tidak konvergen */
+function geoDist(la1, lo1, la2, lo2){
+  if(la1 === la2 && lo1 === lo2) return 0;
+  const a = 6378137, f = 1 / 298.257223563, b = (1 - f) * a;
+  const L = (lo2 - lo1) * DEG, U1 = Math.atan((1 - f) * Math.tan(la1 * DEG)), U2 = Math.atan((1 - f) * Math.tan(la2 * DEG));
+  const sU1 = Math.sin(U1), cU1 = Math.cos(U1), sU2 = Math.sin(U2), cU2 = Math.cos(U2);
+  let lam = L, lamP, it = 0, sinSig, cosSig, sig, cosSqA, cos2SigM;
+  do {
+    const sl = Math.sin(lam), cl = Math.cos(lam);
+    sinSig = Math.sqrt((cU2 * sl) ** 2 + (cU1 * sU2 - sU1 * cU2 * cl) ** 2);
+    if(sinSig === 0) return 0;
+    cosSig = sU1 * sU2 + cU1 * cU2 * cl; sig = Math.atan2(sinSig, cosSig);
+    const sinA = cU1 * cU2 * sl / sinSig; cosSqA = 1 - sinA * sinA;
+    cos2SigM = cosSqA !== 0 ? cosSig - 2 * sU1 * sU2 / cosSqA : 0;
+    const C = f / 16 * cosSqA * (4 + f * (4 - 3 * cosSqA));
+    lamP = lam; lam = L + (1 - C) * f * sinA * (sig + C * sinSig * (cos2SigM + C * cosSig * (-1 + 2 * cos2SigM ** 2)));
+  } while(Math.abs(lam - lamP) > 1e-12 && ++it < 100);
+  if(it >= 100) return haversine(la1, lo1, la2, lo2);
+  const uSq = cosSqA * (a * a - b * b) / (b * b);
+  const A = 1 + uSq / 16384 * (4096 + uSq * (-768 + uSq * (320 - 175 * uSq)));
+  const B = uSq / 1024 * (256 + uSq * (-128 + uSq * (74 - 47 * uSq)));
+  const dSig = B * sinSig * (cos2SigM + B / 4 * (cosSig * (-1 + 2 * cos2SigM ** 2) - B / 6 * cos2SigM * (-3 + 4 * sinSig ** 2) * (-3 + 4 * cos2SigM ** 2)));
+  return b * A * (sig - dSig);
+}
+function bearing(la1, lo1, la2, lo2){
+  const φ1 = la1 * DEG, φ2 = la2 * DEG, dλ = (lo2 - lo1) * DEG;
+  const y = Math.sin(dλ) * Math.cos(φ2), x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(dλ);
+  return (Math.atan2(y, x) / DEG + 360) % 360;
+}
+const compassName = b => COMPASS[Math.round(b / 45) % 8];
+function fmtDist(n){ if(n == null || !isFinite(n)) return "-"; return n >= 10000 ? (n / 1000).toFixed(1) + " km" : n >= 1000 ? (n / 1000).toFixed(2) + " km" : n >= 100 ? Math.round(n) + " m" : n.toFixed(1) + " m"; }
+function distParts(n){ if(n >= 1000) return [(n / 1000).toFixed(n >= 10000 ? 1 : 2), "km"]; return [n >= 100 ? String(Math.round(n)) : n.toFixed(1), "m"]; }
+
+function pointInRing(lat, lon, ring){
+  let ins = false;
+  for(let i = 0, j = ring.length - 1; i < ring.length; j = i++){
+    const yi = ring[i][0], xi = ring[i][1], yj = ring[j][0], xj = ring[j][1];
+    if(((yi > lat) !== (yj > lat)) && (lon < (xj - xi) * (lat - yi) / ((yj - yi) || 1e-15) + xi)) ins = !ins;
+  }
+  return ins;
+}
+function insidePolys(lat, lon, polys){
+  for(const poly of polys){
+    if(!poly[0] || !pointInRing(lat, lon, poly[0])) continue;
+    let hole = false; for(let k = 1; k < poly.length; k++) if(pointInRing(lat, lon, poly[k])){ hole = true; break; }
+    if(!hole) return true;
+  }
+  return false;
+}
+/* titik terdekat di tepi poligon (proyeksi lokal ekuirektangular), jarak akhir pakai elipsoid */
+function nearestOnPolys(lat, lon, polys){
+  const kx = R_LAT * Math.cos(lat * DEG), ky = R_LAT;
+  let best = Infinity, bl = null, bo = null;
+  for(const poly of polys) for(const ring of poly){
+    for(let i = 0; i < ring.length; i++){
+      const a = ring[i], b = ring[(i + 1) % ring.length];
+      const ax = (a[1] - lon) * kx, ay = (a[0] - lat) * ky, bx = (b[1] - lon) * kx, by = (b[0] - lat) * ky;
+      const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+      let t = l2 > 0 ? -(ax * dx + ay * dy) / l2 : 0; t = Math.max(0, Math.min(1, t));
+      const px = ax + t * dx, py = ay + t * dy, d = px * px + py * py;
+      if(d < best){ best = d; bl = a[0] + t * (b[0] - a[0]); bo = a[1] + t * (b[1] - a[1]); }
+    }
+  }
+  if(bl == null) return null;
+  return {lat:bl, lon:bo, d:geoDist(lat, lon, bl, bo)};
 }
 
-/* ---------------- konversi lat/lon (WGS84) <-> UTM, tanpa library ------ */
-function latLonToUTM(lat, lon, zone, southHemi){
-  const a = 6378137.0, e = 0.081819191, k0 = 0.9996;
-  const e2 = e*e, ep2 = e2/(1-e2);
-  const latR = lat*Math.PI/180, lonR = lon*Math.PI/180;
-  const lon0 = ((zone-1)*6 - 180 + 3) * Math.PI/180;
-  const N = a/Math.sqrt(1-e2*Math.sin(latR)*Math.sin(latR));
-  const T = Math.tan(latR)*Math.tan(latR);
-  const C = ep2*Math.cos(latR)*Math.cos(latR);
-  const Ad = Math.cos(latR)*(lonR-lon0);
-  const M = a*((1-e2/4-3*e2*e2/64-5*e2*e2*e2/256)*latR
-    -(3*e2/8+3*e2*e2/32+45*e2*e2*e2/1024)*Math.sin(2*latR)
-    +(15*e2*e2/256+45*e2*e2*e2/1024)*Math.sin(4*latR)
-    -(35*e2*e2*e2/3072)*Math.sin(6*latR));
-  let x = k0*N*(Ad+(1-T+C)*Ad**3/6+(5-18*T+T*T+72*C-58*ep2)*Ad**5/120)+500000;
-  let y = k0*(M+N*Math.tan(latR)*(Ad*Ad/2+(5-T+9*C+4*C*C)*Ad**4/24
-    +(61-58*T+T*T+600*C-330*ep2)*Ad**6/720));
-  if(southHemi) y += 10000000;
+/* UTM <-> lat/lon (WGS84), seri Krueger; galat < 1 mm di dalam zona */
+function latLonToUTM(lat, lon, zone, south){
+  const a = 6378137.0, e = 0.081819191, k0 = 0.9996, e2 = e * e, ep2 = e2 / (1 - e2);
+  const latR = lat * DEG, lonR = lon * DEG, lon0 = ((zone - 1) * 6 - 180 + 3) * DEG;
+  const N = a / Math.sqrt(1 - e2 * Math.sin(latR) ** 2), T = Math.tan(latR) ** 2, C = ep2 * Math.cos(latR) ** 2, Ad = Math.cos(latR) * (lonR - lon0);
+  const M = a * ((1 - e2 / 4 - 3 * e2 * e2 / 64 - 5 * e2 ** 3 / 256) * latR - (3 * e2 / 8 + 3 * e2 * e2 / 32 + 45 * e2 ** 3 / 1024) * Math.sin(2 * latR)
+    + (15 * e2 * e2 / 256 + 45 * e2 ** 3 / 1024) * Math.sin(4 * latR) - (35 * e2 ** 3 / 3072) * Math.sin(6 * latR));
+  const x = k0 * N * (Ad + (1 - T + C) * Ad ** 3 / 6 + (5 - 18 * T + T * T + 72 * C - 58 * ep2) * Ad ** 5 / 120) + 500000;
+  let y = k0 * (M + N * Math.tan(latR) * (Ad * Ad / 2 + (5 - T + 9 * C + 4 * C * C) * Ad ** 4 / 24 + (61 - 58 * T + T * T + 600 * C - 330 * ep2) * Ad ** 6 / 720));
+  if(south) y += 10000000;
   return {x, y};
 }
-
-/* PERBAIKAN fitur "jarak ke desain": kebalikan dari latLonToUTM, dipakai utk plot koordinat
-   UTM manual balik ke lat/lon (tidak dipakai langsung utk kalkulasi jarak -- kalkulasi jarak
-   selalu di UTM meter yg lurus/tidak perlu trig -- tapi berguna utk validasi/tampilan). */
-function utmToLatLon(x, y, zone, southHemi){
-  const a = 6378137.0, e = 0.081819191, k0 = 0.9996;
-  const e2 = e*e, ep2 = e2/(1-e2);
-  const e1 = (1-Math.sqrt(1-e2))/(1+Math.sqrt(1-e2));
-  let yy = southHemi ? y - 10000000 : y;
-  const xx = x - 500000;
-  const M = yy/k0;
-  const mu = M/(a*(1-e2/4-3*e2*e2/64-5*e2**3/256));
-  const phi1 = mu + (3*e1/2-27*e1**3/32)*Math.sin(2*mu) + (21*e1*e1/16-55*e1**4/32)*Math.sin(4*mu)
-    + (151*e1**3/96)*Math.sin(6*mu) + (1097*e1**4/512)*Math.sin(8*mu);
-  const N1 = a/Math.sqrt(1-e2*Math.sin(phi1)**2);
-  const T1 = Math.tan(phi1)**2;
-  const C1 = ep2*Math.cos(phi1)**2;
-  const R1 = a*(1-e2)/Math.pow(1-e2*Math.sin(phi1)**2, 1.5);
-  const D = xx/(N1*k0);
-  const lat = phi1 - (N1*Math.tan(phi1)/R1)*(D*D/2
-    - (5+3*T1+10*C1-4*C1*C1-9*ep2)*D**4/24
-    + (61+90*T1+298*C1+45*T1*T1-252*ep2-3*C1*C1)*D**6/720);
-  const lon0 = ((zone-1)*6-180+3)*Math.PI/180;
-  const lon = lon0 + (D-(1+2*T1+C1)*D**3/6
-    + (5-2*C1+28*T1-3*C1*C1+8*ep2+24*T1*T1)*D**5/120)/Math.cos(phi1);
-  return {lat: lat*180/Math.PI, lon: lon*180/Math.PI};
+function utmToLatLon(x, y, zone, south){
+  const a = 6378137.0, e = 0.081819191, k0 = 0.9996, e2 = e * e, ep2 = e2 / (1 - e2);
+  const e1 = (1 - Math.sqrt(1 - e2)) / (1 + Math.sqrt(1 - e2));
+  const yy = south ? y - 10000000 : y, xx = x - 500000, M = yy / k0;
+  const mu = M / (a * (1 - e2 / 4 - 3 * e2 * e2 / 64 - 5 * e2 ** 3 / 256));
+  const p1 = mu + (3 * e1 / 2 - 27 * e1 ** 3 / 32) * Math.sin(2 * mu) + (21 * e1 * e1 / 16 - 55 * e1 ** 4 / 32) * Math.sin(4 * mu) + (151 * e1 ** 3 / 96) * Math.sin(6 * mu) + (1097 * e1 ** 4 / 512) * Math.sin(8 * mu);
+  const N1 = a / Math.sqrt(1 - e2 * Math.sin(p1) ** 2), T1 = Math.tan(p1) ** 2, C1 = ep2 * Math.cos(p1) ** 2, R1 = a * (1 - e2) / Math.pow(1 - e2 * Math.sin(p1) ** 2, 1.5), D = xx / (N1 * k0);
+  const lat = p1 - (N1 * Math.tan(p1) / R1) * (D * D / 2 - (5 + 3 * T1 + 10 * C1 - 4 * C1 * C1 - 9 * ep2) * D ** 4 / 24 + (61 + 90 * T1 + 298 * C1 + 45 * T1 * T1 - 252 * ep2 - 3 * C1 * C1) * D ** 6 / 720);
+  const lon0 = ((zone - 1) * 6 - 180 + 3) * DEG;
+  const lon = lon0 + (D - (1 + 2 * T1 + C1) * D ** 3 / 6 + (5 - 2 * C1 + 28 * T1 - 3 * C1 * C1 + 8 * ep2 + 24 * T1 * T1) * D ** 5 / 120) / Math.cos(p1);
+  return {lat:lat / DEG, lon:lon / DEG};
 }
 
-function projZoneSouth(){
-  let zone = 50, south = true;
-  if(PKG && PKG.utm_zone){ zone = PKG.utm_zone; south = !!PKG.utm_south; }
-  return {zone, south};
-}
-
-/* ---------------- geometri: titik-vs-poligon desain (boundary_points), utk fitur
-   "jarak saya/target ke desain" -- semua dlm meter UTM (bidang datar, tanpa trig) ---------------- */
-function pointInRing(pt, ring){
-  let inside = false;
-  for(let i=0, j=ring.length-1; i<ring.length; j=i++){
-    const xi=ring[i].x, yi=ring[i].y, xj=ring[j].x, yj=ring[j].y;
-    const hit = ((yi>pt.y)!==(yj>pt.y)) && (pt.x < (xj-xi)*(pt.y-yi)/((yj-yi)||1e-12)+xi);
-    if(hit) inside = !inside;
-  }
-  return inside;
-}
-function distPointToSeg(p, a, b){
-  const dx=b.x-a.x, dy=b.y-a.y;
-  const len2 = dx*dx+dy*dy;
-  let t = len2>0 ? ((p.x-a.x)*dx+(p.y-a.y)*dy)/len2 : 0;
-  t = Math.max(0, Math.min(1, t));
-  return Math.hypot(p.x-(a.x+t*dx), p.y-(a.y+t*dy));
-}
-function distToRing(pt, ring){
-  let min = Infinity;
-  for(let i=0;i<ring.length;i++) min = Math.min(min, distPointToSeg(pt, ring[i], ring[(i+1)%ring.length]));
-  return min;
-}
-function designInfo(pt, seg){
-  // {insideAny, distBoundary, nearestKind, nearestDist} -- distBoundary null kalau proyek belum
-  // punya data boundary_points vektor (paket lama), supaya UI tahu harus sembunyikan info itu.
-  let insideAny = false, distBoundary = null;
-  const rings = (seg.boundary_points||[]).filter(r=>r && r.length>=3);
-  if(rings.length){
-    distBoundary = Infinity;
-    rings.forEach(ring=>{ if(pointInRing(pt, ring)) insideAny = true;
-      distBoundary = Math.min(distBoundary, distToRing(pt, ring)); });
-  }
-  let nearestKind = null, nearestDist = Infinity;
-  (seg.critical_points||[]).forEach(p=>{ const d=Math.hypot(pt.x-p.x, pt.y-p.y);
-    if(d<nearestDist){ nearestDist=d; nearestKind="titik erosi kritis"; } });
-  (seg.sediment_points||[]).forEach(p=>{ const d=Math.hypot(pt.x-p.x, pt.y-p.y);
-    if(d<nearestDist){ nearestDist=d; nearestKind="titik sedimentasi tinggi"; } });
-  if(!isFinite(nearestDist)){ nearestDist=null; nearestKind=null; }
-  return {insideAny, distBoundary, nearestKind, nearestDist};
-}
-function fmtDist(n){ if(n==null || !isFinite(n)) return "-"; return n>=1000 ? (n/1000).toFixed(2)+" km" : n.toFixed(1)+" m"; }
-
-/* ============================ STATE ============================ */
-let PKG = null;          // paket data yang sedang aktif
-let curSegIdx = 0;
-let view = {ox:0, oy:0, scale:1};   // transform kanvas (world meter -> px)
-let gpsUTM = null, gpsAcc = null;
-let targetPt = null;      // {x,y} -- target manual/ketuk-peta, utk cek jarak ke desain
-let measureMode = false;  // saat aktif, ketuk peta menaruh/menggeser targetPt
-
-const els = {
-  mapCanvas: document.getElementById("mapCanvas"),
-  segSelect: document.getElementById("segSelect"),
-  segTitle: document.getElementById("segTitle"),
-  gpsBadge: document.getElementById("gpsBadge"),
-  coordBadge: document.getElementById("coordBadge"),
-  designBadge: document.getElementById("designBadge"),
-  meBtn: document.getElementById("meBtn"),
-  measureBtn: document.getElementById("measureBtn"),
-  coordFormat: document.getElementById("coordFormat"),
-  coordInput1: document.getElementById("coordInput1"),
-  coordInput2: document.getElementById("coordInput2"),
-  plotCoordBtn: document.getElementById("plotCoordBtn"),
-  clearTargetBtn: document.getElementById("clearTargetBtn"),
-  coordStatus: document.getElementById("coordStatus"),
-  legendBox: document.getElementById("legendBox"),
-  mapEmpty: document.getElementById("mapEmpty"),
-  fileInput: document.getElementById("fileInput"),
-  loadStatus: document.getElementById("loadStatus"),
-  dataInfo: document.getElementById("dataInfo"),
+/* ---------------------------------------------------------------- state */
+let PKG = null, curSegIdx = 0;
+const view = {lat:-2.19, lon:115.45, zoom:12};
+let viewMode = "auto";               // auto | follow | manual
+let gps = null;                      // {lat,lon,acc,ts,heading,speed,alt,sim}
+let realGps = null, simOn = false;
+let targetPt = null, pinMode = false;
+let cssW = 300, cssH = 300, dpr = 1;
+const hidden = new Set();
+const S = {                          // pengaturan (disimpan)
+  basemap:"sat", riskOpacity:100, vib:true, snd:true, wake:true, approach:30, minAcc:40,
+  alerts:{E3:true, S2:true, E2:false, S1:false}, customUrl:"", sheetOpen:false
 };
+const els = {};
 
-const ctx = els.mapCanvas.getContext("2d");
-const imgCache = {};
-// kategori legenda yg disembunyikan (per "key" layer/titik) -- klik baris legenda utk toggle,
-// disimpan lintas ganti segmen supaya preferensi "sembunyikan Merah" mis. tetap konsisten.
-const hiddenKeys = new Set();
-
-function resizeCanvas(){
-  const r = els.mapCanvas.parentElement.getBoundingClientRect();
-  els.mapCanvas.width = r.width * devicePixelRatio;
-  els.mapCanvas.height = r.height * devicePixelRatio;
-  els.mapCanvas.style.width = r.width+"px";
-  els.mapCanvas.style.height = r.height+"px";
-  drawMap();
-}
-window.addEventListener("resize", resizeCanvas);
-
-function curSeg(){ return PKG && PKG.segments ? PKG.segments[curSegIdx] : null; }
-
-function fitToSeg(){
-  const s = curSeg(); if(!s) return;
-  const b = s.bounds_utm;
-  const w = els.mapCanvas.width, h = els.mapCanvas.height;
-  const bw = b.xmax-b.xmin, bh = b.ymax-b.ymin;
-  const pad = 0.92;
-  const sc = Math.min(w/bw, h/bh) * pad;
-  view.scale = sc;
-  view.ox = w/2 - (b.xmin+bw/2)*sc;
-  view.oy = h/2 + (b.ymin+bh/2)*sc;   // y dibalik (utara ke atas)
-  drawMap();
-}
-
-function worldToPx(x, y){
-  return {px: x*view.scale + view.ox, py: view.oy - y*view.scale};
-}
-function pxToWorld(px, py){
-  return {x: (px-view.ox)/view.scale, y: (view.oy-py)/view.scale};
-}
-
-function loadImg(dataUri){
-  if(!dataUri) return null;
-  if(imgCache[dataUri]) return imgCache[dataUri];
-  const im = new Image(); im.src = dataUri;
-  im.onload = drawMap;
-  imgCache[dataUri] = im;
-  return im;
-}
-
-function drawLayerImg(dataUri, tl, br){
-  const im = loadImg(dataUri);
-  if(!im) return;
-  if(im.complete && im.naturalWidth){
-    ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(im, tl.px, tl.py, br.px-tl.px, br.py-tl.py);
-  }
-}
-
-function drawCriticalMarker(p){
-  // "X" putih dgn tepi merah tua -- titik erosi kritis
-  const r = 7*devicePixelRatio;
-  ctx.lineCap = "round";
-  ctx.lineWidth = 4*devicePixelRatio; ctx.strokeStyle = "#8a0000";
-  ctx.beginPath(); ctx.moveTo(p.px-r,p.py-r); ctx.lineTo(p.px+r,p.py+r);
-  ctx.moveTo(p.px+r,p.py-r); ctx.lineTo(p.px-r,p.py+r); ctx.stroke();
-  ctx.lineWidth = 1.8*devicePixelRatio; ctx.strokeStyle = "#ffffff";
-  ctx.beginPath(); ctx.moveTo(p.px-r,p.py-r); ctx.lineTo(p.px+r,p.py+r);
-  ctx.moveTo(p.px+r,p.py-r); ctx.lineTo(p.px-r,p.py+r); ctx.stroke();
-}
-
-function drawSedimentMarker(p){
-  // bulat biru dgn tepi putih -- titik potensi sedimentasi tinggi
-  ctx.beginPath(); ctx.arc(p.px, p.py, 6.5*devicePixelRatio, 0, 7);
-  ctx.fillStyle = "#2b7fff"; ctx.fill();
-  ctx.lineWidth = 1.6*devicePixelRatio; ctx.strokeStyle = "#ffffff"; ctx.stroke();
-}
-
-function drawMap(){
-  const w = els.mapCanvas.width, h = els.mapCanvas.height;
-  ctx.clearRect(0,0,w,h);
-  ctx.fillStyle = "#001014"; ctx.fillRect(0,0,w,h);
-  const s = curSeg();
-  els.mapEmpty.style.display = s ? "none" : "flex";
-  if(!s) return;
-
-  const b = s.bounds_utm;
-  const tl = worldToPx(b.xmin, b.ymax);
-  const br = worldToPx(b.xmax, b.ymin);
-  const layers = s.layers || (s.image ? {base: s.image} : {});  // "image" = paket format lama, tetap didukung
-
-  // "base" (citra satelit/latar) SELALU tampil -- tidak ada di legenda, bukan simbol yg ditoggle
-  if(layers.base) drawLayerImg(layers.base, tl, br);
-  else { ctx.fillStyle = "rgba(255,255,255,0.06)"; ctx.fillRect(tl.px, tl.py, br.px-tl.px, br.py-tl.py); }
-
-  // layer2 lain yg PUNYA baris di legenda -> hormati toggle hiddenKeys; layer tanpa baris legenda
-  // (mis. paket lama yg cuma py "image") ikut selalu tampil.
-  const legendKeys = new Set((s.legend||[]).map(l=>l.key));
-  Object.keys(layers).forEach(k=>{
-    if(k === "base" || k === "boundary") return;
-    if(legendKeys.has(k) && hiddenKeys.has(k)) return;
-    drawLayerImg(layers[k], tl, br);
-  });
-  // "boundary" (garis batas DXF) SELALU tampil paling atas dari semua layer raster -- referensi orientasi
-  if(layers.boundary) drawLayerImg(layers.boundary, tl, br);
-
-  ctx.strokeStyle = "rgba(255,255,255,0.35)"; ctx.lineWidth = 1.5*devicePixelRatio;
-  ctx.strokeRect(tl.px, tl.py, br.px-tl.px, br.py-tl.py);
-
-  // titik vektor (bukan raster) -- tetap tajam di zoom berapa pun, & bisa ditoggle per kategori
-  if(!hiddenKeys.has("critical_points")){
-    (s.critical_points||[]).forEach(pt=>drawCriticalMarker(worldToPx(pt.x, pt.y)));
-  }
-  if(!hiddenKeys.has("sediment_points")){
-    (s.sediment_points||[]).forEach(pt=>drawSedimentMarker(worldToPx(pt.x, pt.y)));
-  }
-
-  // titik GPS
-  if(gpsUTM){
-    const p = worldToPx(gpsUTM.x, gpsUTM.y);
-    if(gpsAcc){
-      const rpx = gpsAcc*view.scale;
-      ctx.beginPath(); ctx.arc(p.px, p.py, Math.max(rpx,4), 0, 7);
-      ctx.fillStyle = "rgba(61,191,140,0.18)"; ctx.fill();
+/* ---------------------------------------------------------------- normalisasi paket (v1 -> v2) */
+function normalizePackage(pkg){
+  const zone = pkg.utm_zone || 50, south = pkg.utm_south !== false;
+  (pkg.segments || []).forEach(s => {
+    const L = s.layers || (s.image ? {base:s.image} : {});
+    const out = {};
+    const b = s.bounds_utm;
+    Object.keys(L).forEach(k => {
+      const v = L[k];
+      if(typeof v === "string"){
+        if(!b) return;
+        const tl = utmToLatLon(b.xmin, b.ymax, zone, south), tr = utmToLatLon(b.xmax, b.ymax, zone, south), bl = utmToLatLon(b.xmin, b.ymin, zone, south);
+        out[k] = {uri:v, tl:[tl.lat, tl.lon], tr:[tr.lat, tr.lon], bl:[bl.lat, bl.lon]};
+      } else if(v && v.uri) out[k] = v;
+    });
+    s.layers = out;
+    const conv = arr => (arr || []).map(p => { if(Array.isArray(p)) return p; const q = utmToLatLon(p.x, p.y, zone, south); return [q.lat, q.lon]; });
+    if(!s.boundary_ll && s.boundary_points) s.boundary_ll = s.boundary_points.filter(r => r && r.length >= 3).map(r => [conv(r)]);
+    if(!s.critical_ll) s.critical_ll = conv(s.critical_points);
+    if(!s.sediment_ll) s.sediment_ll = conv(s.sediment_points);
+    s.boundary_ll = s.boundary_ll || [];
+    s.outlines = s.outlines || {};
+    if(!s.bbox){
+      let pts = [];
+      s.boundary_ll.forEach(p => { if(p[0]) pts = pts.concat(p[0]); });
+      if(!pts.length && b){ const a = utmToLatLon(b.xmin, b.ymin, zone, south), c = utmToLatLon(b.xmax, b.ymax, zone, south); pts = [[a.lat, a.lon], [c.lat, c.lon]]; }
+      if(pts.length){ const la = pts.map(p => p[0]), lo = pts.map(p => p[1]); s.bbox = {south:Math.min(...la), north:Math.max(...la), west:Math.min(...lo), east:Math.max(...lo)}; }
     }
-    ctx.beginPath(); ctx.arc(p.px, p.py, 8*devicePixelRatio, 0, 7);
-    ctx.fillStyle = "#3DBF8C"; ctx.fill();
-    ctx.lineWidth = 2.5*devicePixelRatio; ctx.strokeStyle = "#fff"; ctx.stroke();
-  }
-
-  // titik TARGET (ketuk peta / plot manual) -- garis putus2 ke GPS kalau GPS aktif, supaya
-  // jarak antara posisi Anda dan target terlihat langsung di peta, bukan cuma di badge angka.
-  if(targetPt){
-    const p = worldToPx(targetPt.x, targetPt.y);
-    if(gpsUTM){
-      const g = worldToPx(gpsUTM.x, gpsUTM.y);
-      ctx.setLineDash([6*devicePixelRatio, 5*devicePixelRatio]);
-      ctx.lineWidth = 2*devicePixelRatio; ctx.strokeStyle = "#D3D95C";
-      ctx.beginPath(); ctx.moveTo(g.px, g.py); ctx.lineTo(p.px, p.py); ctx.stroke();
-      ctx.setLineDash([]);
-      const mx = (g.px+p.px)/2, my = (g.py+p.py)/2;
-      const label = fmtDist(Math.hypot(gpsUTM.x-targetPt.x, gpsUTM.y-targetPt.y));
-      ctx.font = `${12*devicePixelRatio}px -apple-system,sans-serif`;
-      const tw = ctx.measureText(label).width;
-      ctx.fillStyle = "rgba(10,31,36,0.9)";
-      ctx.fillRect(mx-tw/2-5*devicePixelRatio, my-9*devicePixelRatio, tw+10*devicePixelRatio, 18*devicePixelRatio);
-      ctx.fillStyle = "#D3D95C"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-      ctx.fillText(label, mx, my);
-      ctx.textAlign = "left";
+    if(s.geo && s.geo.rle && !s.geo._arr){
+      const g = s.geo, arr = new Uint8Array(g.nx * g.ny); let p = 0; const r = g.rle;
+      for(let i = 0; i < r.length; i += 2){ arr.fill(r[i], p, p + r[i + 1]); p += r[i + 1]; }
+      g._arr = arr;
     }
-    ctx.beginPath(); ctx.arc(p.px, p.py, 7.5*devicePixelRatio, 0, 7);
-    ctx.fillStyle = "#D3D95C"; ctx.fill();
-    ctx.lineWidth = 2.5*devicePixelRatio; ctx.strokeStyle = "#00151a"; ctx.stroke();
+    s.legend = s.legend || [];
+  });
+  if(!pkg.region){
+    const bb = (pkg.segments || []).map(s => s.bbox).filter(Boolean);
+    if(bb.length) pkg.region = {south:Math.min(...bb.map(x => x.south)), north:Math.max(...bb.map(x => x.north)), west:Math.min(...bb.map(x => x.west)), east:Math.max(...bb.map(x => x.east))};
   }
+  return pkg;
+}
+const curSeg = () => (PKG && PKG.segments) ? PKG.segments[curSegIdx] : null;
 
-  updateDesignBadge();
+/* ---------------------------------------------------------------- zona di suatu titik (offline) */
+function zoneAt(seg, lat, lon){
+  const g = seg && seg.geo; if(!g || !g._arr) return null;
+  const u = latLonToUTM(lat, lon, g.zone, g.south);
+  const col = Math.floor((u.x - g.xmin) / g.cell), row = Math.floor((g.ymax - u.y) / g.cell);
+  if(col < 0 || row < 0 || col >= g.nx || row >= g.ny) return {out:true, ero:null, sed:0};
+  const b = g._arr[row * g.nx + col], e = b & 15;
+  return {out:e === 15, ero:e === 15 ? null : e, sed:e === 15 ? 0 : (b >> 4)};
+}
+function enabledDefs(){ return ALERT_DEFS.filter(d => S.alerts[d.id]); }
+function classify(z){ if(!z || z.out) return null; for(const d of enabledDefs()) if(d.test(z)) return d; return null; }
+
+/* jarak (m) ke zona yang diaktifkan: transformasi jarak chamfer pada grid kelas */
+const _dfCache = {};
+function distField(seg){
+  const g = seg.geo; if(!g || !g._arr) return null;
+  const defs = enabledDefs(); if(!defs.length) return null;
+  const key = seg.id + "|" + defs.map(d => d.id).join(",");
+  if(_dfCache[key]) return _dfCache[key];
+  const nx = g.nx, ny = g.ny, n = nx * ny, INF = 1e9, f = new Float32Array(n);
+  for(let i = 0; i < n; i++){ const b = g._arr[i], e = b & 15; const z = {ero:e === 15 ? null : e, sed:b >> 4}; let hit = false;
+    if(e !== 15) for(const d of defs) if(d.test(z)){ hit = true; break; } f[i] = hit ? 0 : INF; }
+  const D = 1.41421356;
+  for(let y = 0; y < ny; y++) for(let x = 0; x < nx; x++){ const i = y * nx + x; let v = f[i];
+    if(x > 0) v = Math.min(v, f[i - 1] + 1); if(y > 0){ v = Math.min(v, f[i - nx] + 1); if(x > 0) v = Math.min(v, f[i - nx - 1] + D); if(x < nx - 1) v = Math.min(v, f[i - nx + 1] + D); } f[i] = v; }
+  for(let y = ny - 1; y >= 0; y--) for(let x = nx - 1; x >= 0; x--){ const i = y * nx + x; let v = f[i];
+    if(x < nx - 1) v = Math.min(v, f[i + 1] + 1); if(y < ny - 1){ v = Math.min(v, f[i + nx] + 1); if(x < nx - 1) v = Math.min(v, f[i + nx + 1] + D); if(x > 0) v = Math.min(v, f[i + nx - 1] + D); } f[i] = v; }
+  return (_dfCache[key] = f);
+}
+function distToZoneM(seg, lat, lon){
+  const g = seg.geo, f = distField(seg); if(!f) return null;
+  const u = latLonToUTM(lat, lon, g.zone, g.south);
+  let col = (u.x - g.xmin) / g.cell, row = (g.ymax - u.y) / g.cell, extra = 0;
+  const cc = Math.max(0, Math.min(g.nx - 1, Math.floor(col))), rr = Math.max(0, Math.min(g.ny - 1, Math.floor(row)));
+  if(cc !== Math.floor(col) || rr !== Math.floor(row)) extra = Math.hypot((col - cc) * g.cell, (row - rr) * g.cell);
+  const v = f[rr * g.nx + cc]; if(v >= 1e8) return null;
+  return v * g.cell + extra;
 }
 
-function updateDesignBadge(){
-  const s = curSeg();
-  if(!s || (!gpsUTM && !targetPt)){ els.designBadge.style.display = "none"; return; }
-  const lines = [];
-  if(gpsUTM){
-    const info = designInfo(gpsUTM, s);
-    let l = "📍 Anda: ";
-    l += info.distBoundary==null ? "(paket lama, belum ada data batas desain)"
-       : (info.insideAny ? '<span class="in">DI DALAM area desain</span>'
-                          : `<span class="out">DI LUAR desain — ${fmtDist(info.distBoundary)} dari batas</span>`);
-    if(info.nearestKind) l += ` · terdekat ke <b>${info.nearestKind}</b>: <b>${fmtDist(info.nearestDist)}</b>`;
-    lines.push(l);
-  }
-  if(targetPt){
-    const info = designInfo(targetPt, s);
-    let l = "🎯 Target: ";
-    l += info.distBoundary==null ? "(paket lama, belum ada data batas desain)"
-       : (info.insideAny ? '<span class="in">DI DALAM area desain</span>'
-                          : `<span class="out">DI LUAR desain — ${fmtDist(info.distBoundary)} dari batas</span>`);
-    if(info.nearestKind) l += ` · terdekat ke <b>${info.nearestKind}</b>: <b>${fmtDist(info.nearestDist)}</b>`;
-    lines.push(l);
-  }
-  els.designBadge.innerHTML = lines.join("<br>");
-  els.designBadge.style.display = "block";
+/* ---------------------------------------------------------------- tile peta dasar */
+function allBasemaps(){
+  const l = BASEMAPS.slice();
+  if(S.customUrl && /\{z\}/.test(S.customUrl) && /\{x\}/.test(S.customUrl)) l.splice(2, 0, {id:"custom", label:"Kustom", url:S.customUrl, maxNative:19, minZ:3, kb:20, attr:"Sumber peta kustom"});
+  return l;
 }
+const bmById = id => allBasemaps().find(b => b.id === id) || BASEMAPS[0];
+const tileMem = new Map(); let pendingTiles = 0, netActive = 0; const netQ = [];
+const tkey = (bm, z, x, y) => bm.id + "/" + z + "/" + x + "/" + y;
+const tileUrl = (bm, z, x, y) => bm.url.replace("{z}", z).replace("{x}", x).replace("{y}", y).replace("{s}", "a");
 
-/* ---------------- pan / pinch-zoom sentuhan ---------------- */
-(function(){
-  let dragging=false, lastX=0, lastY=0, downX=0, downY=0, moved=false, pinchDist=0, pinchScale=1;
-  const cv = els.mapCanvas;
-  function pos(e){ const t=e.touches?e.touches[0]:e; const r=cv.getBoundingClientRect();
-    return {x:(t.clientX-r.left)*devicePixelRatio, y:(t.clientY-r.top)*devicePixelRatio}; }
-  cv.addEventListener("pointerdown", e=>{
-    dragging=true; moved=false; lastX=e.clientX; lastY=e.clientY; downX=e.clientX; downY=e.clientY;
-    cv.setPointerCapture(e.pointerId);
+function netFetchTile(bm, z, x, y){
+  return new Promise(resolve => {
+    const job = () => {
+      netActive++;
+      fetch(tileUrl(bm, z, x, y), {mode:"cors"}).then(r => { if(!r.ok) throw 0;
+        const type = r.headers.get("content-type") || "image/jpeg";
+        return r.arrayBuffer().then(buf => ({buf, type})); })
+      .then(rec => { if(rec.buf.byteLength < 150 || !/image/.test(rec.type)) throw 0; resolve(rec); })
+      .catch(() => resolve(null))
+      .finally(() => { netActive--; const n = netQ.shift(); if(n) n(); });
+    };
+    if(netActive < 6) job(); else netQ.push(job);
   });
-  cv.addEventListener("pointermove", e=>{
-    if(!dragging) return;
-    if(Math.abs(e.clientX-downX)>6 || Math.abs(e.clientY-downY)>6) moved=true;
-    view.ox += (e.clientX-lastX)*devicePixelRatio; view.oy += (e.clientY-lastY)*devicePixelRatio;
-    lastX=e.clientX; lastY=e.clientY; drawMap();
-  });
-  cv.addEventListener("pointerup", e=>{
-    dragging=false;
-    // PERBAIKAN fitur ukur jarak: ketuk singkat (bukan geser peta) saat mode 📏 aktif -> taruh/
-    // geser target ke titik yg diketuk, langsung terlihat jaraknya ke GPS & ke desain terdekat.
-    if(!moved && measureMode && curSeg()){
-      const p = pos(e);
-      targetPt = pxToWorld(p.x, p.y);
-      drawMap();
-    }
-  });
-  cv.addEventListener("pointercancel", ()=>dragging=false);
-  cv.addEventListener("wheel", e=>{
-    e.preventDefault();
-    const p = pos(e); const f = e.deltaY<0?1.12:0.89;
-    view.ox = p.x - (p.x-view.ox)*f; view.oy = p.y - (p.y-view.oy)*f;
-    view.scale *= f; drawMap();
-  }, {passive:false});
-  let touches=[];
-  cv.addEventListener("touchstart", e=>{ touches=[...e.touches]; if(touches.length===2){
-    pinchDist=Math.hypot(touches[0].clientX-touches[1].clientX, touches[0].clientY-touches[1].clientY);
-  }}, {passive:true});
-  cv.addEventListener("touchmove", e=>{
-    if(e.touches.length===2){
-      const d = Math.hypot(e.touches[0].clientX-e.touches[1].clientX, e.touches[0].clientY-e.touches[1].clientY);
-      if(pinchDist>0){
-        const f = d/pinchDist; const r=cv.getBoundingClientRect();
-        const cx=((e.touches[0].clientX+e.touches[1].clientX)/2-r.left)*devicePixelRatio;
-        const cy=((e.touches[0].clientY+e.touches[1].clientY)/2-r.top)*devicePixelRatio;
-        view.ox = cx-(cx-view.ox)*f; view.oy = cy-(cy-view.oy)*f; view.scale *= f; drawMap();
+}
+function decodeRec(rec){
+  const blob = new Blob([rec.buf], {type:rec.type});
+  if(window.createImageBitmap) return createImageBitmap(blob);
+  return new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = URL.createObjectURL(blob); });
+}
+function getTile(bm, z, x, y){
+  const k = tkey(bm, z, x, y); let e = tileMem.get(k);
+  if(e){
+    if(e.status === "miss" && navigator.onLine && Date.now() - e.t > 20000){ tileMem.delete(k); e = null; }
+    else return e;
+  }
+  e = {status:"loading", img:null, t:Date.now()}; tileMem.set(k, e); pendingTiles++;
+  tileGet(k).catch(() => null)
+    .then(rec => rec || (navigator.onLine ? netFetchTile(bm, z, x, y).then(r => { if(r) tilePut(k, r).catch(() => {}); return r; }) : null))
+    .then(rec => { if(!rec){ e.status = "miss"; e.t = Date.now(); return; } return decodeRec(rec).then(im => { e.img = im; e.status = "ok"; }); })
+    .catch(() => { e.status = "miss"; e.t = Date.now(); })
+    .then(() => { pendingTiles--; requestDraw(); });
+  if(tileMem.size > 700){ let n = 0; for(const [kk, vv] of tileMem){ if(n++ > 200) break; if(vv.img && vv.img.close) try{ vv.img.close(); }catch(_){} tileMem.delete(kk); } }
+  return e;
+}
+function drawTiles(bm, cx, cy, z){
+  const zt = Math.max(bm.minZ || 0, Math.min(bm.maxNative, Math.round(z)));
+  const f = Math.pow(2, zt - z), n = Math.pow(2, zt), ts = TILE / f;
+  const x0 = Math.floor((cx - cssW / 2) * f / TILE), x1 = Math.floor((cx + cssW / 2) * f / TILE);
+  const y0 = Math.max(0, Math.floor((cy - cssH / 2) * f / TILE)), y1 = Math.min(n - 1, Math.floor((cy + cssH / 2) * f / TILE));
+  const ctx = g2; let missing = 0;
+  for(let ty = y0; ty <= y1; ty++) for(let tx = x0; tx <= x1; tx++){
+    const wx = ((tx % n) + n) % n;
+    const sx = cssW / 2 + tx * ts - cx, sy = cssH / 2 + ty * ts - cy;
+    const e = getTile(bm, zt, wx, ty);
+    if(e.status === "ok"){ ctx.drawImage(e.img, Math.floor(sx), Math.floor(sy), Math.ceil(ts) + 1, Math.ceil(ts) + 1); continue; }
+    missing++;
+    for(let k = 1; k <= 6 && zt - k >= (bm.minZ || 0); k++){      // tile induk (lebih kasar) sebagai pengganti
+      const pe = tileMem.get(tkey(bm, zt - k, wx >> k, ty >> k));
+      if(pe && pe.status === "ok"){
+        const sz = TILE / Math.pow(2, k), sxs = (wx - ((wx >> k) << k)) * sz, sys = (ty - ((ty >> k) << k)) * sz;
+        ctx.drawImage(pe.img, sxs, sys, sz, sz, Math.floor(sx), Math.floor(sy), Math.ceil(ts) + 1, Math.ceil(ts) + 1); break;
       }
-      pinchDist = d;
+      if(e.status === "miss") getTile(bm, zt - k, wx >> k, ty >> k);
     }
-  }, {passive:true});
-})();
-
-document.getElementById("zoomIn").onclick = ()=>{ view.scale*=1.3; drawMap(); };
-document.getElementById("zoomOut").onclick = ()=>{ view.scale*=0.77; drawMap(); };
-document.getElementById("fitBtn").onclick = fitToSeg;
-
-/* ---------------- "Pusatkan ke lokasi saya" & mode ukur jarak ---------------- */
-els.meBtn.onclick = ()=>{
-  if(!gpsUTM){ startGPS(); return; }
-  const w = els.mapCanvas.width, h = els.mapCanvas.height;
-  if(view.scale < 2) view.scale = 2;   // kalau belum pernah zoom/fit, mulai dari skala yg wajar
-  view.ox = w/2 - gpsUTM.x*view.scale;
-  view.oy = h/2 + gpsUTM.y*view.scale;
-  drawMap();
-};
-els.measureBtn.onclick = ()=>{
-  measureMode = !measureMode;
-  els.measureBtn.classList.toggle("on", measureMode);
-};
-
-/* ---------------- plot koordinat manual (Lat/Lon atau UTM) dari tab Info/Data ---------------- */
-const COORD_PLACEHOLDERS = {
-  latlon: ["Lat  (mis. -2.123456)", "Lon  (mis. 113.987654)"],
-  utm: ["UTM X / Timur (meter)", "UTM Y / Utara (meter)"],
-};
-els.coordFormat.addEventListener("change", ()=>{
-  const [ph1, ph2] = COORD_PLACEHOLDERS[els.coordFormat.value];
-  els.coordInput1.placeholder = ph1; els.coordInput2.placeholder = ph2;
-});
-els.plotCoordBtn.onclick = ()=>{
-  if(!curSeg()){ els.coordStatus.textContent = "Muat data proyek dulu di tab ini."; els.coordStatus.className = "status err"; return; }
-  const v1 = parseFloat(els.coordInput1.value), v2 = parseFloat(els.coordInput2.value);
-  if(!isFinite(v1) || !isFinite(v2)){
-    els.coordStatus.textContent = "Isi kedua kolom koordinat dgn angka yg valid.";
-    els.coordStatus.className = "status err"; return;
   }
-  if(els.coordFormat.value === "latlon"){
-    const {zone, south} = projZoneSouth();
-    targetPt = latLonToUTM(v1, v2, zone, south);
+  return missing;
+}
+
+/* ---------------------------------------------------------------- gambar peta */
+let g2 = null;
+const imgCache = {};
+function loadImg(uri){
+  if(!uri) return null; if(imgCache[uri]) return imgCache[uri];
+  const im = new Image(); im.onload = requestDraw; im.src = uri; imgCache[uri] = im; return im;
+}
+let _raf = 0;
+function requestDraw(){ if(_raf) return; _raf = requestAnimationFrame(() => { _raf = 0; draw(); }); }
+
+function draw(){
+  const c = g2; if(!c) return;
+  c.setTransform(dpr, 0, 0, dpr, 0, 0);
+  c.fillStyle = "#06161a"; c.fillRect(0, 0, cssW, cssH);
+  const z = view.zoom, cx = lonToX(view.lon, z), cy = latToY(view.lat, z);
+  const P = (lat, lon) => ({x:cssW / 2 + lonToX(lon, z) - cx, y:cssH / 2 + latToY(lat, z) - cy});
+  const seg = curSeg();
+  ctxDraw = c;
+  els.empty.style.display = seg ? "none" : "flex";
+  if(!seg) return;
+  const drawGeoImg = (L, alpha) => {
+    const im = loadImg(L.uri); if(!im || !im.complete || !im.naturalWidth) return;
+    const p0 = P(L.tl[0], L.tl[1]), p1 = P(L.tr[0], L.tr[1]), p2 = P(L.bl[0], L.bl[1]);
+    const w = im.naturalWidth, h = im.naturalHeight;
+    c.save(); c.globalAlpha = alpha; c.imageSmoothingEnabled = true; c.imageSmoothingQuality = "high";
+    c.transform((p1.x - p0.x) / w, (p1.y - p0.y) / w, (p2.x - p0.x) / h, (p2.y - p0.y) / h, p0.x, p0.y);
+    c.drawImage(im, 0, 0); c.restore();
+  };
+  const L = seg.layers || {};
+  if(L.base) drawGeoImg(L.base, 1);
+  let missing = 0;
+  const bm = bmById(S.basemap);
+  if(bm.id !== "none") missing = drawTiles(bm, cx, cy, z);
+  const visible = k => !(hidden.has(k));
+  ["zone_0", "zone_1", "zone_2", "zone_3", "sed_1", "sed_2"].forEach(k => { if(L[k] && visible(k)) drawGeoImg(L[k], S.riskOpacity / 100); });
+  Object.keys(L).forEach(k => { if(k === "base" || k === "boundary" || /^(zone_[0-3]|sed_[12])$/.test(k)) return; if(visible(k)) drawGeoImg(L[k], S.riskOpacity / 100); });
+  // kontur zona (vektor)
+  const OUT = {zone_3:["#ffffff", 2.2, []], zone_2:["#ffe2b8", 1.4, []], sed_2:["#ffffff", 2, [7, 5]], sed_1:["#cfe3ff", 1.3, [4, 5]]};
+  Object.keys(OUT).forEach(k => {
+    const rings = seg.outlines && seg.outlines[k]; if(!rings || !visible(k)) return;
+    c.lineJoin = "round"; c.setLineDash(OUT[k][2]);
+    rings.forEach(r => { c.beginPath(); r.forEach((q, i) => { const p = P(q[0], q[1]); i ? c.lineTo(p.x, p.y) : c.moveTo(p.x, p.y); }); c.closePath();
+      c.strokeStyle = "rgba(0,0,0,.55)"; c.lineWidth = OUT[k][1] + 2; c.stroke(); c.strokeStyle = OUT[k][0]; c.lineWidth = OUT[k][1]; c.stroke(); });
+    c.setLineDash([]);
+  });
+  // batas desain (vektor)
+  (seg.boundary_ll || []).forEach(poly => poly.forEach((r, ri) => {
+    c.beginPath(); r.forEach((q, i) => { const p = P(q[0], q[1]); i ? c.lineTo(p.x, p.y) : c.moveTo(p.x, p.y); }); c.closePath();
+    c.setLineDash(ri ? [4, 4] : []); c.lineWidth = 4.5; c.strokeStyle = "rgba(0,0,0,.6)"; c.stroke();
+    c.lineWidth = 2; c.strokeStyle = "#fff"; c.stroke(); c.setLineDash([]);
+  }));
+  if(L.boundary && !(seg.boundary_ll || []).length) drawGeoImg(L.boundary, 1);
+  // titik vektor
+  if(visible("critical_points")) (seg.critical_ll || []).forEach(q => { const p = P(q[0], q[1]); markerX(c, p.x, p.y); });
+  if(visible("sediment_points")) (seg.sediment_ll || []).forEach(q => { const p = P(q[0], q[1]); markerDot(c, p.x, p.y); });
+  // pin / target
+  if(targetPt){
+    const p = P(targetPt.lat, targetPt.lon);
+    if(gps){ const g = P(gps.lat, gps.lon); c.setLineDash([7, 5]); c.lineWidth = 2.2; c.strokeStyle = "#D3D95C"; c.beginPath(); c.moveTo(g.x, g.y); c.lineTo(p.x, p.y); c.stroke(); c.setLineDash([]);
+      const d = geoDist(gps.lat, gps.lon, targetPt.lat, targetPt.lon), lab = fmtDist(d), mx = (g.x + p.x) / 2, my = (g.y + p.y) / 2;
+      c.font = "600 12.5px system-ui,sans-serif"; const tw = c.measureText(lab).width; c.fillStyle = "rgba(4,36,42,.92)"; c.fillRect(mx - tw / 2 - 6, my - 10, tw + 12, 20);
+      c.fillStyle = "#D3D95C"; c.textAlign = "center"; c.textBaseline = "middle"; c.fillText(lab, mx, my); c.textAlign = "left"; }
+    c.beginPath(); c.moveTo(p.x, p.y); c.bezierCurveTo(p.x - 13, p.y - 18, p.x - 10, p.y - 36, p.x, p.y - 36); c.bezierCurveTo(p.x + 10, p.y - 36, p.x + 13, p.y - 18, p.x, p.y);
+    c.fillStyle = "#D3D95C"; c.fill(); c.lineWidth = 2; c.strokeStyle = "#04242a"; c.stroke();
+    c.beginPath(); c.arc(p.x, p.y - 26, 3.5, 0, 7); c.fillStyle = "#04242a"; c.fill();
+  }
+  // posisi GPS
+  if(gps){
+    const p = P(gps.lat, gps.lon), rpx = gps.acc / mpp(gps.lat, z);
+    if(rpx > 3){ c.beginPath(); c.arc(p.x, p.y, rpx, 0, 7); c.fillStyle = gps.acc > 200 ? "rgba(224,138,43,.16)" : "rgba(26,160,178,.17)"; c.fill(); c.lineWidth = 1.2; c.strokeStyle = gps.acc > 200 ? "rgba(224,138,43,.7)" : "rgba(26,160,178,.65)"; c.stroke(); }
+    if(gps.heading != null && gps.speed > 0.6){ c.save(); c.translate(p.x, p.y); c.rotate(gps.heading * DEG); c.beginPath(); c.moveTo(0, -24); c.lineTo(8, -10); c.lineTo(-8, -10); c.closePath(); c.fillStyle = "#1aa0b2"; c.fill(); c.lineWidth = 1.5; c.strokeStyle = "#fff"; c.stroke(); c.restore(); }
+    c.beginPath(); c.arc(p.x, p.y, 9, 0, 7); c.fillStyle = gps.sim ? "#D3D95C" : "#1aa0b2"; c.fill(); c.lineWidth = 3; c.strokeStyle = "#fff"; c.stroke();
+  }
+  drawScale(c, cssH - (parseInt(getComputedStyle(document.documentElement).getPropertyValue("--sheetH")) || 150) - 22, z);
+  // keterangan sumber peta + status
+  if(bm.id !== "none" && bm.attr){ c.font = "10.5px system-ui,sans-serif"; c.fillStyle = "rgba(255,255,255,.75)"; c.textAlign = "right"; c.fillText(bm.attr, cssW - 8, cssH - 4); c.textAlign = "left"; }
+  const note = els.tileNote;
+  if(bm.id !== "none" && missing > 0 && !navigator.onLine){ note.textContent = "Offline: sebagian peta dasar belum diunduh"; note.style.display = "block"; }
+  else if(pendingTiles > 0){ note.textContent = "Memuat peta…"; note.style.display = "block"; }
+  else note.style.display = "none";
+  updateSheetPos();
+}
+let ctxDraw = null;
+function markerX(c, x, y){ const r = 7; c.lineCap = "round"; c.lineWidth = 4.5; c.strokeStyle = "#8a0000"; c.beginPath(); c.moveTo(x - r, y - r); c.lineTo(x + r, y + r); c.moveTo(x + r, y - r); c.lineTo(x - r, y + r); c.stroke(); c.lineWidth = 2; c.strokeStyle = "#fff"; c.stroke(); }
+function markerDot(c, x, y){ c.beginPath(); c.arc(x, y, 6.5, 0, 7); c.fillStyle = "#2b7fff"; c.fill(); c.lineWidth = 2; c.strokeStyle = "#fff"; c.stroke(); }
+function drawScale(c, y, z){
+  const m = mpp(view.lat, z), target = 110 * m; const pow = Math.pow(10, Math.floor(Math.log10(target))); let nice = pow;
+  [1, 2, 5, 10].forEach(k => { if(k * pow <= target) nice = k * pow; });
+  const w = nice / m, x = 12; c.lineWidth = 3.5; c.strokeStyle = "rgba(0,0,0,.65)"; c.beginPath(); c.moveTo(x, y - 6); c.lineTo(x, y); c.lineTo(x + w, y); c.lineTo(x + w, y - 6); c.stroke();
+  c.lineWidth = 1.6; c.strokeStyle = "#fff"; c.stroke(); const lab = nice >= 1000 ? (nice / 1000) + " km" : nice + " m";
+  c.font = "600 11.5px system-ui,sans-serif"; c.lineWidth = 3; c.strokeStyle = "rgba(0,0,0,.65)"; c.strokeText(lab, x + 2, y - 9); c.fillStyle = "#fff"; c.fillText(lab, x + 2, y - 9);
+}
+
+/* ---------------------------------------------------------------- kamera */
+function setCenterWorld(cx, cy, z){ view.lon = xToLon(cx, z); view.lat = yToLat(cy, z); view.zoom = z; }
+function panPx(dx, dy){ const z = view.zoom; setCenterWorld(lonToX(view.lon, z) - dx, latToY(view.lat, z) - dy, z); }
+function zoomAt(px, py, dz){
+  const z0 = view.zoom, z1 = Math.max(3, Math.min(21, z0 + dz)); if(z1 === z0) return;
+  const wx = lonToX(view.lon, z0) + (px - cssW / 2), wy = latToY(view.lat, z0) + (py - cssH / 2);
+  const lon = xToLon(wx, z0), lat = yToLat(wy, z0);
+  setCenterWorld(lonToX(lon, z1) - (px - cssW / 2), latToY(lat, z1) - (py - cssH / 2), z1);
+}
+function sheetPx(){ return (parseInt(getComputedStyle(document.documentElement).getPropertyValue("--sheetH")) || 150); }
+function topPx(){ return 56 + (parseInt(getComputedStyle(document.documentElement).getPropertyValue("--sat")) || 0); }
+/* kamera yang memuat bbox; area terlihat = di luar top bar dan bottom sheet */
+function fitBBox(bb, pad){
+  const padT = topPx() + 4, padB = sheetPx() + 8, availW = cssW * (1 - pad), availH = Math.max(80, cssH - padT - padB) * (1 - pad);
+  const dx0 = Math.abs(lonToX(bb.east, 0) - lonToX(bb.west, 0)) || 1e-9, dy0 = Math.abs(latToY(bb.south, 0) - latToY(bb.north, 0)) || 1e-9;
+  let z = Math.min(Math.log2(availW / dx0), Math.log2(availH / dy0)); z = Math.max(3, Math.min(19, z));
+  const lat = (bb.north + bb.south) / 2, lon = (bb.east + bb.west) / 2;
+  return {lat, lon, zoom:z, offY:(padB - padT) / 2};
+}
+function zoomForSpan(latc, spanM){ const mp = spanM / Math.max(120, Math.min(cssW, cssH - sheetPx() - topPx())); return Math.max(3, Math.min(20, Math.log2(156543.03392 * Math.cos(latc * DEG) / mp))); }
+function autoTarget(){
+  const seg = curSeg(); if(!seg || !seg.bbox) return null;
+  const bb = seg.bbox; const padB = sheetPx(), padT = topPx(); const offY = (padB - padT) / 2;
+  if(!gps) return fitBBox(bb, 0.12);
+  const info = designInfo(gps, seg);
+  const d = info.inside ? 0 : (info.dist == null ? 1e9 : info.dist);
+  if(d > 1500){
+    const u = {south:Math.min(bb.south, gps.lat), north:Math.max(bb.north, gps.lat), west:Math.min(bb.west, gps.lon), east:Math.max(bb.east, gps.lon)};
+    return fitBBox(u, 0.2);
+  }
+  const bw = geoDist(bb.south, bb.west, bb.south, bb.east), bh = geoDist(bb.south, bb.west, bb.north, bb.west);
+  const span = info.inside ? Math.max(250, Math.min(700, Math.min(bw, bh))) : Math.max(300, 3 * d + 400);
+  return {lat:gps.lat, lon:gps.lon, zoom:zoomForSpan(gps.lat, span), offY};
+}
+let anim = null;
+function animateTo(t, ms){
+  const z0 = view.zoom, la0 = view.lat, lo0 = view.lon;
+  const tz = t.zoom, wy = latToY(t.lat, tz) + (t.offY || 0), tla = yToLat(wy, tz), tlo = t.lon;
+  const start = performance.now(); const myAnim = anim = {};
+  if(ms <= 0){ view.zoom = tz; view.lat = tla; view.lon = tlo; requestDraw(); return; }
+  (function step(now){
+    if(anim !== myAnim) return; const k = Math.min(1, (now - start) / ms), e = k < .5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
+    view.zoom = z0 + (tz - z0) * e; view.lat = la0 + (tla - la0) * e; view.lon = lo0 + (tlo - lo0) * e; requestDraw();
+    if(k < 1) requestAnimationFrame(step); else anim = null;
+  })(start);
+}
+function applyMode(forceMs){
+  if(viewMode === "manual") return;
+  let t;
+  if(viewMode === "follow" && gps){ t = {lat:gps.lat, lon:gps.lon, zoom:Math.max(view.zoom, 16.5), offY:(sheetPx() - topPx()) / 2}; if(Math.abs(view.zoom - t.zoom) < 0.05) t.zoom = view.zoom; }
+  else t = autoTarget();
+  if(!t) return;
+  const wy = latToY(t.lat, t.zoom) + (t.offY || 0), tla = yToLat(wy, t.zoom);
+  const px = Math.hypot(lonToX(t.lon, view.zoom) - lonToX(view.lon, view.zoom), latToY(tla, view.zoom) - latToY(view.lat, view.zoom));
+  const moved = Math.abs(t.zoom - view.zoom) > 0.2 || px > Math.min(cssW, cssH) * 0.18;
+  if(forceMs != null || moved) animateTo(t, forceMs != null ? forceMs : 650);
+}
+function setMode(m){
+  viewMode = m;
+  els.modeBtn.textContent = m === "auto" ? "Auto" : m === "follow" ? "Ikuti" : "Bebas";
+  els.modeBtn.classList.toggle("on", m !== "manual");
+  els.modeBtn.title = m === "auto" ? "Otomatis: skala menyesuaikan jarak ke desain" : m === "follow" ? "Peta mengikuti posisi Anda" : "Geser sendiri";
+}
+function userMoved(){ anim = null; if(viewMode !== "manual") setMode("manual"); }
+
+/* ---------------------------------------------------------------- info desain / sheet */
+function designInfo(pt, seg){
+  const polys = seg.boundary_ll || [];
+  if(!polys.length) return {inside:false, dist:null};
+  const inside = insidePolys(pt.lat, pt.lon, polys);
+  if(inside) return {inside:true, dist:0};
+  const n = nearestOnPolys(pt.lat, pt.lon, polys);
+  return {inside:false, dist:n ? n.d : null, near:n, bearing:n ? bearing(pt.lat, pt.lon, n.lat, n.lon) : null};
+}
+function nearestHot(pt, seg){
+  let best = null;
+  const test = (arr, kind) => (arr || []).forEach(q => { const d = geoDist(pt.lat, pt.lon, q[0], q[1]); if(!best || d < best.d) best = {d, kind, lat:q[0], lon:q[1]}; });
+  test(seg.critical_ll, "titik erosi kritis"); test(seg.sediment_ll, "titik sedimentasi tinggi");
+  if(best) best.b = bearing(pt.lat, pt.lon, best.lat, best.lon);
+  return best;
+}
+function zoneChips(z){
+  if(!z) return '<span class="zchip"><i style="background:#9aa"></i>Data zona belum tersedia (ekspor ulang paket)</span>';
+  if(z.out) return '<span class="zchip"><i style="background:#9aa"></i>Di luar area analisis</span>';
+  let h = `<span class="zchip ${z.ero === 3 ? "hot" : ""}"><i style="background:${ERO_COLORS[z.ero]}"></i>Erosi: ${ERO_NAMES[z.ero]}</span>`;
+  if(z.sed > 0) h += `<span class="zchip ${z.sed === 2 ? "hotsed" : ""}"><i style="background:${z.sed === 2 ? "#1f5fe0" : "#6fb1ff"}"></i>${SED_NAMES[z.sed]}</span>`;
+  return h;
+}
+function arrowSvg(b){ return `<svg class="arrow" viewBox="0 0 30 30" style="transform:rotate(${b}deg)"><circle cx="15" cy="15" r="14" fill="#e4eadf"/><path d="M15 4 21 20 15 16.5 9 20z" fill="#10282c"/></svg>`; }
+
+function updateSheet(){
+  const seg = curSeg(), body = els.sheetBody;
+  if(!seg){ body.innerHTML = ""; return; }
+  let h = "";
+  if(!gps){
+    const st = seg.stats && seg.stats.area_ha;
+    h += '<div class="big">GPS belum aktif</div><div class="meta">Aktifkan GPS untuk melihat posisi Anda terhadap desain dan zona risiko.' +
+         (st && st.zone_3 != null ? `<br>Zona merah <b>${st.zone_3.toFixed(2)} ha</b>` + (st.sed_2 != null ? ` · sedimentasi tinggi <b>${st.sed_2.toFixed(2)} ha</b>` : "") : "") + "</div>";
+    h += '<div class="btnrow"><button class="btn primary" id="shGps">Aktifkan GPS</button></div>';
   } else {
-    targetPt = {x: v1, y: v2};
+    const info = designInfo(gps, seg), z = zoneAt(seg, gps.lat, gps.lon);
+    if(info.inside) h += '<div class="big">Di dalam area desain</div>';
+    else if(info.dist != null){ const [v, u] = distParts(info.dist); h += `<div class="big num">${v}<small>${u} dari batas desain</small></div>`;
+      h += `<div class="dirrow">${arrowSvg(info.bearing)}<span>arah <b>${compassName(info.bearing)}</b> (${Math.round(info.bearing)}°)</span></div>`; }
+    else h += '<div class="big">Jarak ke desain tidak tersedia</div>';
+    h += `<div class="zrow">${zoneChips(z)}</div>`;
+    const nh = nearestHot(gps, seg); let meta = "";
+    if(nh) meta += `Terdekat: <b>${nh.kind}</b> ${fmtDist(nh.d)} ke ${compassName(nh.b)}<br>`;
+    const q = accQuality(gps.acc); meta += `GPS <b class="num">±${Math.round(gps.acc)} m</b> · ${q.label}${gps.sim ? " · <b>SIMULASI</b>" : ""}`;
+    if(S.alerts && z && !z.out){ const df = distToZoneM(seg, gps.lat, gps.lon); if(df != null && df > 0 && enabledDefs().length) meta += `<br>Zona peringatan terdekat: <b>${fmtDist(df)}</b>`; }
+    h += `<div class="meta">${meta}</div>`;
+    if(S.sheetOpen) h += `<div class="meta num">Lat ${gps.lat.toFixed(6)} · Lon ${gps.lon.toFixed(6)}</div>`;
   }
-  els.coordStatus.textContent = `Target diplot di E ${targetPt.x.toFixed(1)} / N ${targetPt.y.toFixed(1)}.`;
-  els.coordStatus.className = "status ok";
-  document.querySelectorAll("nav button")[0].click();  // pindah ke tab Peta supaya langsung terlihat
-  const w = els.mapCanvas.width, h = els.mapCanvas.height;
-  if(view.scale < 2) view.scale = 2;
-  view.ox = w/2 - targetPt.x*view.scale;
-  view.oy = h/2 + targetPt.y*view.scale;
-  drawMap();
-};
-els.clearTargetBtn.onclick = ()=>{
-  targetPt = null; els.coordInput1.value = ""; els.coordInput2.value = "";
-  els.coordStatus.textContent = "Target dihapus."; els.coordStatus.className = "status";
-  drawMap();
-};
+  if(targetPt){
+    const info = designInfo(targetPt, seg), z = zoneAt(seg, targetPt.lat, targetPt.lon);
+    let t = '<div class="pin"><b>Pin</b> · ';
+    t += info.inside ? "di dalam desain" : (info.dist != null ? `${fmtDist(info.dist)} dari batas desain` : "-");
+    if(gps){ const d = geoDist(gps.lat, gps.lon, targetPt.lat, targetPt.lon); t += ` · ${fmtDist(d)} dari Anda (${compassName(bearing(gps.lat, gps.lon, targetPt.lat, targetPt.lon))})`; }
+    t += `<div class="zrow">${zoneChips(z)}</div><div class="btnrow"><button class="btn ghost" id="shPinClr">Hapus pin</button></div></div>`;
+    h += t;
+  }
+  body.innerHTML = h;
+  const b1 = $("shGps"); if(b1) b1.onclick = startGPS;
+  const b2 = $("shPinClr"); if(b2) b2.onclick = () => { targetPt = null; updateSheet(); requestDraw(); };
+}
+function updateSheetPos(){
+  const hgt = els.sheet.offsetHeight; if(hgt && String(hgt) !== (document.documentElement.style.getPropertyValue("--sheetH") || "").replace("px", "")) document.documentElement.style.setProperty("--sheetH", hgt + "px");
+}
+function accQuality(a){
+  if(a <= 15) return {cls:"ok", label:"akurat"}; if(a <= 50) return {cls:"mid", label:"cukup"}; if(a <= 200) return {cls:"low", label:"rendah"};
+  return {cls:"bad", label:"perkiraan jaringan"};
+}
 
-/* ============================ GPS ============================ */
-let gpsWatchId = null;
-
+/* ---------------------------------------------------------------- GPS */
+let watchId = null, wakeLock = null, audioCtx = null;
 function gpsOriginProblem(){
-  // Geolocation API browser HANYA jalan di "secure context": https://, atau file:// di sebagian
-  // browser. content:// (dibuka lewat viewer galeri/Downloads Android) SELALU ditolak browser
-  // secara diam-diam (tanpa dialog izin sama sekali) -- ini batasan browser, bukan app ini.
-  const proto = location.protocol;
   if(window.isSecureContext === false){
-    if(proto === "content:") return "Dibuka lewat viewer file (content://) -- browser TIDAK PERNAH menampilkan dialog izin di sini. Buka file ini langsung di Chrome (bukan lewat app Files/Galeri), atau host di https://.";
-    return `Origin "${proto}" tidak didukung GPS browser. Buka lewat https:// atau lewat Chrome langsung (bukan aplikasi lain yang membuka file ini).`;
+    if(location.protocol === "content:") return "Dibuka lewat penampil file (content://). Browser tidak menampilkan izin lokasi di sini. Buka langsung di Chrome atau lewat alamat https://.";
+    return `Alamat "${location.protocol}" tidak didukung GPS browser. Buka lewat https://.`;
   }
   return null;
 }
+function ensureAudio(){ try{ if(!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); if(audioCtx.state === "suspended") audioCtx.resume(); }catch(_){} }
+async function acquireWake(){ try{ if(S.wake && navigator.wakeLock && !wakeLock){ wakeLock = await navigator.wakeLock.request("screen"); wakeLock.addEventListener("release", () => { wakeLock = null; }); } }catch(_){} }
+document.addEventListener("visibilitychange", () => { if(document.visibilityState === "visible" && watchId !== null) acquireWake(); });
 
+function setGpsChip(){
+  const chip = $("gpsChip"), t = chip.querySelector("span");
+  chip.className = "chip";
+  if(simOn){ chip.classList.add("mid"); t.textContent = "Simulasi"; return; }
+  if(!realGps){ chip.classList.add("off"); t.textContent = watchId !== null ? "Mencari GPS…" : "GPS mati"; return; }
+  const q = accQuality(realGps.acc); chip.classList.add(q.cls);
+  const age = (Date.now() - realGps.ts) / 1000;
+  t.textContent = `±${Math.round(realGps.acc)} m` + (age > 20 ? ` · ${Math.round(age)} dtk lalu` : "");
+}
 function startGPS(){
-  if(!("geolocation" in navigator)){
-    els.gpsBadge.textContent = "GPS tidak didukung browser ini"; return;
-  }
+  ensureAudio();
+  if(!("geolocation" in navigator)){ $("gpsChip").querySelector("span").textContent = "GPS tidak didukung"; return; }
   const problem = gpsOriginProblem();
-  if(problem){
-    els.gpsBadge.textContent = "⚠️ GPS tidak bisa diaktifkan";
-    setStatus(problem, "err");
-    document.querySelectorAll("nav button")[1].click(); // pindah ke tab Info/Data supaya pesan kelihatan
-    return;
-  }
-  els.gpsBadge.textContent = "GPS: meminta izin…";
-  if(gpsWatchId !== null) navigator.geolocation.clearWatch(gpsWatchId);
-  gpsWatchId = navigator.geolocation.watchPosition(pos=>{
-    const {latitude, longitude, accuracy} = pos.coords;
-    let zone = 50, south = true;
-    if(PKG && PKG.utm_zone){ zone = PKG.utm_zone; south = !!PKG.utm_south; }
-    gpsUTM = latLonToUTM(latitude, longitude, zone, south);
-    gpsAcc = accuracy;
-    els.gpsBadge.innerHTML = `GPS: <b>±${accuracy.toFixed(0)} m</b>`;
-    els.coordBadge.textContent = `E ${gpsUTM.x.toFixed(1)}  N ${gpsUTM.y.toFixed(1)}`;
-    drawMap();
-  }, err=>{
-    const msgs = {1:"izin lokasi ditolak (ketuk lagi utk minta izin ulang)", 2:"sinyal GPS tidak ditemukan", 3:"waktu habis mencari sinyal"};
-    els.gpsBadge.textContent = "📍 GPS: " + (msgs[err.code] || err.message) ;
-  }, {enableHighAccuracy:true, maximumAge:2000, timeout:15000});
+  if(problem){ gotoView("dataView"); $("diagNote").textContent = problem; $("diagNote").className = "status err"; return; }
+  if(watchId !== null) navigator.geolocation.clearWatch(watchId);
+  $("gpsChip").querySelector("span").textContent = "Meminta izin…";
+  acquireWake();
+  const ok = pos => {
+    const c = pos.coords;
+    realGps = {lat:c.latitude, lon:c.longitude, acc:c.accuracy || 9999, ts:pos.timestamp || Date.now(), heading:c.heading, speed:c.speed, alt:c.altitude};
+    if(!simOn) onFix({...realGps});
+    setGpsChip(); renderDiag();
+  };
+  const bad = err => {
+    const m = {1:"Izin lokasi ditolak. Ketuk lagi untuk meminta ulang.", 2:"Sinyal GPS tidak ditemukan.", 3:"Waktu habis mencari sinyal."};
+    const chip = $("gpsChip"); chip.className = "chip bad"; chip.querySelector("span").textContent = err.code === 1 ? "Izin ditolak" : "GPS gagal";
+    $("diagNote").textContent = (m[err.code] || err.message); $("diagNote").className = "status err";
+  };
+  navigator.geolocation.getCurrentPosition(ok, () => {}, {enableHighAccuracy:true, maximumAge:0, timeout:20000});
+  watchId = navigator.geolocation.watchPosition(ok, bad, {enableHighAccuracy:true, maximumAge:0, timeout:30000});
+  setGpsChip();
 }
-els.gpsBadge.addEventListener("click", startGPS);
-
-/* ============================ Segmen & legenda ============================ */
-function renderSegSelect(){
-  els.segSelect.innerHTML = "";
-  (PKG?.segments||[]).forEach((s,i)=>{
-    const o = document.createElement("option"); o.value=i; o.textContent=s.label||s.id; els.segSelect.appendChild(o);
-  });
-  els.segSelect.value = curSegIdx;
+function onFix(fix){
+  gps = fix;
+  processAlerts(fix);
+  updateSheet(); renderDiag(); applyMode(); requestDraw();
 }
-els.segSelect.onchange = ()=>{ curSegIdx = +els.segSelect.value; onSegChange(); };
+setInterval(() => { setGpsChip(); if(realGps && $("dataView").classList.contains("active")) renderDiag(); }, 2000);
 
-function onSegChange(){
-  const s = curSeg();
-  els.segTitle.textContent = s ? s.label : "Erosion Field Viewer";
-  renderLegend();
-  fitToSeg();
-}
-
-function renderLegend(){
-  const s = curSeg();
-  els.legendBox.innerHTML = "";
-  if(!s || !s.legend || !s.legend.length){ els.legendBox.style.display="none"; return; }
-  els.legendBox.style.display = "flex"; els.legendBox.style.flexDirection="column"; els.legendBox.style.gap="4px";
-  s.legend.forEach(l=>{
-    const row=document.createElement("div");
-    row.className = "row" + (l.key && hiddenKeys.has(l.key) ? " off" : "");
-    row.dataset.type = l.type || "";
-    row.innerHTML = `<span class="sw" style="background:${l.color}"></span>${l.label}`;
-    if(l.key){
-      // klik baris legenda -> toggle tampil/sembunyi kategori itu di peta (klik lagi -> tampil lagi)
-      row.title = hiddenKeys.has(l.key)
-        ? "Ketuk untuk menampilkan lagi"
-        : "Ketuk untuk menyembunyikan dari peta";
-      row.addEventListener("click", ()=>{
-        if(hiddenKeys.has(l.key)) hiddenKeys.delete(l.key); else hiddenKeys.add(l.key);
-        renderLegend();
-        drawMap();
-      });
+/* ---------------------------------------------------------------- peringatan zona */
+const AL = {cls:null, pending:null, pendCount:0, approachArmed:true, lastApproachId:null};
+let logItems = [];
+function processAlerts(fix){
+  const seg = curSeg(); if(!seg || !seg.geo) return;
+  if(fix.acc > S.minAcc){ $("zoneGate").textContent = `Peringatan ditunda: akurasi ±${Math.round(fix.acc)} m (batas ±${S.minAcc} m)`; return; }
+  $("zoneGate").textContent = "";
+  const z = zoneAt(seg, fix.lat, fix.lon), cand = classify(z), need = fix.acc <= 10 ? 1 : 2;
+  if((cand ? cand.id : null) === (AL.cls ? AL.cls.id : null)){ AL.pending = null; AL.pendCount = 0; }
+  else {
+    const pid = cand ? cand.id : null;
+    if(AL.pending === pid) AL.pendCount++; else { AL.pending = pid; AL.pendCount = 1; }
+    if(AL.pendCount >= need){
+      const prev = AL.cls; AL.cls = cand; AL.pending = null; AL.pendCount = 0;
+      if(cand){ fireAlert("enter", cand, fix, seg); AL.approachArmed = false; }
+      else if(prev){ fireAlert("exit", prev, fix, seg); AL.approachArmed = true; }
     }
-    els.legendBox.appendChild(row);
+  }
+  setFrame();
+  if(!AL.cls && S.approach > 0){
+    const d = distToZoneM(seg, fix.lat, fix.lon);
+    if(d != null){
+      if(d <= S.approach && AL.approachArmed){ AL.approachArmed = false; fireAlert("approach", null, fix, seg, d); }
+      else if(d > S.approach * 1.6) AL.approachArmed = true;
+    }
+  }
+}
+function setFrame(){ const f = $("frame"); f.className = AL.cls ? (AL.cls.kind === "erosi" ? "on-erosi" : "on-sed") : ""; }
+function fireAlert(kind, def, fix, seg, dist, test){
+  const t = new Date(), tm = t.toLocaleTimeString("id-ID");
+  let title, sub = `${seg ? seg.label : ""} · akurasi ±${Math.round(fix.acc)} m · ${tm}`, cls = "info", ico = "ℹ️";
+  if(kind === "enter"){ title = `Anda masuk ${def.short}`; cls = def.kind === "erosi" ? "erosi" : "sed"; ico = "⚠️"; }
+  else if(kind === "exit"){ title = `Anda keluar dari ${def.short}`; cls = "info"; ico = "✔️"; }
+  else if(kind === "approach"){ title = `Mendekati zona rawan, ${fmtDist(dist)} lagi`; cls = "warn"; ico = "⚠️"; }
+  else { title = "Uji peringatan"; sub = "Bunyi dan getar berfungsi bila Anda merasakannya."; cls = "erosi"; ico = "🔔"; }
+  if(kind !== "test"){
+    logItems.push({t:t.getTime(), kind, id:def ? def.id : "", label:def ? def.label : "Zona rawan", color:def ? def.color : "#e08a2b", lat:fix.lat, lon:fix.lon, acc:Math.round(fix.acc), seg:seg ? seg.label : "", sim:!!fix.sim, dist:dist != null ? Math.round(dist) : null});
+    if(logItems.length > 300) logItems = logItems.slice(-300);
+    kvSet("alert_log", logItems); renderLog();
+  }
+  showBanner(cls, ico, title, sub, kind === "enter" || kind === "test" ? 0 : (kind === "approach" ? 9000 : 5000));
+  feedback(kind);
+  sysNotify(title, sub);
+}
+let bannerTimer = null;
+function showBanner(cls, ico, title, sub, autoMs){
+  const b = $("alertBanner"); b.className = "show " + cls; $("abIco").textContent = ico; $("abTitle").textContent = title; $("abSub").textContent = sub;
+  clearTimeout(bannerTimer); if(autoMs) bannerTimer = setTimeout(hideBanner, autoMs);
+}
+function hideBanner(){ $("alertBanner").className = ""; }
+function beep(seq){
+  if(!S.snd) return; ensureAudio(); if(!audioCtx) return;
+  let t = audioCtx.currentTime;
+  seq.forEach(([f, d]) => { const o = audioCtx.createOscillator(), g = audioCtx.createGain(); o.type = "square"; o.frequency.value = f; g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.22, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + d); o.connect(g); g.connect(audioCtx.destination); o.start(t); o.stop(t + d + 0.02); t += d + 0.05; });
+}
+function feedback(kind){
+  const pat = kind === "enter" || kind === "test" ? [300, 120, 300, 120, 600] : kind === "approach" ? [200, 100, 200] : [120];
+  if(S.vib && navigator.vibrate) try{ navigator.vibrate(pat); }catch(_){}
+  beep(kind === "enter" || kind === "test" ? [[880, .22], [660, .22], [880, .22], [660, .22]] : kind === "approach" ? [[740, .18], [740, .18]] : [[520, .14]]);
+}
+function sysNotify(title, body){
+  try{ if(window.Notification && Notification.permission === "granted" && document.visibilityState !== "visible") new Notification(title, {body, tag:"eromaps-zone", renotify:true, requireInteraction:true}); }catch(_){}
+}
+function renderLog(){
+  const ul = $("logList");
+  if(!logItems.length){ ul.innerHTML = '<li><span class="hint">Belum ada peringatan.</span></li>'; $("navBadge").style.display = "none"; return; }
+  ul.innerHTML = logItems.slice(-60).reverse().map(x => {
+    const w = x.kind === "enter" ? "Masuk" : x.kind === "exit" ? "Keluar" : "Mendekati";
+    return `<li><span class="dot" style="background:${x.color}"></span><div><b>${w} · ${x.label}</b>${x.sim ? " (simulasi)" : ""}<small>${new Date(x.t).toLocaleString("id-ID")} · ±${x.acc} m${x.dist != null ? " · " + x.dist + " m" : ""}<br>${x.lat.toFixed(6)}, ${x.lon.toFixed(6)} · ${x.seg}</small></div></li>`; }).join("");
+  const today = logItems.filter(x => x.kind === "enter" && Date.now() - x.t < 3600000).length;
+  const nb = $("navBadge"); nb.textContent = today; nb.style.display = today ? "flex" : "none";
+}
+
+/* ---------------------------------------------------------------- peta offline */
+let offAbort = false, offBusy = false;
+function expandBBox(b, km){ const dLat = km * 1000 / R_LAT, dLon = km * 1000 / (R_LAT * Math.cos(((b.north + b.south) / 2) * DEG)); return {south:b.south - dLat, north:b.north + dLat, west:b.west - dLon, east:b.east + dLon}; }
+function unionBBox(a, b){ return {south:Math.min(a.south, b.south), north:Math.max(a.north, b.north), west:Math.min(a.west, b.west), east:Math.max(a.east, b.east)}; }
+function tileRange(b, z){ const n = Math.pow(2, z), cl = v => Math.max(0, Math.min(n - 1, v));
+  return {x0:cl(Math.floor(lonToX(b.west, z) / TILE)), x1:cl(Math.floor(lonToX(b.east, z) / TILE)), y0:cl(Math.floor(latToY(b.north, z) / TILE)), y1:cl(Math.floor(latToY(b.south, z) / TILE))}; }
+function countRange(r){ return (r.x1 - r.x0 + 1) * (r.y1 - r.y0 + 1); }
+function parseLatLon(s){ const m = (s || "").match(/(-?\d+(?:[.,]\d+)?)\s*[,;\s]\s*(-?\d+(?:[.,]\d+)?)/); if(!m) return null; const la = parseFloat(m[1].replace(",", ".")), lo = parseFloat(m[2].replace(",", ".")); return (Math.abs(la) <= 90 && Math.abs(lo) <= 180) ? {lat:la, lon:lo} : null; }
+function buildPlan(){
+  if(!PKG || !PKG.region) return null;
+  const bm = bmById($("offBm").value); if(bm.id === "none") return null;
+  const design = PKG.region, radius = parseFloat($("offRad").value) || 15;
+  let region = expandBBox(design, radius);
+  const extras = [];
+  if($("offGps").checked && realGps) extras.push({lat:realGps.lat, lon:realGps.lon});
+  const ex = parseLatLon($("offExtra").value); if(ex) extras.push(ex);
+  extras.forEach(p => { region = unionBBox(region, expandBBox({south:p.lat, north:p.lat, west:p.lon, east:p.lon}, 3)); });
+  const detail = expandBBox(design, 0.4), cap = bm.capTiles || 6000, capRegion = Math.round(cap * 0.55);
+  const tiles = new Map(); let regionMaxZ = 3;
+  for(let z = 3; z <= Math.min(bm.maxNative, 15); z++){
+    if(countRange(tileRange(region, z)) > capRegion && z > 8) break;
+    regionMaxZ = z;
+  }
+  const add = (b, z0, z1) => { for(let z = z0; z <= z1; z++){ const r = tileRange(b, z); for(let x = r.x0; x <= r.x1; x++) for(let y = r.y0; y <= r.y1; y++) tiles.set(z + "/" + x + "/" + y, [z, x, y]); } };
+  add(region, 3, regionMaxZ);
+  let detMaxZ = regionMaxZ;
+  for(let z = regionMaxZ + 1; z <= bm.maxNative; z++){
+    let tot = tiles.size; const r = tileRange(detail, z); if(tot + countRange(r) > cap) break; add(detail, z, z); detMaxZ = z;
+  }
+  return {bm, list:Array.from(tiles.values()), regionMaxZ, detMaxZ, region, detail, mb:tiles.size * (bm.kb || 20) / 1024};
+}
+function renderPlan(){
+  const p = buildPlan(), el = $("offPlan");
+  $("offGpsNote").textContent = realGps ? `Posisi saat ini: ${realGps.lat.toFixed(4)}, ${realGps.lon.toFixed(4)}` : "Aktifkan GPS dulu agar ikut tercakup";
+  if(!p){ el.textContent = PKG ? "Pilih peta dasar Satelit atau Peta jalan." : "Muat data proyek dulu."; $("offGo").disabled = true; return null; }
+  $("offGo").disabled = offBusy;
+  const spanKm = Math.max(geoDist(p.region.south, p.region.west, p.region.south, p.region.east), geoDist(p.region.south, p.region.west, p.region.north, p.region.west)) / 1000;
+  el.className = "status";
+  el.innerHTML = `Cakupan ±${spanKm.toFixed(0)} km sampai zoom ${p.regionMaxZ}, rinci di sekitar desain sampai zoom ${p.detMaxZ}.<br><b>${p.list.length.toLocaleString("id-ID")} tile · perkiraan ${p.mb.toFixed(0)} MB</b>` + (p.bm.id === "osm" ? "<br>Peta jalan OSM dibatasi agar tidak membebani server publik." : "");
+  return p;
+}
+async function runOffline(){
+  const p = renderPlan(); if(!p || offBusy) return;
+  if(!navigator.onLine){ $("offStatus").textContent = "Perlu internet untuk mengunduh."; $("offStatus").className = "status err"; return; }
+  offBusy = true; offAbort = false; $("offGo").disabled = true; $("offCancel").style.display = ""; $("offBarWrap").style.display = "block";
+  let done = 0, ok = 0, fail = 0, bytes = 0; const total = p.list.length; let idx = 0;
+  try{ if(navigator.storage && navigator.storage.persist) navigator.storage.persist(); }catch(_){}
+  const worker = async () => {
+    while(!offAbort){
+      const i = idx++; if(i >= total) return; const [z, x, y] = p.list[i]; const k = tkey(p.bm, z, x, y);
+      try{
+        if(await tileHas(k)){ ok++; }
+        else { const rec = await netFetchTile(p.bm, z, x, y); if(rec){ await tilePut(k, rec); ok++; bytes += rec.buf.byteLength; } else fail++; }
+      }catch(_){ fail++; }
+      done++;
+      if(done % 8 === 0 || done === total){ $("offBar").style.width = (100 * done / total).toFixed(1) + "%"; $("offStatus").className = "status"; $("offStatus").textContent = `${done.toLocaleString("id-ID")} / ${total.toLocaleString("id-ID")} tile · ${(bytes / 1048576).toFixed(1)} MB diunduh${fail ? " · " + fail + " gagal" : ""}`; }
+    }
+  };
+  await Promise.all(Array.from({length:6}, worker));
+  offBusy = false; $("offGo").disabled = false; $("offCancel").style.display = "none";
+  const cancelled = offAbort;
+  $("offStatus").className = "status " + (fail === 0 && !cancelled ? "ok" : "warn");
+  $("offStatus").textContent = (cancelled ? "Dibatalkan. " : "Selesai. ") + `${ok.toLocaleString("id-ID")} tile tersimpan di HP${fail ? ", " + fail + " gagal (coba ulangi)" : ""}.`;
+  kvSet("offline_meta", {bm:p.bm.id, count:ok, when:Date.now(), region:p.region});
+  tileMem.forEach((v, k2) => { if(v.status === "miss") tileMem.delete(k2); });
+  refreshStorage(); requestDraw();
+}
+async function refreshStorage(){
+  const n = await tileCount(); let s = "";
+  try{ if(navigator.storage && navigator.storage.estimate){ const e = await navigator.storage.estimate(); s = ` · memakai ${(e.usage / 1048576).toFixed(0)} MB dari ${(e.quota / 1048576).toFixed(0)} MB`; } }catch(_){}
+  $("storeInfo").textContent = `Peta offline tersimpan: ${n.toLocaleString("id-ID")} tile${s}.`;
+}
+
+/* ---------------------------------------------------------------- diagnosa lokasi */
+function renderDiag(){
+  const kv = $("diag"), seg = curSeg(); const rows = [];
+  const g = gps;
+  if(!g){ kv.innerHTML = "<span>Posisi</span><span>belum ada, aktifkan GPS</span>"; $("diagLinks").innerHTML = ""; }
+  else {
+    const q = accQuality(g.acc), age = Math.round((Date.now() - g.ts) / 1000), zn = PKG ? (PKG.utm_zone || 50) : 50, sth = PKG ? PKG.utm_south !== false : true, u = latLonToUTM(g.lat, g.lon, zn, sth);
+    rows.push(["Lintang, bujur", `${g.lat.toFixed(6)}, ${g.lon.toFixed(6)}`], ["Akurasi", `±${Math.round(g.acc)} m (${q.label})`], ["Usia pembacaan", `${age} dtk`]);
+    rows.push(["UTM zona " + zn + (sth ? "S" : "N"), `E ${u.x.toFixed(1)}  N ${u.y.toFixed(1)}`]);
+    if(g.alt != null) rows.push(["Ketinggian GPS", `${g.alt.toFixed(0)} m`]);
+    if(seg && seg.bbox){ const info = designInfo(g, seg); rows.push(["Jarak ke batas desain", info.inside ? "di dalam" : fmtDist(info.dist) + " (elipsoid WGS84)"]); const cx = (seg.bbox.north + seg.bbox.south) / 2, cy = (seg.bbox.east + seg.bbox.west) / 2; rows.push(["Pusat desain", `${cx.toFixed(5)}, ${cy.toFixed(5)}`]); }
+    kv.innerHTML = rows.map(r => `<span>${r[0]}</span><span class="num">${r[1]}</span>`).join("");
+    let links = `<a class="btn ghost" style="text-decoration:none" target="_blank" rel="noopener" href="https://www.google.com/maps?q=${g.lat},${g.lon}">Posisi saya di Google Maps</a>`;
+    if(seg && seg.bbox){ const cx = (seg.bbox.north + seg.bbox.south) / 2, cy = (seg.bbox.east + seg.bbox.west) / 2; links += `<a class="btn ghost" style="text-decoration:none" target="_blank" rel="noopener" href="https://www.google.com/maps?q=${cx},${cy}">Pusat desain di Google Maps</a>`; }
+    $("diagLinks").innerHTML = links;
+    const n = $("diagNote");
+    if(g.acc > 1000){ n.className = "status err"; n.textContent = `Akurasi ±${Math.round(g.acc)} m: ini lokasi perkiraan dari jaringan/IP, bukan GPS. Aktifkan Lokasi dengan akurasi tinggi (Android: izinkan "lokasi tepat") lalu ketuk chip GPS.`; }
+    else if(g.acc > 200){ n.className = "status warn"; n.textContent = "Akurasi rendah, kemungkinan memakai sinyal menara seluler/Wi-Fi. Tunggu GPS mengunci atau pindah ke area terbuka."; }
+    else if(!n.textContent.startsWith("Dibuka") && !/ditolak|tidak ditemukan|habis/.test(n.textContent)){ n.className = "status ok"; n.textContent = "Posisi GPS baik."; }
+  }
+}
+
+/* ---------------------------------------------------------------- legenda & pengaturan UI */
+function renderLegend(){
+  const seg = curSeg(), box = $("legendRows"); box.innerHTML = "";
+  if(!seg || !seg.legend.length){ box.innerHTML = '<div class="hint" style="padding:6px 8px">Tidak ada lapisan.</div>'; return; }
+  seg.legend.forEach(l => {
+    const row = document.createElement("div"); row.className = "lrow" + (l.key && hidden.has(l.key) ? " off" : ""); row.dataset.type = l.type || "";
+    row.innerHTML = `<span class="sw" style="background:${l.color}"></span><span class="lbl">${l.label}</span>`;
+    if(l.key) row.onclick = () => { hidden.has(l.key) ? hidden.delete(l.key) : hidden.add(l.key); renderLegend(); requestDraw(); };
+    box.appendChild(row);
   });
 }
-
-/* ============================ Navigasi bawah ============================ */
-document.querySelectorAll("nav button").forEach(btn=>{
-  btn.onclick = ()=>{
-    document.querySelectorAll("nav button").forEach(b=>b.classList.remove("active"));
-    btn.classList.add("active");
-    document.querySelectorAll("main > div").forEach(v=>v.classList.remove("active"));
-    document.getElementById(btn.dataset.view).classList.add("active");
-    if(btn.dataset.view==="mapView") resizeCanvas();
-  };
-});
-
-/* ============================ Load data ============================ */
-function setStatus(msg, cls){
-  els.loadStatus.textContent = msg;
-  els.loadStatus.className = "status" + (cls?(" "+cls):"");
+function renderBmSeg(){
+  const seg = $("bmSeg"); seg.innerHTML = "";
+  allBasemaps().forEach(b => { const bt = document.createElement("button"); bt.textContent = b.label; bt.className = b.id === S.basemap ? "on" : ""; bt.onclick = () => { S.basemap = b.id; saveSettings(); renderBmSeg(); requestDraw(); }; seg.appendChild(bt); });
+  const sel = $("offBm"); const cur = sel.value; sel.innerHTML = "";
+  allBasemaps().filter(b => b.id !== "none").forEach(b => { const o = document.createElement("option"); o.value = b.id; o.textContent = b.label; sel.appendChild(o); });
+  if(cur) sel.value = cur;
+}
+function renderAlertToggles(){
+  const box = $("alertToggles"); box.innerHTML = "";
+  ALERT_DEFS.forEach(d => {
+    const row = document.createElement("div"); row.className = "tg";
+    row.innerHTML = `<span class="sw" style="background:${d.color}; width:14px; height:14px; border-radius:4px"></span><div class="l">${d.label}<small>${d.kind === "erosi" ? "Dari kelas zona erosi" : "Dari potensi sedimentasi"}</small></div>`;
+    const cb = document.createElement("input"); cb.type = "checkbox"; cb.className = "sw2"; cb.checked = !!S.alerts[d.id];
+    cb.onchange = () => { S.alerts[d.id] = cb.checked; AL.cls = null; AL.pending = null; setFrame(); hideBanner(); saveSettings(); if(gps) processAlerts(gps); };
+    row.appendChild(cb); box.appendChild(row);
+  });
+  const note = document.createElement("div"); note.className = "status"; note.id = "zoneGate"; box.appendChild(note);
+}
+let _saveT = null;
+function saveSettings(){ clearTimeout(_saveT); _saveT = setTimeout(() => kvSet("settings", S), 300); }
+function syncSettingsUI(){
+  $("setVib").checked = !!S.vib; $("setSnd").checked = !!S.snd; $("setWake").checked = !!S.wake;
+  $("setApproach").value = String(S.approach); $("setAcc").value = String(S.minAcc); $("riskOp").value = S.riskOpacity; $("customUrl").value = S.customUrl || "";
+  const ns = $("notifState"); ns.textContent = !window.Notification ? "Tidak didukung browser ini" : Notification.permission === "granted" ? "Diizinkan (tampil saat aplikasi di latar)" : Notification.permission === "denied" ? "Diblokir di pengaturan browser" : "Belum diizinkan";
 }
 
+/* ---------------------------------------------------------------- muat paket */
+function setStatus(msg, cls){ $("loadStatus").textContent = msg; $("loadStatus").className = "status" + (cls ? " " + cls : ""); }
 function applyPackage(pkg, persist){
-  PKG = pkg; curSegIdx = 0;
-  renderSegSelect(); onSegChange();
-  const nSeg = pkg.segments?.length||0;
-  els.dataInfo.textContent = `${nSeg} segmen dimuat.` +
-    (pkg.generated_at ? ` Diekspor: ${pkg.generated_at}.` : "");
-  if(persist) idbSet("last_package", pkg);
+  PKG = normalizePackage(pkg); curSegIdx = 0; AL.cls = null; AL.pending = null; setFrame();
+  const sel = $("segSelect"); sel.innerHTML = "";
+  PKG.segments.forEach((s, i) => { const o = document.createElement("option"); o.value = i; o.textContent = s.label || s.id; sel.appendChild(o); });
+  const hasGeo = PKG.segments.some(s => s.geo);
+  $("dataInfo").textContent = `${PKG.segments.length} segmen dimuat.` + (PKG.generated_at ? ` Diekspor ${PKG.generated_at}.` : "") + (hasGeo ? "" : " Paket lama: ekspor ulang untuk peringatan zona.");
+  $("dataInfo").className = "status" + (hasGeo ? "" : " warn");
+  onSegChange(true);
+  if(persist) kvSet("last_package", pkg);
+  renderPlan();
+}
+function onSegChange(first){
+  const s = curSeg(); renderLegend(); updateSheet(); renderDiag();
+  if(s && s.bbox){ const t = (viewMode === "auto" && gps) ? autoTarget() : fitBBox(s.bbox, 0.12); if(t){ const wy = latToY(t.lat, t.zoom) + (t.offY || 0); view.zoom = t.zoom; view.lat = yToLat(wy, t.zoom); view.lon = t.lon; } }
+  requestDraw();
 }
 
-els.fileInput.onchange = async (e)=>{
-  const f = e.target.files[0]; if(!f) return;
-  try{
-    const txt = await f.text();
-    const pkg = JSON.parse(txt);
-    if(!pkg.segments || !pkg.segments.length) throw new Error("File tidak punya field 'segments'.");
-    applyPackage(pkg, true);
-    setStatus("Berhasil dimuat & disimpan offline di HP ini.", "ok");
-  }catch(err){
-    setStatus("Gagal memuat file: " + err.message, "err");
-  }
-};
-
-document.getElementById("clearDataBtn").onclick = async ()=>{
-  await idbDel("last_package");
-  PKG = null; renderSegSelect(); onSegChange();
-  els.dataInfo.textContent = "Belum ada data.";
-  setStatus("Data tersimpan sudah dihapus.", "");
-};
-
+/* ---------------------------------------------------------------- data contoh (lokasi Tabalong) */
 function sampleData(){
-  const w=300, h=170;
-  const c = document.createElement("canvas"); c.width=w; c.height=h;
-  const g = c.getContext("2d");
-  const grad = g.createLinearGradient(0,0,w,h);
-  grad.addColorStop(0,"#3DBF8C"); grad.addColorStop(0.55,"#D3D95C"); grad.addColorStop(1,"#d8483f");
-  g.fillStyle=grad; g.fillRect(0,0,w,h);
-  g.strokeStyle="rgba(0,0,0,0.25)"; g.lineWidth=2;
-  for(let i=0;i<6;i++){ g.beginPath(); g.moveTo(0, 20+i*26); g.bezierCurveTo(w*0.3,10+i*26,w*0.7,40+i*26,w,15+i*26); g.stroke(); }
-  return {
-    epsg: "EPSG:32750", utm_zone: 50, utm_south: true,
-    generated_at: "contoh",
-    segments: [
-      { id:"seg1", label:"Channel A (contoh)", layers:{base:c.toDataURL("image/png")},
-        bounds_utm:{xmin:500000, xmax:500300, ymin:9500000, ymax:9500170},
-        // catatan: krn contoh ini cuma 1 gambar gepeng (bukan layer per-kelas spt hasil ekspor asli),
-        // baris warna zona di sini TIDAK punya "key" (bukan yg ditoggle) -- tapi "critical_points" &
-        // "sediment_points" DIBERI titik contoh supaya fitur toggle-nya tetap bisa dicoba dari sini.
-        legend:[{label:"Hijau (Normal)",color:"#3DBF8C"},{label:"Kuning (Waspada)",color:"#D3D95C"},
-                {label:"Oranye (Siaga)",color:"#e08a2b"},{label:"Merah (Kritis)",color:"#d8483f"},
-                {key:"critical_points",type:"points",label:"Titik erosi kritis (contoh)",color:"#8a0000"},
-                {key:"sediment_points",type:"points",label:"Titik sedimentasi tinggi (contoh)",color:"#2b7fff"}],
-        critical_points:[{x:500150,y:9500085},{x:500210,y:9500060}],
-        sediment_points:[{x:500090,y:9500110},{x:500170,y:9500040},{x:500240,y:9500095}],
-        // contoh boundary_points (poligon desain, vektor) -- dipakai fitur "jarak ke desain":
-        // ketuk peta / aktifkan GPS lalu lihat badge di atas peta.
-        boundary_points:[[{x:500040,y:9500020},{x:500260,y:9500010},{x:500280,y:9500150},
-                           {x:500060,y:9500160},{x:500040,y:9500020}]]
-      }
-    ]
-  };
+  const lat0 = -2.1905, lon0 = 115.4510, kx = 1 / (R_LAT * Math.cos(lat0 * DEG)), ky = 1 / R_LAT;
+  const P = (x, y) => [lat0 + y * ky, lon0 + x * kx];
+  const ring = [[-420, -260], [380, -300], [470, 120], [60, 330], [-380, 210]].map(p => P(p[0], p[1]));
+  const blob = (cx, cy, rx, ry, n = 28) => Array.from({length:n}, (_, i) => { const a = i / n * 2 * Math.PI; return P(cx + rx * Math.cos(a), cy + ry * Math.sin(a)); });
+  const geoGrid = (() => { // grid kelas contoh: elips merah di (-60,30) & sedimentasi tinggi di (240,-120) dalam UTM lokal
+    const u0 = latLonToUTM(lat0, lon0, 50, true), cell = 3, nx = 340, ny = 260, xmin = u0.x - 510, ymax = u0.y + 380, arr = new Uint8Array(nx * ny);
+    for(let r = 0; r < ny; r++) for(let c = 0; c < nx; c++){
+      const x = xmin + (c + .5) * cell - u0.x, y = ymax - (r + .5) * cell - u0.y;
+      const inside = pointInRing(lat0 + y * ky, lon0 + x * kx, ring); let e = inside ? 0 : 15, s = 0;
+      if(inside){ if(((x + 60) / 90) ** 2 + ((y - 30) / 55) ** 2 < 1) e = 3; else if(((x + 60) / 150) ** 2 + ((y - 30) / 100) ** 2 < 1) e = 2; else if(((x + 60) / 260) ** 2 + ((y - 30) / 190) ** 2 < 1) e = 1;
+        if(((x - 240) / 70) ** 2 + ((y + 120) / 50) ** 2 < 1) s = 2; else if(((x - 240) / 120) ** 2 + ((y + 120) / 90) ** 2 < 1) s = 1; }
+      arr[r * nx + c] = (s << 4) | e;
+    }
+    const rle = []; let v = arr[0], n = 0; for(let i = 0; i < arr.length; i++){ if(arr[i] === v) n++; else { rle.push(v, n); v = arr[i]; n = 1; } } rle.push(v, n);
+    return {epsg:"EPSG:32750", zone:50, south:true, xmin, ymax, cell, nx, ny, rle};
+  })();
+  const bb = {south:lat0 - 300 * ky, north:lat0 + 340 * ky, west:lon0 - 430 * kx, east:lon0 + 480 * kx};
+  return {version:2, epsg:"EPSG:32750", utm_zone:50, utm_south:true, generated_at:"contoh", region:bb,
+    segments:[{id:"seg1", label:"Contoh: Channel A (Tabalong)", layers:{}, legend:[{key:"zone_3", type:"layer", label:"Merah (Kritis)", color:"#d8483f"}, {key:"critical_points", type:"points", label:"Titik erosi kritis", color:"#8a0000"}],
+      outlines:{zone_3:[blob(-60, 30, 90, 55)], zone_2:[blob(-60, 30, 150, 100)], sed_2:[blob(240, -120, 70, 50)]}, boundary_ll:[[ring]], critical_ll:[P(-60, 30)], sediment_ll:[P(240, -120)],
+      geo:geoGrid, bbox:bb, stats:{area_ha:{zone_3:1.5, sed_2:1.1}}}]};
 }
-document.getElementById("loadSampleBtn").onclick = ()=>{
-  applyPackage(sampleData(), false);
-  setStatus("Contoh data dimuat (tidak disimpan).", "ok");
-};
 
-/* ============================ Init ============================ */
+/* ---------------------------------------------------------------- koordinat manual / pin */
+function plotCoord(){
+  if(!curSeg()){ $("coordStatus").textContent = "Muat data proyek dulu."; $("coordStatus").className = "status err"; return; }
+  let a = $("coordInput1").value.trim(), b = $("coordInput2").value.trim(), pt = null;
+  if($("coordFormat").value === "latlon"){ pt = (a && b) ? parseLatLon(a + "," + b) : parseLatLon(a); }
+  else { const x = parseFloat(a.replace(",", ".")), y = parseFloat(b.replace(",", ".")); if(isFinite(x) && isFinite(y)){ const q = utmToLatLon(x, y, PKG.utm_zone || 50, PKG.utm_south !== false); pt = {lat:q.lat, lon:q.lon}; } }
+  if(!pt){ $("coordStatus").textContent = "Koordinat tidak valid. Contoh: -2.190000 dan 115.450000."; $("coordStatus").className = "status err"; return; }
+  targetPt = pt; $("coordStatus").textContent = `Pin di ${pt.lat.toFixed(6)}, ${pt.lon.toFixed(6)}.`; $("coordStatus").className = "status ok";
+  gotoView("mapView"); setMode("manual"); view.lat = pt.lat; view.lon = pt.lon; view.zoom = Math.max(view.zoom, 15); updateSheet(); requestDraw();
+}
+
+/* ---------------------------------------------------------------- simulasi untuk uji */
+function startSim(){
+  const seg = curSeg(); if(!seg){ $("testStatus").textContent = "Muat data proyek dulu."; $("testStatus").className = "status err"; return; }
+  ensureAudio();
+  let pt = null;
+  const pool = (seg.critical_ll && seg.critical_ll.length) ? seg.critical_ll : (seg.sediment_ll || []);
+  if(pool.length){ const ref = gps || {lat:seg.bbox.south, lon:seg.bbox.west}; pt = pool.slice().sort((p, q) => geoDist(ref.lat, ref.lon, p[0], p[1]) - geoDist(ref.lat, ref.lon, q[0], q[1]))[0]; }
+  if(!pt){ $("testStatus").textContent = "Paket ini tidak punya titik zona kritis untuk disimulasikan."; $("testStatus").className = "status err"; return; }
+  simOn = true; $("simBtn").style.display = "none"; $("simStopBtn").style.display = "";
+  // mulai dari titik 80 m di luar zona (bila ada medan), lalu masuk: tampilkan alur lengkap
+  const start = {lat:pt[0] + 80 / R_LAT, lon:pt[1], acc:5, ts:Date.now(), heading:null, speed:0, sim:true};
+  AL.cls = null; AL.approachArmed = true; setViewModeForSim();
+  onFix(start); setGpsChip();
+  let k = 0; clearInterval(simTimer);
+  simTimer = setInterval(() => { k++; const f = Math.min(1, k / 8); const p = {lat:pt[0] + 80 / R_LAT * (1 - f), lon:pt[1], acc:5, ts:Date.now(), heading:180, speed:3, sim:true}; onFix(p); if(k >= 10) clearInterval(simTimer); }, 1200);
+  $("testStatus").textContent = "Simulasi berjalan: posisi bergerak masuk ke titik kritis. Buka tab Peta untuk melihat."; $("testStatus").className = "status ok";
+  gotoView("mapView");
+}
+let simTimer = null;
+function setViewModeForSim(){ setMode("auto"); }
+function stopSim(){
+  clearInterval(simTimer); simOn = false; $("simBtn").style.display = ""; $("simStopBtn").style.display = "none";
+  gps = realGps ? {...realGps} : null; AL.cls = null; setFrame(); hideBanner(); updateSheet(); setGpsChip(); renderDiag(); requestDraw();
+  $("testStatus").textContent = "Simulasi dihentikan."; $("testStatus").className = "status";
+}
+
+/* ---------------------------------------------------------------- navigasi & pengikatan UI */
+function gotoView(id){
+  document.querySelectorAll("nav button").forEach(b => b.classList.toggle("active", b.dataset.view === id));
+  document.querySelectorAll(".view").forEach(v => v.classList.toggle("active", v.id === id));
+  if(id === "mapView") resizeCanvas(); if(id === "dataView"){ renderDiag(); renderPlan(); refreshStorage(); } if(id === "alertView") renderLog();
+}
+function resizeCanvas(){
+  const cv = $("map"), r = cv.parentElement.getBoundingClientRect(); if(!r.width) return;
+  dpr = Math.min(window.devicePixelRatio || 1, 3); cssW = r.width; cssH = r.height;
+  cv.width = Math.round(cssW * dpr); cv.height = Math.round(cssH * dpr); g2 = cv.getContext("2d");
+  updateSheetPos(); requestDraw();
+}
+function bindUI(){
+  ["sheet", "sheetBody", "empty", "modeBtn", "tileNote"].forEach(id => els[id] = $(id));
+  els.sheetBody = $("sheetBody"); els.sheet = $("sheet");
+  document.querySelectorAll("nav button").forEach(b => b.onclick = () => gotoView(b.dataset.view));
+  $("segSelect").onchange = e => { curSegIdx = +e.target.value; AL.cls = null; setFrame(); onSegChange(); if(viewMode === "auto") applyMode(0); };
+  $("zoomIn").onclick = () => { userMoved(); zoomAt(cssW / 2, cssH / 2, 0.8); requestDraw(); };
+  $("zoomOut").onclick = () => { userMoved(); zoomAt(cssW / 2, cssH / 2, -0.8); requestDraw(); };
+  $("fitBtn").onclick = () => { const s = curSeg(); if(!s || !s.bbox) return; setMode("manual"); animateTo(fitBBox(s.bbox, 0.1), 450); };
+  $("modeBtn").onclick = () => { const next = viewMode === "auto" ? "follow" : viewMode === "follow" ? "manual" : "auto"; if(next === "follow" && !gps){ startGPS(); } setMode(next); if(next !== "manual") applyMode(500); };
+  $("pinBtn").onclick = () => { pinMode = !pinMode; $("pinBtn").classList.toggle("on", pinMode); };
+  $("layerBtn").onclick = () => $("layerPop").classList.toggle("show");
+  $("riskOp").oninput = e => { S.riskOpacity = +e.target.value; saveSettings(); requestDraw(); };
+  $("abOk").onclick = hideBanner;
+  $("gpsChip").onclick = startGPS;
+  $("netChip").onclick = () => { gotoView("dataView"); };
+  $("grab").onclick = () => { S.sheetOpen = !S.sheetOpen; updateSheet(); saveSettings(); };
+  // pengaturan peringatan
+  $("setVib").onchange = e => { S.vib = e.target.checked; saveSettings(); };
+  $("setSnd").onchange = e => { S.snd = e.target.checked; saveSettings(); };
+  $("setWake").onchange = e => { S.wake = e.target.checked; saveSettings(); if(S.wake && watchId !== null) acquireWake(); else if(wakeLock) wakeLock.release(); };
+  $("setApproach").onchange = e => { S.approach = +e.target.value; AL.approachArmed = true; saveSettings(); };
+  $("setAcc").onchange = e => { S.minAcc = +e.target.value; saveSettings(); };
+  $("notifBtn").onclick = async () => { try{ if(window.Notification){ await Notification.requestPermission(); } }catch(_){} syncSettingsUI(); };
+  $("testBtn").onclick = () => { ensureAudio(); fireAlert("test", null, {lat:0, lon:0, acc:5}, curSeg()); $("testStatus").textContent = "Peringatan uji dikirim."; $("testStatus").className = "status ok"; };
+  $("simBtn").onclick = startSim; $("simStopBtn").onclick = stopSim;
+  $("logClear").onclick = () => { logItems = []; kvSet("alert_log", []); renderLog(); };
+  $("logCsv").onclick = () => {
+    const rows = [["waktu", "jenis", "zona", "lat", "lon", "akurasi_m", "jarak_m", "segmen", "simulasi"]].concat(logItems.map(x => [new Date(x.t).toISOString(), x.kind, x.label, x.lat, x.lon, x.acc, x.dist == null ? "" : x.dist, x.seg, x.sim ? 1 : 0]));
+    const blob = new Blob([rows.map(r => r.map(v => '"' + String(v).replace(/"/g, '""') + '"').join(",")).join("\n")], {type:"text/csv"});
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "riwayat_peringatan_eromaps.csv"; document.body.appendChild(a); a.click(); a.remove();
+  };
+  // data
+  $("fileInput").onchange = async e => { const f = e.target.files[0]; if(!f) return; try{ const pkg = JSON.parse(await f.text()); if(!pkg.segments || !pkg.segments.length) throw new Error("File tidak punya field 'segments'."); applyPackage(pkg, true); setStatus("Berhasil dimuat dan disimpan di HP ini.", "ok"); }catch(err){ setStatus("Gagal memuat file: " + err.message, "err"); } };
+  $("loadSampleBtn").onclick = () => { applyPackage(sampleData(), false); setStatus("Contoh dimuat (tidak disimpan).", "ok"); gotoView("mapView"); };
+  $("clearDataBtn").onclick = async () => { await kvDel("last_package"); PKG = null; $("segSelect").innerHTML = ""; $("dataInfo").textContent = ""; setStatus("Data tersimpan dihapus.", ""); updateSheet(); requestDraw(); };
+  ["offBm", "offRad", "offGps", "offExtra"].forEach(id => $(id).addEventListener("change", renderPlan)); $("offExtra").addEventListener("input", renderPlan);
+  $("offGo").onclick = runOffline; $("offCancel").onclick = () => { offAbort = true; };
+  $("offClear").onclick = async () => { if(offBusy) return; await tileClear(); tileMem.clear(); await kvDel("offline_meta"); $("offStatus").textContent = "Peta offline dihapus."; $("offStatus").className = "status"; refreshStorage(); requestDraw(); };
+  $("customUrl").onchange = e => { S.customUrl = e.target.value.trim(); saveSettings(); renderBmSeg(); renderPlan(); };
+  $("coordFormat").onchange = () => { const l = $("coordFormat").value === "latlon"; $("coordInput1").placeholder = l ? "Lat  (mis. -2.190000)" : "UTM Timur (meter)"; $("coordInput2").placeholder = l ? "Lon  (mis. 115.450000)" : "UTM Utara (meter)"; };
+  $("plotCoordBtn").onclick = plotCoord;
+  $("clearTargetBtn").onclick = () => { targetPt = null; $("coordInput1").value = ""; $("coordInput2").value = ""; $("coordStatus").textContent = "Pin dihapus."; $("coordStatus").className = "status"; updateSheet(); requestDraw(); };
+  const updNet = () => { const c = $("netChip"); c.className = "chip " + (navigator.onLine ? "ok" : "off"); c.querySelector("span").textContent = navigator.onLine ? "Online" : "Offline"; if(navigator.onLine) tileMem.forEach((v, k) => { if(v.status === "miss") tileMem.delete(k); }); requestDraw(); };
+  window.addEventListener("online", updNet); window.addEventListener("offline", updNet); updNet();
+  window.addEventListener("resize", resizeCanvas);
+  if(window.ResizeObserver) new ResizeObserver(resizeCanvas).observe($("mapView"));
+  bindGestures();
+}
+function bindGestures(){
+  const cv = $("map"), ptrs = new Map(); let downAt = 0, moved = 0, startPos = null;
+  const rel = e => { const r = cv.getBoundingClientRect(); return {x:e.clientX - r.left, y:e.clientY - r.top}; };
+  cv.addEventListener("pointerdown", e => { cv.setPointerCapture(e.pointerId); ptrs.set(e.pointerId, rel(e)); if(ptrs.size === 1){ downAt = Date.now(); moved = 0; startPos = rel(e); } $("layerPop").classList.remove("show"); });
+  cv.addEventListener("pointermove", e => {
+    if(!ptrs.has(e.pointerId)) return; const prev = ptrs.get(e.pointerId), cur = rel(e);
+    if(ptrs.size === 1){ const dx = cur.x - prev.x, dy = cur.y - prev.y; moved += Math.abs(dx) + Math.abs(dy); if(moved > 8){ userMoved(); panPx(dx, dy); requestDraw(); } }
+    else if(ptrs.size === 2){
+      const other = [...ptrs.entries()].find(([id]) => id !== e.pointerId)[1];
+      const d0 = Math.hypot(prev.x - other.x, prev.y - other.y), d1 = Math.hypot(cur.x - other.x, cur.y - other.y);
+      const m0 = {x:(prev.x + other.x) / 2, y:(prev.y + other.y) / 2}, m1 = {x:(cur.x + other.x) / 2, y:(cur.y + other.y) / 2};
+      userMoved(); moved = 99; panPx(m1.x - m0.x, m1.y - m0.y); if(d0 > 0) zoomAt(m1.x, m1.y, Math.log2(d1 / d0)); requestDraw();
+    }
+    ptrs.set(e.pointerId, cur);
+  });
+  const up = e => {
+    const wasOne = ptrs.size === 1; ptrs.delete(e.pointerId);
+    if(wasOne && moved <= 8 && Date.now() - downAt < 600 && curSeg() && pinMode && startPos){
+      const z = view.zoom, wx = lonToX(view.lon, z) + (startPos.x - cssW / 2), wy = latToY(view.lat, z) + (startPos.y - cssH / 2);
+      targetPt = {lat:yToLat(wy, z), lon:xToLon(wx, z)}; updateSheet(); requestDraw();
+    }
+  };
+  cv.addEventListener("pointerup", up); cv.addEventListener("pointercancel", e => ptrs.delete(e.pointerId));
+  cv.addEventListener("wheel", e => { e.preventDefault(); const p = rel(e); userMoved(); zoomAt(p.x, p.y, -e.deltaY * 0.0022); requestDraw(); }, {passive:false});
+  cv.addEventListener("dblclick", e => { const p = rel(e); userMoved(); zoomAt(p.x, p.y, 1); requestDraw(); });
+}
+
+/* ---------------------------------------------------------------- init */
 (async function init(){
-  resizeCanvas();
-  const problem = gpsOriginProblem();
-  if(problem) els.gpsBadge.textContent = "⚠️ GPS tidak bisa diaktifkan (ketuk utk detail)";
-  const saved = await idbGet("last_package");
-  if(saved){ applyPackage(saved, false); setStatus("Memuat data tersimpan sebelumnya.", "ok"); }
-  else { applyPackage(sampleData(), false); setStatus("Belum ada data proyek — ini contoh tampilan.", ""); }
+  bindUI(); setMode("auto"); resizeCanvas();
+  renderAlertToggles();
+  const saved = await kvGet("settings"); if(saved) Object.assign(S, saved, {alerts:Object.assign({}, S.alerts, saved.alerts || {})});
+  logItems = (await kvGet("alert_log")) || [];
+  syncSettingsUI(); renderBmSeg(); renderAlertToggles(); renderLog(); refreshStorage();
+  const pk = await kvGet("last_package");
+  if(pk){ applyPackage(pk, false); setStatus("Memuat data tersimpan sebelumnya.", "ok"); }
+  else { applyPackage(sampleData(), false); setStatus("Belum ada data proyek. Ini contoh tampilan; muat file .json Anda.", ""); }
+  try{ if(navigator.permissions && navigator.permissions.query){ const st = await navigator.permissions.query({name:"geolocation"}); if(st.state === "granted") startGPS(); } }catch(_){}
+  const problem = gpsOriginProblem(); if(problem){ $("gpsChip").querySelector("span").textContent = "GPS tidak bisa aktif"; $("diagNote").textContent = problem; $("diagNote").className = "status err"; }
 })();
 </script>
 </body>
@@ -6468,12 +7095,12 @@ def _render_mini_avenza_page():
     try:
         if _render_html is not None:
             try:
-                _render_html(_MINI_AVENZA_HTML, height=880, scrolling=False)
+                _render_html(_MINI_AVENZA_HTML, height=960, scrolling=False)
             except TypeError:
-                _render_html(_MINI_AVENZA_HTML, height=880)
+                _render_html(_MINI_AVENZA_HTML, height=960)
         else:
             import streamlit.components.v1 as _components_avenza
-            _components_avenza.html(_MINI_AVENZA_HTML, height=880, scrolling=False)
+            _components_avenza.html(_MINI_AVENZA_HTML, height=960, scrolling=False)
     except Exception as _e_avenza_render:
         st.error(_t(
             f"Gagal menampilkan Eromaps: {_e_avenza_render}",
@@ -19293,1747 +19920,848 @@ with tab4:
             )
 
 # =========================================================
-# ======= SIMULASI AIR 3D  (HUJAN / TITIK) -- MODUL BARU ==
+# =========== SOLVER GENANGAN BANJIR (DIFFUSIVE-WAVE) =====
 # =========================================================
-# Modul ini menggantikan dua simulasi lama (debris cellular-automaton + genangan diffusive) dengan
-# SATU simulasi air saja:
-#   * Skenario "Hujan"  : hujan merata di seluruh segmen (curah hujan, C limpasan & durasi
-#                         diambil otomatis dari tab Erosion Mapping).
-#   * Skenario "Titik"  : debit masuk di titik sumber yang SAMA dengan 'Satu Titik (Point Source)'
-#                         di tab Erosion Mapping (tidak ada input koordinat lagi).
-# Solver : shallow-water 2D "local inertia" (Bates dkk., 2010 -- skema inti LISFLOOD-FP) pada grid
-#          DEM, dengan time-step adaptif (CFL), batas area TERBUKA (air bisa keluar dari area kajian)
-#          dan pembatas volume supaya neraca massa terjaga.
-# Tampilan: WebGL (three.js) -- medan 3D sungguhan, citra satelit/orthophoto DITEMPEL langsung di
-#          permukaan medan (draping), air 3D semi-transparan yang naik/turun mengikuti medan, animasi
-#          waktu + hujan + hover info. CATATAN JUJUR: tetap model ILUSTRATIF/awal, belum terkalibrasi.
-import base64 as _wsim_base64
-import json as _wsim_json
-from scipy.ndimage import (map_coordinates as _wsim_map_coordinates,
-                           distance_transform_edt as _wsim_edt,
-                           maximum_filter as _wsim_maxfilter)
+# Beda mendasar dengan simulasi debris-flow (cellular-automaton) di bawah:
+# di sini arah & besar fluks air antar sel DIHITUNG dari beda ELEVASI MUKA
+# AIR (bed + kedalaman) memakai persamaan Manning -- pendekatan "diffusive
+# wave" yang sama prinsipnya dengan LISFLOOD-FP (Bates & De Roo, 2000).
+# Karena fisikanya berbasis gradien muka air riil (bukan aturan penyebaran
+# buatan), air HANYA akan menyeberang ke sel tetangga begitu muka airnya
+# melebihi elevasi tertinggi di antara kedua sel -- ini persis definisi
+# "limpasan/overtopping" tanggul/punggungan, jadi lokasi limpasan muncul
+# otomatis dari hasil hitungan, bukan ditandai manual.
+#
+# CATATAN JUJUR: skema ini tetap SEDERHANA -- momentum/inersia diabaikan
+# (cocok utk aliran lambat yg didominasi gravitasi, spt genangan & luapan
+# dam/tanggul), BUKAN solver shallow-water 2D penuh (beda dgn ANUGA/
+# HEC-RAS 2D/FLO-2D). Untuk desain rekayasa final tetap perlu divalidasi
+# dgn software hidraulik yang tersertifikasi.
+def _simulate_flood_diffusive(grid_x, grid_y, grid_z, inside, src_xy, src_radius,
+                               src_mode, src_level, src_q, manning_n,
+                               n_frames, sec_per_frame, sub_steps=6):
+    z = np.where(np.isnan(grid_z), np.nanmin(grid_z), grid_z).astype(float)
+    dx = float(np.nanmean(np.abs(np.diff(grid_x[:, 0])))) or 1.0
+    dy = float(np.nanmean(np.abs(np.diff(grid_y[0, :])))) or 1.0
+    cell_area = dx * dy
 
+    src_mask = ((grid_x - src_xy[0]) ** 2 + (grid_y - src_xy[1]) ** 2) <= src_radius ** 2
+    src_mask = src_mask & inside
+    if not src_mask.any():
+        _ix = int(np.abs(grid_x[:, 0] - src_xy[0]).argmin())
+        _iy = int(np.abs(grid_y[0, :] - src_xy[1]).argmin())
+        src_mask = np.zeros_like(inside)
+        src_mask[_ix, _iy] = True
 
-def _wsim_contains_xy(geom, X, Y):
-    """Titik-dalam-poligon vektor (shapely 2.x: contains_xy; shapely 1.x: shapely.vectorized)."""
-    X = np.asarray(X, dtype=float)
-    Y = np.asarray(Y, dtype=float)
-    try:
-        import shapely as _shp
-        return np.asarray(_shp.contains_xy(geom, X.ravel(), Y.ravel())).reshape(X.shape)
-    except Exception:
-        from shapely import vectorized as _shpv
-        return np.asarray(_shpv.contains(geom, X, Y)).reshape(X.shape)
+    h = np.zeros_like(z)
+    if src_mode == "level":
+        h[src_mask] = np.clip(src_level - z[src_mask], 0, None)
 
+    dt = sec_per_frame / max(sub_steps, 1)
+    offsets = [(-1, 0, dy, dy), (1, 0, dy, dy), (0, -1, dx, dx), (0, 1, dx, dx)]
 
-def _wsim_axis_index(coords, query):
-    """Indeks pecahan (utk map_coordinates) dari koordinat 1D monoton (naik/turun) -> query."""
-    coords = np.asarray(coords, dtype=float)
-    idx = np.arange(coords.size, dtype=float)
-    if coords.size < 2:
-        return np.zeros_like(np.asarray(query, dtype=float))
-    if coords[0] <= coords[-1]:
-        return np.interp(query, coords, idx)
-    return np.interp(query, coords[::-1], idx[::-1])
+    h_frames = [h.copy()]
+    overflow_track = np.zeros_like(h)  # akumulasi volume yg pernah lewat tiap sel (m3)
 
+    for _f in range(n_frames):
+        for _s in range(sub_steps):
+            if src_mode == "level":
+                # tampungan dijaga tetap terisi sampai levelnya sendiri -- mensimulasikan
+                # dam/reservoir yg terus mengisi sampai melimpas sendiri via fisikanya
+                h[src_mask] = np.maximum(h[src_mask], src_level - z[src_mask])
+            else:
+                h[src_mask] += (src_q * dt) / max(src_mask.sum() * cell_area, 1e-6)
 
-def _wsim_fill_nan_nearest(a):
-    """Isi NaN dengan nilai valid terdekat (agar interpolasi tidak 'bolong')."""
-    a = np.asarray(a, dtype=float)
-    bad = ~np.isfinite(a)
-    if not bad.any():
-        return a, ~bad
-    if bad.all():
-        raise ValueError("Grid elevasi kosong (semua NaN).")
-    ind = _wsim_edt(bad, return_distances=False, return_indices=True)
-    return a[tuple(ind)], ~bad
+            S = z + h
+            Q_dir, total_out = [], np.zeros_like(h)
+            for (oy, ox, dist, width) in offsets:
+                # PERBAIKAN: dipakai fungsi shift bersama (_grid_shift_no_wrap) supaya tidak
+                # wrap-around (np.roll murni membuat tepi grid seolah "menyambung" ke tepi
+                # seberangnya, yg salah utk domain terbatas -- itu yg bikin neraca massa air
+                # tercemar & aliran kelihatan "macet"/tidak wajar). Sel tetangga yg jatuh DI
+                # LUAR grid diberi S/z sangat rendah (bukan wrap) & inside=False, jadi otomatis
+                # tersaring oleh mask nb_inside di bawah (Q=0 ke arah situ).
+                S_n = _grid_shift_no_wrap(S, oy, ox, -1e9)
+                z_n = _grid_shift_no_wrap(z, oy, ox, -1e9)
+                nb_inside = _grid_shift_no_wrap(inside.astype(np.float64), oy, ox, 0.0) > 0.5
+                dS = S - S_n
+                hflow = np.clip(np.maximum(S, S_n) - np.maximum(z, z_n), 0, None)
+                slope = np.clip(dS / dist, 1e-8, None)
+                q_unit = (1.0 / manning_n) * np.power(hflow, 5.0 / 3.0) * np.sqrt(slope)  # m2/s
+                Q = np.where((dS > 0) & inside & nb_inside, q_unit * width * dt, 0.0)      # m3
+                Q_dir.append(Q)
+                total_out += Q
 
+            avail = h * cell_area
+            scale = np.ones_like(h)
+            _over = total_out > avail
+            scale[_over] = avail[_over] / np.maximum(total_out[_over], 1e-9)
 
-def _wsim_enforce_min_slope(zf, inside, dx, dy, min_slope):
-    """Samakan perilaku aliran dgn tab Erosion Mapping (D8 steepest-descent di DEM yg sudah di-fill):
-    di sana air SELALU lanjut turun lewat area datar/cekungan terisi, sedangkan solver hidrodinamik
-    akan menggenang di dataran yg gradiennya ~0 (hanya epsilon 1e-4 m dari priority-flood).
-    Di sini tiap sel dipaksa minimal `min_slope` lebih tinggi dari penerima D8-nya (ke arah outlet):
-        z_eff[sel] = max(z_fill[sel], z_eff[penerima] + min_slope*jarak)
-    Hanya area yg lebih landai dari min_slope yg terangkat; lereng curam tidak berubah."""
-    nx, ny = zf.shape
-    ok = inside & np.isfinite(zf)
-    big = np.inf
-    best_s = np.zeros((nx, ny))
-    recv = np.full((nx, ny), -1, dtype=np.int64)
-    rec_d = np.zeros((nx, ny))
-    idx = np.arange(nx * ny).reshape(nx, ny)
-    zpad = np.pad(np.where(ok, zf, big), 1, mode="constant", constant_values=big)
-    for (oi, oj) in ((-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)):
-        zn = zpad[1 + oi:1 + oi + nx, 1 + oj:1 + oj + ny]
-        d = float(np.hypot(oi * dx, oj * dy))
-        s = (zf - zn) / d
-        better = ok & np.isfinite(zn) & (s > best_s + 1e-12)
-        best_s = np.where(better, s, best_s)
-        recv = np.where(better, idx + oi * ny + oj, recv)
-        rec_d = np.where(better, d, rec_d)
-    order = np.argsort(np.where(ok, zf, big), axis=None, kind="stable")
-    zf_flat = zf.ravel()
-    z_eff = zf_flat.copy()
-    recv_f = recv.ravel()
-    rec_d_f = rec_d.ravel()
-    ok_f = ok.ravel()
-    for k in order:
-        if not ok_f[k]:
+            vol = h * cell_area
+            for (oy, ox, dist, width), Q in zip(offsets, Q_dir):
+                Qs = Q * scale
+                vol -= Qs
+                # PERBAIKAN BUG ARAH: Qs[i,j] = volume yg dikirim dari sel (i,j) ke tetangga
+                # (i-oy, j-ox) -- jadi sel yg benar2 MENERIMA itu (i+oy, j+ox), diambil dgn
+                # shift (-oy,-ox), BUKAN (oy,ox) spt kode lama. Kode lama memakai shift yg
+                # SAMA dgn arah pengiriman, jadi volume air dikreditkan ke sel yg SALAH
+                # (bukan tetangga penerima sebenarnya) -- akibatnya air tidak benar2 mengalir
+                # turun mengikuti kemiringan spt yg terlihat konsisten di tab Erosion Mapping.
+                _received_q = _grid_shift_no_wrap(Qs, -oy, -ox, 0.0)
+                vol += _received_q
+                overflow_track += _received_q
+
+            vol = np.clip(vol, 0, None)
+            h = vol / cell_area
+            h[~inside] = 0.0
+
+        h_frames.append(h.copy())
+
+    # --- deteksi titik limpasan: sel yg BERBATASAN LANGSUNG dgn area sumber
+    # (dam/reservoir) & pernah menerima volume air keluar dari sumber ---
+    ring_mask = binary_dilation(src_mask, iterations=2) & (~src_mask) & inside
+    score = np.where(ring_mask, overflow_track, 0.0)
+    flat_order = np.argsort(score, axis=None)[::-1]
+    overflow_pts = []
+    for _idx in flat_order[:8]:
+        _iy, _ix = np.unravel_index(_idx, score.shape)
+        if score[_iy, _ix] <= 1e-6:
             break
-        r = recv_f[k]
-        if r >= 0:
-            need = z_eff[r] + min_slope * rec_d_f[k]
-            if need > z_eff[k]:
-                z_eff[k] = need
-    return z_eff.reshape(nx, ny)
-
-
-def _wsim_burn_paths(zr, inside, xs, ys, dx, dy, paths, slope):
-    """'Burn' jalur aliran hasil Erosion Mapping (D8) ke DEM routing: di sepanjang jalur elevasi dipaksa
-    turun minimal `slope`*jarak dari sel sebelumnya, jadi air dari titik sumber PASTI mengikuti jalur yang
-    sama dgn tab 1 (menembus bench/cekungan/punggungan kecil), lalu menyebar sesuai kedalamannya."""
-    zr = np.array(zr, dtype=float, copy=True)
-    nx, ny = zr.shape
-    step = float(min(dx, dy))
-    for (px, py) in (paths or []):
-        px = np.asarray(px, dtype=float)
-        py = np.asarray(py, dtype=float)
-        ok = np.isfinite(px) & np.isfinite(py)
-        px, py = px[ok], py[ok]
-        if px.size < 2:
-            continue
-        seglen = np.hypot(np.diff(px), np.diff(py))
-        cum = np.r_[0.0, np.cumsum(seglen)]
-        total = float(cum[-1])
-        if total <= 0:
-            continue
-        n = int(total / (0.5 * step)) + 2
-        s = np.linspace(0.0, total, n)
-        qx = np.interp(s, cum, px)
-        qy = np.interp(s, cum, py)
-        ii = np.clip(np.rint((qx - xs[0]) / dx).astype(int), 0, nx - 1)
-        jj = np.clip(np.rint((qy - ys[0]) / dy).astype(int), 0, ny - 1)
-        cells = []
-        for a_, b_ in zip(ii.tolist(), jj.tolist()):
-            if cells and cells[-1] == (a_, b_):
-                continue
-            if cells and a_ != cells[-1][0] and b_ != cells[-1][1]:
-                pa, pb = cells[-1]
-                c1, c2 = (a_, pb), (pa, b_)
-                cells.append(c1 if zr[c1] <= zr[c2] else c2)   # jaga keterhubungan 4-arah
-            cells.append((a_, b_))
-        prev = None
-        for (a_, b_) in cells:
-            if not inside[a_, b_]:
-                continue
-            if prev is None:
-                prev = zr[a_, b_]
-                continue
-            tgt = min(zr[a_, b_], prev - slope * step)
-            zr[a_, b_] = tgt
-            prev = tgt
-    return zr
-
-
-def _wsim_prepare_grid(seg, n_long=90, fill_pits=True, min_slope=0.01, paths=None):
-    """Resample DEM segmen ke grid simulasi (sel ~persegi) + mask boundary + DEM routing.
-    Sumbu 0 = X (Easting lokal), sumbu 1 = Y -- sama dgn konvensi grid Erosion Mapping."""
-    gx, gy, gz = seg["grid_x"], seg["grid_y"], seg["grid_z"]
-    xs_n = np.asarray(gx[:, 0], dtype=float)
-    ys_n = np.asarray(gy[0, :], dtype=float)
-    x0, x1 = float(np.nanmin(xs_n)), float(np.nanmax(xs_n))
-    y0, y1 = float(np.nanmin(ys_n)), float(np.nanmax(ys_n))
-    ex, ey = max(x1 - x0, 1e-6), max(y1 - y0, 1e-6)
-    n_long = int(max(20, n_long))
-    # Resolusi mengikuti LUAS area kajian (bukan bounding box): area memanjang/sempit (mis. lereng
-    # tambang diagonal) tetap mendapat ~0.6*n_long^2 sel DI DALAM boundary, sehingga alur sempit
-    # tidak jadi 'tangga' kasar. Sisi terpanjang dibatasi 320 sel agar tetap bisa dihitung.
-    try:
-        area_in = float(seg["boundary"].area)
-    except Exception:
-        area_in = 0.0
-    if not (area_in > 0):
-        area_in = 0.5 * ex * ey
-    cell = float(np.sqrt(area_in / (0.6 * n_long ** 2))) if n_long > 0 else ex / 90.0
-    cell = max(cell, max(ex, ey) / 319.0, 1e-3)
-    nxs = max(10, int(round(ex / cell)) + 1)
-    nys = max(10, int(round(ey / cell)) + 1)
-    xs = np.linspace(x0, x1, nxs)
-    ys = np.linspace(y0, y1, nys)
-    dx = ex / (nxs - 1)
-    dy = ey / (nys - 1)
-    X, Y = np.meshgrid(xs, ys, indexing="ij")
-
-    z_native, valid_native = _wsim_fill_nan_nearest(gz)
-    fi = _wsim_axis_index(xs_n, xs)
-    fj = _wsim_axis_index(ys_n, ys)
-    II, JJ = np.meshgrid(fi, fj, indexing="ij")
-    z = _wsim_map_coordinates(z_native, [II, JJ], order=1, mode="nearest")
-
-    inside = _wsim_contains_xy(seg["boundary"], X, Y)
-    if int(inside.sum()) < 12:
-        # cadangan: pakai mask 'inside' bawaan Erosion Mapping (nearest)
-        ins_n = np.asarray(seg.get("inside"), dtype=float) if seg.get("inside") is not None else None
-        if ins_n is not None and ins_n.shape == z_native.shape:
-            inside = _wsim_map_coordinates(ins_n, [II, JJ], order=0, mode="nearest") > 0.5
-    if int(inside.sum()) < 12:
-        raise ValueError("Area kajian (boundary) terlalu kecil / tidak terbaca pada grid simulasi.")
-
-    z_route = z.copy()
-    if fill_pits:
-        try:
-            z_route = np.asarray(_dem_fill_depressions(z.copy(), inside), dtype=float)
-            z_route = np.where(np.isfinite(z_route), z_route, z)
-            if min_slope and min_slope > 0:
-                z_route = _wsim_enforce_min_slope(z_route, inside, dx, dy, float(min_slope))
-        except Exception:
-            z_route = z.copy()
-    if paths:
-        z_route = _wsim_burn_paths(z_route, inside, xs, ys, dx, dy, paths, max(float(min_slope or 0.0), 0.003))
-    return {"xs": xs, "ys": ys, "X": X, "Y": Y, "z": z, "z_route": z_route, "inside": inside,
-            "dx": float(dx), "dy": float(dy), "native": (xs_n, ys_n, z_native)}
-
-
-def _wsim_solve(z, inside, dx, dy, manning_n, total_time_s, n_frames,
-                rain_rate_ms=0.0, rain_dur_s=0.0,
-                src_mask=None, src_q=0.0, src_dur_s=0.0, init_depth=0.0,
-                dt_max=6.0, max_steps=45000, progress_cb=None):
-    """Shallow-water 2D 'local inertia' (Bates, Horritt & Fewtrell 2010) di grid DEM.
-
-      q^{t+dt} = ( q^t - g*h_f*dt*dS/dx ) / ( 1 + g*dt*n^2*|q^t| / h_f^{7/3} )
-
-    * h_f = kedalaman aliran pada sisi sel = max(S_i,S_j) - max(z_i,z_j)  (S = z + h)
-    * Time-step adaptif CFL: dt = a*dx/sqrt(g*h_max)  (a=0.55)
-    * Batas area terbuka : sel tepi boleh mengalirkan air keluar (Manning, kemiringan lokal) bila
-      medan menurun ke luar; tidak ada 'dinding' semu yg membuat air menumpuk di tepi.
-    * Pembatas volume    : fluks keluar sel tak pernah melebihi isi sel -> neraca massa terjaga.
-    Mengembalikan dict (frame kedalaman, kedalaman puncak, hidrograf, neraca massa)."""
-    g = 9.81
-    alpha = 0.55
-    hmin = 1.0e-4          # ambang 'basah' (0,1 mm)
-    fr_max = 1.0           # batas Froude di sisi sel
-    s_min = 0.002          # kemiringan minimum utk outflow batas
-    nx, ny = z.shape
-    NX, NY = nx + 2, ny + 2
-    zin = np.where(np.isfinite(z), z, np.nanmin(z[np.isfinite(z)]))
-    zp = np.pad(zin, 1, mode="edge").astype(np.float64)
-    ins = np.zeros((NX, NY), dtype=bool)
-    ins[1:-1, 1:-1] = inside
-    A = float(dx * dy)
-    n2 = float(manning_n) ** 2
-    dmin = float(min(dx, dy))
-
-    FX = ins[:-1, :] & ins[1:, :]
-    FY = ins[:, :-1] & ins[:, 1:]
-    zfx = np.maximum(zp[:-1, :], zp[1:, :])
-    zfy = np.maximum(zp[:, :-1], zp[:, 1:])
-
-    # --- sisi batas terbuka (4 arah) : donor di dalam, tetangga di luar, 'opposite' di dalam ---
-    def _shift_prev(a, axis):    # out[i] = a[i-1]  (i=0 -> a[0])
-        out = np.empty_like(a)
-        if axis == 0:
-            out[1:] = a[:-1]; out[0] = a[0]
-        else:
-            out[:, 1:] = a[:, :-1]; out[:, 0] = a[:, 0]
-        return out
-
-    def _shift_next(a, axis):    # out[i] = a[i+1]  (i=last -> a[last])
-        out = np.empty_like(a)
-        if axis == 0:
-            out[:-1] = a[1:]; out[-1] = a[-1]
-        else:
-            out[:, :-1] = a[:, 1:]; out[:, -1] = a[:, -1]
-        return out
-
-    zp_prev0, zp_next0 = _shift_prev(zp, 0), _shift_next(zp, 0)
-    zp_prev1, zp_next1 = _shift_prev(zp, 1), _shift_next(zp, 1)
-    ins_prev0, ins_next0 = _shift_prev(ins, 0), _shift_next(ins, 0)
-    ins_prev1, ins_next1 = _shift_prev(ins, 1), _shift_next(ins, 1)
-    # arah: (nama, tetangga-keluar-di-luar, opposite-di-dalam, z_opposite, jarak, lebar)
-    bnd = []
-    for (ins_out, ins_opp, z_opp, dist, width) in (
-        (ins_next0, ins_prev0, zp_prev0, dx, dy),   # keluar ke +x, opposite = -x
-        (ins_prev0, ins_next0, zp_next0, dx, dy),   # keluar ke -x
-        (ins_next1, ins_prev1, zp_prev1, dy, dx),   # keluar ke +y
-        (ins_prev1, ins_next1, zp_next1, dy, dx),   # keluar ke -y
-    ):
-        m = ins & (~ins_out) & ins_opp & (z_opp >= zp - 1e-9)
-        bnd.append((m, ins_opp, dist, width))
-    # indeks sel opposite (utk membaca S opposite): dipetakan lewat fungsi shift yg sama
-    shifters = [lambda a: _shift_prev(a, 0), lambda a: _shift_next(a, 0),
-                lambda a: _shift_prev(a, 1), lambda a: _shift_next(a, 1)]
-
-    h = np.zeros((NX, NY), dtype=np.float64)
-    qx = np.zeros((NX - 1, NY), dtype=np.float64)
-    qy = np.zeros((NX, NY - 1), dtype=np.float64)
-
-    if src_mask is not None:
-        smask = np.zeros((NX, NY), dtype=bool)
-        smask[1:-1, 1:-1] = src_mask & inside
-        if not smask.any():
-            smask = None
-    else:
-        smask = None
-    n_src = int(smask.sum()) if smask is not None else 0
-    n_ins = int(ins.sum())
-
-    v_init = 0.0
-    if smask is not None and init_depth > 0:
-        h[smask] = init_depth
-        v_init = float(init_depth * A * n_src)
-
-    times = np.linspace(0.0, float(total_time_s), int(n_frames) + 1)
-    peak = np.zeros((NX, NY), dtype=np.float64)
-    frames = [h[1:-1, 1:-1].astype(np.float32)]
-    v_in = 0.0
-    v_out = 0.0
-    cum_in = [0.0]
-    cum_out = [0.0]
-    steps = 0
-    t = 0.0
-    dt_floor_abs = 0.01
-
-    for k in range(1, int(n_frames) + 1):
-        t_end = times[k]
-        while t < t_end - 1e-9:
-            hmax = max(float(h.max()), 1.0e-3)
-            dt = alpha * dmin / np.sqrt(g * hmax)
-            if smask is not None and t < src_dur_s:
-                hpred = hmax + src_q * min(dt, dt_max) / (A * n_src)
-                dt = min(dt, alpha * dmin / np.sqrt(g * hpred))
-            dt = float(min(max(dt, dt_floor_abs), dt_max))
-            # anggaran langkah: bila terlalu banyak, perbesar dt secukupnya
-            budget = max(max_steps - steps, 1)
-            dt = max(dt, (total_time_s - t) / budget)
-            dt = min(dt, t_end - t)
-
-            # ---- sumber air ----
-            if rain_rate_ms > 0 and t < rain_dur_s:
-                dr = rain_rate_ms * min(dt, rain_dur_s - t)
-                h[ins] += dr
-                v_in += dr * A * n_ins
-            if smask is not None and src_q > 0 and t < src_dur_s:
-                vol = src_q * min(dt, src_dur_s - t)
-                h[smask] += vol / (A * n_src)
-                v_in += vol
-
-            S = zp + h
-            # ---- fluks internal (inersia lokal) ----
-            Sa, Sb = S[:-1, :], S[1:, :]
-            hf = np.maximum(Sa, Sb) - zfx
-            wet = FX & (hf > hmin)
-            hfs = np.where(wet, hf, 1.0)
-            den = 1.0 + g * dt * n2 * np.abs(qx) / (hfs * hfs * np.cbrt(hfs))
-            qn = (qx - g * hfs * dt * (Sb - Sa) / dx) / den
-            lim = fr_max * hfs * np.sqrt(g * hfs)
-            qx = np.where(wet, np.clip(qn, -lim, lim), 0.0)
-
-            Sa, Sb = S[:, :-1], S[:, 1:]
-            hf = np.maximum(Sa, Sb) - zfy
-            wet = FY & (hf > hmin)
-            hfs = np.where(wet, hf, 1.0)
-            den = 1.0 + g * dt * n2 * np.abs(qy) / (hfs * hfs * np.cbrt(hfs))
-            qn = (qy - g * hfs * dt * (Sb - Sa) / dy) / den
-            lim = fr_max * hfs * np.sqrt(g * hfs)
-            qy = np.where(wet, np.clip(qn, -lim, lim), 0.0)
-
-            Vx = qx * (dy * dt)
-            Vy = qy * (dx * dt)
-
-            # ---- outflow batas terbuka (Manning, kemiringan muka air ke dalam) ----
-            Vb = []
-            for (m, ins_opp, dist, width), shf in zip(bnd, shifters):
-                So = shf(S)
-                hb = h * m
-                s_loc = np.maximum((So - S) / dist, s_min)
-                qb = np.where(hb > hmin, np.power(np.maximum(hb, hmin), 5.0 / 3.0) * np.sqrt(s_loc) / manning_n, 0.0)
-                qb = np.minimum(qb, hb * np.sqrt(g * np.maximum(hb, hmin)))
-                Vb.append(np.where(m, qb * width * dt, 0.0))
-
-            # ---- pembatas volume per sel donor ----
-            out = np.zeros((NX, NY))
-            out[:-1, :] += np.maximum(Vx, 0.0)
-            out[1:, :] += np.maximum(-Vx, 0.0)
-            out[:, :-1] += np.maximum(Vy, 0.0)
-            out[:, 1:] += np.maximum(-Vy, 0.0)
-            for v in Vb:
-                out += v
-            avail = h * A
-            scale = np.where(out > avail, avail / np.maximum(out, 1e-12), 1.0)
-            Vx = np.where(Vx > 0, Vx * scale[:-1, :], Vx * scale[1:, :])
-            Vy = np.where(Vy > 0, Vy * scale[:, :-1], Vy * scale[:, 1:])
-            qx = Vx / (dy * dt)
-            qy = Vy / (dx * dt)
-
-            dV = np.zeros((NX, NY))
-            dV[:-1, :] -= Vx
-            dV[1:, :] += Vx
-            dV[:, :-1] -= Vy
-            dV[:, 1:] += Vy
-            for v in Vb:
-                vs = v * scale
-                dV -= vs
-                v_out += float(vs.sum())
-            h = np.maximum(h + dV / A, 0.0)
-            h[~ins] = 0.0
-            np.maximum(peak, h, out=peak)
-            t += dt
-            steps += 1
-        frames.append(h[1:-1, 1:-1].astype(np.float32))
-        cum_in.append(v_in)
-        cum_out.append(v_out)
-        if progress_cb is not None:
-            progress_cb(k / float(n_frames))
-
-    v_end = float(h.sum() * A)
-    cum_in = np.asarray(cum_in)
-    cum_out = np.asarray(cum_out)
-    dts = np.diff(times)
-    q_in = np.diff(cum_in) / np.maximum(dts, 1e-9)
-    q_out = np.diff(cum_out) / np.maximum(dts, 1e-9)
-    bal_err = (v_init + v_in - v_out - v_end)
-    return {
-        "frames": frames, "times": times, "peak": peak[1:-1, 1:-1].astype(np.float32),
-        "q_in": q_in, "q_out": q_out, "v_in": float(v_in), "v_init": float(v_init),
-        "v_out": float(v_out), "v_end": v_end,
-        "balance_err_pct": float(100.0 * bal_err / max(v_init + v_in, 1e-9)),
-        "steps": int(steps), "cell_area": A,
-    }
-
-
-_WSIM_VIEWER_TEMPLATE = r'''<!doctype html>
-<html lang="id"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-:root{--bg:#0b121b;--panel:rgba(14,22,34,.84);--fg:#e8eef6;--mut:#9fb0c3;--acc:#2f9bdb;--line:rgba(255,255,255,.15)}
-*{box-sizing:border-box}
-html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:12.5px/1.35 system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;overflow:hidden}
-#wrap{position:relative;width:100%;height:100%;background:radial-gradient(ellipse at 50% 25%,#22344b 0%,#0b121b 70%)}
-canvas#gl{display:block;width:100%;height:100%;outline:none;touch-action:none;cursor:grab}
-canvas#gl:active{cursor:grabbing}
-.panel{position:absolute;background:var(--panel);border:1px solid var(--line);border-radius:10px;-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
-#hud{left:10px;top:10px;padding:7px 12px;max-width:62%}
-#hud .ttl{font-weight:600;font-size:13px}
-#hud .sub{color:var(--mut);font-size:11.5px}
-#hud .tm{font-variant-numeric:tabular-nums;color:#bfe6ff;font-size:16px;font-weight:700;margin-top:2px}
-#side{right:10px;top:10px;width:236px;max-height:calc(100% - 84px);overflow:auto;padding:6px 10px 8px}
-#side summary{cursor:pointer;font-weight:600;padding:3px 0;outline:none}
-#side label.row{display:flex;align-items:center;gap:7px;margin:3px 0;cursor:pointer;user-select:none}
-#side .sl{margin:5px 0 2px}
-#side .sl span{display:flex;justify-content:space-between;color:var(--mut);font-size:11.5px}
-#side input[type=range]{width:100%;margin:1px 0}
-#side hr{border:0;border-top:1px solid var(--line);margin:7px 0}
-#legend{right:10px;bottom:62px;padding:6px 10px 5px;width:236px}
-#legend canvas{width:100%;height:12px;display:block;border-radius:3px;border:1px solid var(--line)}
-#legend .tk{display:flex;justify-content:space-between;color:var(--mut);font-size:11px;margin-top:2px}
-#legend .lt{font-size:11.5px;margin-bottom:3px}
-#bar{left:10px;right:10px;bottom:10px;padding:7px 10px;display:flex;gap:9px;align-items:center}
-#bar button,#side button,.tb button{background:rgba(255,255,255,.08);color:var(--fg);border:1px solid var(--line);border-radius:7px;padding:4px 9px;cursor:pointer;font:inherit}
-#bar button:hover,#side button:hover,.tb button:hover{background:rgba(47,155,219,.35)}
-#bar #play{min-width:34px;font-size:14px}
-#bar input[type=range]{flex:1;min-width:80px}
-#bar select{background:rgba(255,255,255,.08);color:var(--fg);border:1px solid var(--line);border-radius:7px;padding:3px 4px;font:inherit}
-#bar select option{color:#000}
-#bar .lp{display:flex;align-items:center;gap:4px;color:var(--mut);user-select:none}
-#tt{position:absolute;pointer-events:none;display:none;padding:6px 9px;border-radius:8px;background:rgba(8,14,22,.92);border:1px solid var(--line);font-size:11.5px;line-height:1.45;white-space:nowrap;z-index:5}
-#tt b{color:#bfe6ff}
-.tb{position:absolute;left:10px;top:78px;display:flex;flex-direction:column;gap:5px}
-#err{position:absolute;inset:0;display:none;align-items:center;justify-content:center;text-align:center;padding:24px;background:rgba(8,12,18,.94);z-index:9;font-size:14px;line-height:1.5}
-#loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(8,12,18,.88);z-index:8;font-size:14px;color:var(--mut)}
-@media (max-width:640px){#side{width:190px}#legend{width:190px}#hud{max-width:92%}}
-</style></head>
-<body>
-<div id="wrap">
-  <canvas id="gl" tabindex="0"></canvas>
-  <div id="hud" class="panel"><div class="ttl" id="hudT"></div><div class="sub" id="hudS"></div><div class="tm" id="hudTm">t = 0</div></div>
-  <div class="tb">
-    <button id="bReset" title=""></button><button id="bTop"></button><button id="bIso"></button><button id="bFull"></button><button id="bShot"></button>
-  </div>
-  <div id="side" class="panel"><details open><summary id="sLayers"></summary><div id="layers"></div></details></div>
-  <div id="legend" class="panel"><div class="lt" id="legT"></div><canvas id="legC" width="256" height="12"></canvas><div class="tk" id="legK"></div></div>
-  <div id="bar" class="panel">
-    <button id="play">▶</button>
-    <input type="range" id="tl" min="0" max="1000" value="0">
-    <select id="spd"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select>
-    <label class="lp"><input type="checkbox" id="loop" checked><span id="loopT"></span></label>
-  </div>
-  <div id="tt"></div>
-  <div id="loading"></div>
-  <div id="err"><div id="errT"></div></div>
-</div>
-<script>/*__THREE_INLINE__*/</script>
-<script>window.__WSIM__ = /*__PAYLOAD__*/null;</script>
-<script>
-(function(){
-"use strict";
-var P = window.__WSIM__, L = P.labels;
-function $(id){return document.getElementById(id);}
-function showErr(m){var e=$('err');e.style.display='flex';$('errT').innerHTML=m;$('loading').style.display='none';}
-$('loading').textContent = L.loading;
-
-function loadThree(cb){
-  if (window.THREE) return cb();
-  var urls = P.three_cdn || [], i = 0;
-  (function next(){
-    if (i >= urls.length){ showErr(L.err_three); return; }
-    var s = document.createElement('script');
-    s.src = urls[i++];
-    s.onload = function(){ if (window.THREE) cb(); else next(); };
-    s.onerror = next;
-    document.head.appendChild(s);
-  })();
-}
-
-function b64u8(s){
-  var bin = atob(s), n = bin.length, u = new Uint8Array(n);
-  for (var i=0;i<n;i++) u[i] = bin.charCodeAt(i);
-  return u;
-}
-
-function main(){
-try {
-var T = THREE;
-// ---------------------------------------------------------------- data
-var G = P.grid, nx = G.nx, ny = G.ny, N = nx*ny;
-var px = new Float32Array(b64u8(G.px).buffer);
-var py = new Float32Array(b64u8(G.py).buffer);
-var pz = new Float32Array(b64u8(G.pz).buffer);
-var sdf = new Float32Array(b64u8(G.sdf).buffer);
-var S = P.sim, nsx = S.nx, nsy = S.ny, NF = S.nframes;       // NF = jumlah frame waktu (termasuk t=0)
-var fr = new Uint16Array(b64u8(S.frames).buffer);             // (NF + 1 peak) x nsx x nsy, mm
-var FS = nsx*nsy;
-var times = S.times, Ttot = times[times.length-1];
-var zmin = G.zmin, zrange = Math.max(G.zmax - G.zmin, 0.5);
-var E0 = G.E0, N0 = G.N0;
-var meta = P.meta;
-
-// ---------------------------------------------------------------- renderer
-var canvas = $('gl');
-var renderer = new T.WebGLRenderer({canvas: canvas, antialias: true, alpha: false, preserveDrawingBuffer: true});
-renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-renderer.setClearColor(0x0b121b, 1);
-var scene = new T.Scene();
-var span = Math.max(G.xspan, G.yspan);
-var cam = new T.PerspectiveCamera(42, 1, Math.max(span*0.002, 0.2), span*30);
-
-// ---------------------------------------------------------------- texture
-var hasTex = !!P.imagery;
-var tex = null;
-var ext = hasTex ? P.imagery.extent : [0,1,0,1];
-function mkTex(img){
-  var t = new T.Texture(img);
-  t.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
-  t.minFilter = T.LinearMipmapLinearFilter; t.magFilter = T.LinearFilter;
-  t.wrapS = t.wrapT = T.ClampToEdgeWrapping;
-  t.needsUpdate = true; return t;
-}
-
-// ---------------------------------------------------------------- terrain geometry
-var pos = new Float32Array(N*3), uvs = new Float32Array(N*2);
-var ex0 = ext[0], exW = Math.max(ext[1]-ext[0], 1e-6), ey0 = ext[2], eyH = Math.max(ext[3]-ext[2], 1e-6);
-for (var v=0; v<N; v++){
-  pos[3*v] = px[v]; pos[3*v+1] = pz[v]-zmin; pos[3*v+2] = -py[v];
-  uvs[2*v] = (px[v]+E0-ex0)/exW; uvs[2*v+1] = (py[v]+N0-ey0)/eyH;
-}
-var idxArr = [];
-for (var i=0;i<nx-1;i++){
-  for (var j=0;j<ny-1;j++){
-    var a=i*ny+j, b=(i+1)*ny+j, c=i*ny+j+1, d=(i+1)*ny+j+1;
-    if (sdf[a]>0 || sdf[b]>0 || sdf[c]>0 || sdf[d]>0){ idxArr.push(a,b,c, b,d,c); }
-  }
-}
-var index = new Uint32Array(idxArr);
-var tgeo = new T.BufferGeometry();
-tgeo.setAttribute('position', new T.BufferAttribute(pos,3));
-tgeo.setAttribute('uv', new T.BufferAttribute(uvs,2));
-tgeo.setAttribute('aSdf', new T.BufferAttribute(sdf,1));
-tgeo.setIndex(new T.BufferAttribute(index,1));
-tgeo.computeVertexNormals();
-tgeo.computeBoundingSphere(); tgeo.computeBoundingBox();
-
-var lightDir = new T.Vector3(-0.5, 0.82, -0.38).normalize();
-var terrMat = new T.ShaderMaterial({
-  uniforms:{ uTex:{value:null}, uHasTex:{value:0}, uLight:{value:lightDir}, uZr:{value:zrange}, uShade:{value:0.8}, uDim:{value:1.0} },
-  vertexShader:
-   'attribute float aSdf; varying vec2 vUv; varying vec3 vN; varying float vS; varying float vH; varying vec3 vL; uniform vec3 uLight;\n'+
-   'void main(){ vUv=uv; vS=aSdf; vH=position.y; vN=normalize(normalMatrix*normal); vL=normalize((viewMatrix*vec4(uLight,0.0)).xyz);\n'+
-   ' gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
-  fragmentShader:
-   'uniform sampler2D uTex; uniform float uHasTex; uniform float uZr; uniform float uShade; uniform float uDim;\n'+
-   'varying vec2 vUv; varying vec3 vN; varying float vS; varying float vH; varying vec3 vL;\n'+
-   'vec3 ramp(float t){ vec3 c0=vec3(0.20,0.46,0.27), c1=vec3(0.80,0.78,0.40), c2=vec3(0.62,0.45,0.30), c3=vec3(0.96,0.96,0.96);\n'+
-   ' return t<0.33? mix(c0,c1,t/0.33) : (t<0.66? mix(c1,c2,(t-0.33)/0.33) : mix(c2,c3,(t-0.66)/0.34)); }\n'+
-   'void main(){ if(vS<0.0) discard;\n'+
-   ' vec3 base = uHasTex>0.5 ? texture2D(uTex,vUv).rgb : ramp(clamp(vH/uZr,0.0,1.0));\n'+
-   ' float nd = max(dot(normalize(vN), vL), 0.0);\n'+
-   ' float lit = mix(1.0, 0.42+0.70*nd, uShade);\n'+
-   ' gl_FragColor = vec4(base*lit*uDim, 1.0); }',
-  side: T.DoubleSide
-});
-var world = new T.Group(); scene.add(world);
-var terrain = new T.Mesh(tgeo, terrMat); world.add(terrain);
-
-// ---------------------------------------------------------------- context plane (citra di sekitar area)
-var ctx = null;
-var yCtx = -(0.03*zrange + 0.6);
-if (hasTex){
-  var cg = new T.BufferGeometry();
-  var cx0 = ext[0]-E0, cx1 = ext[1]-E0, cy0 = ext[2]-N0, cy1 = ext[3]-N0;
-  var cp = new Float32Array([cx0,yCtx,-cy0,  cx1,yCtx,-cy0,  cx0,yCtx,-cy1,  cx1,yCtx,-cy1]);
-  var cu = new Float32Array([0,0, 1,0, 0,1, 1,1]);
-  cg.setAttribute('position', new T.BufferAttribute(cp,3));
-  cg.setAttribute('uv', new T.BufferAttribute(cu,2));
-  cg.setAttribute('normal', new T.BufferAttribute(new Float32Array([0,1,0, 0,1,0, 0,1,0, 0,1,0]),3));
-  cg.setAttribute('aSdf', new T.BufferAttribute(new Float32Array([1,1,1,1]),1));
-  cg.setIndex([0,1,2, 1,3,2]);
-  var cmat = terrMat.clone();
-  cmat.uniforms = { uTex:terrMat.uniforms.uTex, uHasTex:terrMat.uniforms.uHasTex, uLight:terrMat.uniforms.uLight, uZr:terrMat.uniforms.uZr, uShade:{value:0.0}, uDim:{value:0.55} };
-  ctx = new T.Mesh(cg, cmat); ctx.visible = false; world.add(ctx);
-}
-
-// ---------------------------------------------------------------- boundary outline
-var outline = new T.Group(); world.add(outline);
-(P.outline || []).forEach(function(ring){
-  var arr = new Float32Array(ring.length);
-  for (var q=0;q<ring.length;q+=3){ arr[q]=ring[q]; arr[q+1]=ring[q+1]-zmin+0.15; arr[q+2]=-ring[q+2]; }
-  var g = new T.BufferGeometry(); g.setAttribute('position', new T.BufferAttribute(arr,3));
-  outline.add(new T.Line(g, new T.LineBasicMaterial({color:0xff5fd2})));
-});
-
-var pathsG = new T.Group(); world.add(pathsG);
-(P.paths || []).forEach(function(ring){
-  var arr = new Float32Array(ring.length);
-  for (var q=0;q<ring.length;q+=3){ arr[q]=ring[q]; arr[q+1]=ring[q+1]-zmin+0.35; arr[q+2]=-ring[q+2]; }
-  var g = new T.BufferGeometry(); g.setAttribute('position', new T.BufferAttribute(arr,3));
-  pathsG.add(new T.Line(g, new T.LineBasicMaterial({color:0xffe14d})));
-});
-
-// ---------------------------------------------------------------- water
-var lift = Math.max(0.02, span*0.00025);
-var wpos = new Float32Array(pos);
-var wdepth = new Float32Array(N);
-var wgeo = new T.BufferGeometry();
-var wposAttr = new T.BufferAttribute(wpos,3); wposAttr.setUsage(T.DynamicDrawUsage);
-var wdAttr = new T.BufferAttribute(wdepth,1); wdAttr.setUsage(T.DynamicDrawUsage);
-wgeo.setAttribute('position', wposAttr);
-wgeo.setAttribute('aDepth', wdAttr);
-wgeo.setAttribute('aSdf', new T.BufferAttribute(sdf,1));
-wgeo.setAttribute('normal', tgeo.getAttribute('normal'));
-wgeo.setIndex(tgeo.getIndex());
-var peakMode = false;
-var waterMat = new T.ShaderMaterial({
-  uniforms:{ uThr:{value:meta.thr_m}, uScale:{value:meta.hscale}, uOp:{value:0.95}, uTime:{value:0}, uLight:{value:lightDir}, uPeak:{value:0}, uK:{value:6.2832/Math.max(span/22,1)} },
-  vertexShader:
-   'attribute float aDepth; attribute float aSdf; varying float vD; varying float vS; varying vec3 vN; varying vec3 vV; varying vec2 vXZ; varying vec3 vL; uniform vec3 uLight;\n'+
-   'void main(){ vD=aDepth; vS=aSdf; vXZ=position.xz; vN=normalize(normalMatrix*normal); vec4 mv=modelViewMatrix*vec4(position,1.0); vV=-mv.xyz;\n'+
-   ' vL=normalize((viewMatrix*vec4(uLight,0.0)).xyz); gl_Position=projectionMatrix*mv; }',
-  fragmentShader:
-   'uniform float uThr; uniform float uScale; uniform float uOp; uniform float uTime; uniform float uPeak; uniform float uK;\n'+
-   'varying float vD; varying float vS; varying vec3 vN; varying vec3 vV; varying vec2 vXZ; varying vec3 vL;\n'+
-   'vec3 wr(float u){ vec3 a=vec3(0.66,0.93,1.0), b=vec3(0.18,0.62,0.88), c=vec3(0.04,0.31,0.60), d=vec3(0.01,0.10,0.30);\n'+
-   ' return u<0.33? mix(a,b,u/0.33) : (u<0.66? mix(b,c,(u-0.33)/0.33) : mix(c,d,(u-0.66)/0.34)); }\n'+
-   'vec3 pr(float u){ vec3 a=vec3(1.0,0.93,0.45), b=vec3(1.0,0.60,0.12), c=vec3(0.88,0.18,0.12), d=vec3(0.45,0.03,0.12);\n'+
-   ' return u<0.33? mix(a,b,u/0.33) : (u<0.66? mix(b,c,(u-0.33)/0.33) : mix(c,d,(u-0.66)/0.34)); }\n'+
-   'void main(){ if(vS<0.0 || vD<=uThr*0.5) discard;\n'+
-   ' float u=sqrt(clamp(vD/uScale,0.0,1.0)); float a=smoothstep(uThr*0.5,uThr*2.5,vD);\n'+
-   ' vec3 n=normalize(vN + 0.028*vec3(sin(vXZ.x*uK+uTime*1.7)+sin(vXZ.y*uK*0.8-uTime*1.3), 0.0, cos(vXZ.x*uK*0.9-uTime*1.1)+cos(vXZ.y*uK+uTime*1.9)));\n'+
-   ' vec3 V=normalize(vV); float nd=max(dot(n,vL),0.0);\n'+
-   ' vec3 base = uPeak>0.5 ? pr(u) : wr(u);\n'+
-   ' vec3 col = base*(0.66+0.46*nd);\n'+
-   ' vec3 R=reflect(-vL,n); float sp=pow(max(dot(R,V),0.0),56.0)*0.5*(1.0-uPeak);\n'+
-   ' float fr=pow(1.0-max(dot(n,V),0.0),3.0);\n'+
-   ' col += sp + fr*0.10*(1.0-uPeak);\n'+
-   ' gl_FragColor=vec4(col, a*uOp*(0.52+0.44*u)); }',
-  transparent:true, depthWrite:false, side:T.DoubleSide, polygonOffset:true, polygonOffsetFactor:-2, polygonOffsetUnits:-2
-});
-var water = new T.Mesh(wgeo, waterMat); water.renderOrder = 2; world.add(water);
-
-// bilinear lookup tables display-vertex -> sim cell
-var bIdx = new Int32Array(N), bFx = new Float32Array(N), bFy = new Float32Array(N);
-for (var ii=0; ii<nx; ii++){
-  var gi = nx>1 ? ii*(nsx-1)/(nx-1) : 0; var i0 = Math.min(Math.floor(gi), nsx-2); var fx = gi - i0;
-  for (var jj=0; jj<ny; jj++){
-    var gj = ny>1 ? jj*(nsy-1)/(ny-1) : 0; var j0 = Math.min(Math.floor(gj), nsy-2); var fy = gj - j0;
-    var vv = ii*ny+jj; bIdx[vv] = i0*nsy + j0; bFx[vv] = fx; bFy[vv] = fy;
-  }
-}
-function sampleFrame(off, v){
-  var k = off + bIdx[v], fx = bFx[v], fy = bFy[v];
-  return ((1-fx)*(1-fy)*fr[k] + fx*(1-fy)*fr[k+nsy] + (1-fx)*fy*fr[k+1] + fx*fy*fr[k+nsy+1]) * 0.001;
-}
-var curT = 0, lastKey = '';
-function depthAt(v){
-  if (peakMode) return sampleFrame(NF*FS, v);
-  var k = 0; while (k < NF-2 && times[k+1] <= curT) k++;
-  var a = (curT - times[k]) / Math.max(times[k+1]-times[k], 1e-9); a = Math.min(Math.max(a,0),1);
-  return (1-a)*sampleFrame(k*FS, v) + a*sampleFrame((k+1)*FS, v);
-}
-function updateWater(){
-  var thr = waterMat.uniforms.uThr.value*0.5;
-  for (var v=0; v<N; v++){
-    var d = sdf[v] < -1.5 ? 0 : depthAt(v);
-    if (d <= thr) d = 0;
-    wdepth[v] = d;
-    wpos[3*v+1] = pos[3*v+1] + lift + d;
-  }
-  wposAttr.needsUpdate = true; wdAttr.needsUpdate = true;
-}
-
-// ---------------------------------------------------------------- rain streaks
-var rain = null, nRain = 2200, rainTop = 0;
-if (meta.mode === 'rain'){
-  rainTop = zrange*1.2 + span*0.28;
-  var rp = new Float32Array(nRain*6), rph = new Float32Array(nRain);
-  var rx0 = G.xmin_s, rx1 = G.xmax_s, rz0 = -G.ymax_s, rz1 = -G.ymin_s;
-  for (var r=0;r<nRain;r++){
-    var x = rx0 + Math.random()*(rx1-rx0), z = rz0 + Math.random()*(rz1-rz0), y = Math.random()*rainTop;
-    rp[6*r]=x; rp[6*r+1]=y; rp[6*r+2]=z; rp[6*r+3]=x+span*0.0016; rp[6*r+4]=y+span*0.03; rp[6*r+5]=z; rph[r]=y;
-  }
-  var rg = new T.BufferGeometry(); var rpAttr = new T.BufferAttribute(rp,3); rpAttr.setUsage(T.DynamicDrawUsage);
-  rg.setAttribute('position', rpAttr);
-  var rmat = new T.LineBasicMaterial({color:0xbfe3ff, transparent:true, opacity:0.38, depthWrite:false});
-  rain = new T.LineSegments(rg, rmat); rain.frustumCulled = false; rain.renderOrder = 3; scene.add(rain);
-}
-function updateRain(dt, on){
-  if (!rain) return;
-  rain.visible = on;
-  if (!on) return;
-  var sp = span*0.55*dt, len = span*0.03, dxs = span*0.0016;
-  for (var r=0;r<nRain;r++){
-    var y = rp[6*r+1] - sp;
-    if (y < 0){ y += rainTop; }
-    rp[6*r+1] = y; rp[6*r+4] = y + len; rp[6*r+3] = rp[6*r] + dxs;
-  }
-  rpAttr.needsUpdate = true;
-}
-
-// ---------------------------------------------------------------- source marker (mode titik)
-var marker = null, ring = null, beam = null, srcRel = null;
-if (P.source){
-  srcRel = {x:P.source.x, y:P.source.y - zmin, z:-P.source.n};
-  marker = new T.Group();
-  beam = new T.Mesh(new T.CylinderGeometry(span*0.0022, span*0.0022, span*0.10, 12),
-                    new T.MeshBasicMaterial({color:0x35e0ff, transparent:true, opacity:0.55}));
-  beam.position.y = span*0.05; marker.add(beam);
-  var ball = new T.Mesh(new T.SphereGeometry(span*0.006, 16, 12), new T.MeshBasicMaterial({color:0xffffff})); ball.position.y = span*0.105; marker.add(ball);
-  ring = new T.Mesh(new T.RingGeometry(0.8, 1.0, 48), new T.MeshBasicMaterial({color:0x35e0ff, transparent:true, opacity:0.7, side:T.DoubleSide, depthWrite:false}));
-  ring.rotation.x = -Math.PI/2; ring.position.y = 0.4; marker.add(ring);
-  scene.add(marker);
-}
-
-// ---------------------------------------------------------------- camera (orbit sendiri)
-var cxm = (G.xmin_s + G.xmax_s)/2, czm = -(G.ymin_s + G.ymax_s)/2;
-var vex = meta.vexag;
-var cs = {tx:cxm, ty:zrange*0.25*vex, tz:czm, r:span*1.15, az:0.35, pol:1.0};
-var cs0 = {tx:cs.tx, tz:cs.tz, r:cs.r, az:cs.az, pol:cs.pol};
-function applyCam(){
-  var sp = Math.sin(cs.pol);
-  cam.position.set(cs.tx + cs.r*sp*Math.sin(cs.az), cs.ty + cs.r*Math.cos(cs.pol), cs.tz + cs.r*sp*Math.cos(cs.az));
-  cam.lookAt(cs.tx, cs.ty, cs.tz);
-}
-function setVex(val){
-  vex = val; world.scale.y = vex; cs.ty = zrange*0.25*vex;
-  if (marker && srcRel){ marker.position.set(srcRel.x, srcRel.y*vex, srcRel.z); }
-  dirty = true;
-}
-var dirty = true;
-var pts = {}, lastMid = null, lastDist = 0;
-canvas.addEventListener('contextmenu', function(e){e.preventDefault();});
-canvas.addEventListener('pointerdown', function(e){ canvas.setPointerCapture(e.pointerId); pts[e.pointerId] = {x:e.clientX,y:e.clientY,b:e.buttons,s:e.shiftKey}; lastMid=null; lastDist=0; hideTip(); });
-function endPtr(e){ delete pts[e.pointerId]; lastMid=null; lastDist=0; }
-canvas.addEventListener('pointerup', endPtr); canvas.addEventListener('pointercancel', endPtr);
-canvas.addEventListener('pointermove', function(e){
-  var p = pts[e.pointerId];
-  if (!p){ hoverTip(e); return; }
-  var ids = Object.keys(pts), dx = e.clientX - p.x, dy = e.clientY - p.y;
-  p.x = e.clientX; p.y = e.clientY;
-  if (ids.length >= 2){
-    var a = pts[ids[0]], b = pts[ids[1]];
-    var mid = {x:(a.x+b.x)/2, y:(a.y+b.y)/2}, dist = Math.hypot(a.x-b.x, a.y-b.y);
-    if (lastMid){ pan(mid.x-lastMid.x, mid.y-lastMid.y); if (lastDist>0) zoom(lastDist/dist); }
-    lastMid = mid; lastDist = dist;
-  } else if ((p.b & 2) || (p.b & 4) || p.s){ pan(dx, dy); }
-  else { cs.az -= dx*0.006; cs.pol = Math.min(Math.max(cs.pol - dy*0.006, 0.04), Math.PI/2 - 0.015); }
-  dirty = true;
-});
-function pan(dx, dy){
-  var k = cs.r*0.0017, rx = Math.cos(cs.az), rz = -Math.sin(cs.az), fx = -Math.sin(cs.az), fz = -Math.cos(cs.az);
-  cs.tx -= rx*dx*k; cs.tz -= rz*dx*k; cs.tx += fx*dy*k; cs.tz += fz*dy*k;
-}
-function zoom(f){ cs.r = Math.min(Math.max(cs.r*f, span*0.04), span*6); }
-canvas.addEventListener('wheel', function(e){ e.preventDefault(); zoom(Math.exp(e.deltaY*0.0012)); dirty = true; }, {passive:false});
-canvas.addEventListener('dblclick', function(){ resetCam(); });
-function resetCam(){ cs.tx=cs0.tx; cs.tz=cs0.tz; cs.r=cs0.r; cs.az=cs0.az; cs.pol=cs0.pol; dirty=true; }
-
-// ---------------------------------------------------------------- UI
-$('hudT').textContent = meta.title; $('hudS').textContent = meta.subtitle;
-$('bReset').textContent = '⟲'; $('bReset').title = L.reset;
-$('bTop').textContent = '⬒'; $('bTop').title = L.top;
-$('bIso').textContent = '◩'; $('bIso').title = L.iso;
-$('bFull').textContent = '⛶'; $('bFull').title = L.full;
-$('bShot').textContent = '📷'; $('bShot').title = L.shot;
-$('loopT').textContent = L.loop; $('sLayers').textContent = L.layers;
-$('bReset').onclick = resetCam;
-$('bTop').onclick = function(){ cs.pol = 0.04; cs.az = 0; cs.r = span*1.2; cs.tx = cs0.tx; cs.tz = cs0.tz; dirty = true; };
-$('bIso').onclick = function(){ cs.pol = 1.0; cs.az = 0.35; cs.r = cs0.r; cs.tx = cs0.tx; cs.tz = cs0.tz; dirty = true; };
-$('bFull').onclick = function(){ var w = $('wrap'); try { if (document.fullscreenElement) document.exitFullscreen(); else (w.requestFullscreen||w.webkitRequestFullscreen).call(w); } catch(e){} };
-$('bShot').onclick = function(){
-  renderer.render(scene, cam);
-  var url = canvas.toDataURL('image/png'); var a = document.createElement('a'); a.href = url; a.download = 'simulasi_air_3d.png';
-  document.body.appendChild(a); a.click(); document.body.removeChild(a);
-};
-
-var lay = $('layers');
-function addCheck(id, label, checked, onch, disabled){
-  var l = document.createElement('label'); l.className = 'row';
-  var c = document.createElement('input'); c.type = 'checkbox'; c.id = id; c.checked = checked; c.disabled = !!disabled;
-  c.onchange = function(){ onch(c.checked); dirty = true; };
-  l.appendChild(c); l.appendChild(document.createTextNode(label)); lay.appendChild(l); return c;
-}
-function addSlider(id, label, min, max, step, val, fmt, onch){
-  var d = document.createElement('div'); d.className = 'sl';
-  var sp = document.createElement('span'); var a = document.createElement('i'); a.style.fontStyle = 'normal'; a.textContent = label;
-  var b = document.createElement('b'); b.style.fontWeight = '600'; b.style.color = '#cfe8ff'; sp.appendChild(a); sp.appendChild(b);
-  var s = document.createElement('input'); s.type = 'range'; s.min = min; s.max = max; s.step = step; s.value = val;
-  function upd(){ b.textContent = fmt(parseFloat(s.value)); }
-  s.oninput = function(){ upd(); onch(parseFloat(s.value)); dirty = true; };
-  upd(); d.appendChild(sp); d.appendChild(s); lay.appendChild(d); return s;
-}
-var showWater = true;
-addCheck('cTex', hasTex ? L.l_tex : L.l_tex_na, hasTex, function(c){ terrMat.uniforms.uHasTex.value = c ? 1 : 0; if (ctx) ctx.visible = c && cCtx.checked; }, !hasTex);
-var cCtx = addCheck('cCtx', L.l_ctx, hasTex, function(c){ if (ctx) ctx.visible = c && terrMat.uniforms.uHasTex.value > 0.5; }, !hasTex);
-addCheck('cWater', L.l_water, true, function(c){ showWater = c; water.visible = c; });
-addCheck('cPeak', L.l_peak, false, function(c){ peakMode = c; waterMat.uniforms.uPeak.value = c ? 1 : 0; lastKey=''; drawLegend(); $('tl').disabled = c; });
-addCheck('cOut', L.l_out, true, function(c){ outline.visible = c; });
-if ((P.paths||[]).length) addCheck('cPaths', L.l_paths, true, function(c){ pathsG.visible = c; });
-if (meta.mode === 'rain') addCheck('cRain', L.l_rain, true, function(c){ rainOn = c; });
-var rainOn = true;
-var hr = document.createElement('hr'); lay.appendChild(hr);
-addSlider('sVex', L.s_vex, 1, 6, 0.1, meta.vexag, function(v){ return v.toFixed(1)+'×'; }, setVex);
-addSlider('sScale', L.s_scale, Math.max(meta.hscale*0.1, 0.002), Math.max(meta.hscale*3, 0.05), Math.max(meta.hscale*0.01, 0.0005), meta.hscale, function(v){ return v<1? (v*100).toFixed(1)+' cm' : v.toFixed(2)+' m'; }, function(v){ waterMat.uniforms.uScale.value = v; drawLegend(); });
-addSlider('sThr', L.s_thr, 0.5, 60, 0.5, meta.thr_m*1000, function(v){ return v.toFixed(1)+' mm'; }, function(v){ waterMat.uniforms.uThr.value = v/1000; lastKey=''; });
-addSlider('sOp', L.s_op, 0.2, 1, 0.05, 0.95, function(v){ return Math.round(v*100)+'%'; }, function(v){ waterMat.uniforms.uOp.value = v; });
-addSlider('sShade', L.s_shade, 0, 1, 0.05, 0.8, function(v){ return Math.round(v*100)+'%'; }, function(v){ terrMat.uniforms.uShade.value = v; });
-
-// legend
-function wrJS(u){
-  var A=[0.66,0.93,1.0],B=[0.18,0.62,0.88],C=[0.04,0.31,0.60],D=[0.01,0.10,0.30];
-  var p = peakMode ? [[1.0,0.93,0.45],[1.0,0.60,0.12],[0.88,0.18,0.12],[0.45,0.03,0.12]] : [A,B,C,D];
-  var t, a, b;
-  if (u<0.33){a=p[0];b=p[1];t=u/0.33;} else if (u<0.66){a=p[1];b=p[2];t=(u-0.33)/0.33;} else {a=p[2];b=p[3];t=(u-0.66)/0.34;}
-  return 'rgb('+[0,1,2].map(function(k){return Math.round(255*(a[k]+(b[k]-a[k])*t));}).join(',')+')';
-}
-function fmtD(v){ return v<0.1 ? (v*1000).toFixed(0)+' mm' : (v<1 ? (v*100).toFixed(0)+' cm' : v.toFixed(2)+' m'); }
-function drawLegend(){
-  var c = $('legC'), g = c.getContext('2d'), W = c.width;
-  for (var x=0;x<W;x++){ var f = x/(W-1); g.fillStyle = wrJS(Math.sqrt(f)); g.fillRect(x,0,1,c.height); }
-  var s = waterMat.uniforms.uScale.value;
-  $('legT').textContent = peakMode ? L.leg_peak : L.leg_depth;
-  $('legK').innerHTML = '<span>0</span><span>'+fmtD(s*0.25)+'</span><span>'+fmtD(s*0.5)+'</span><span>'+fmtD(s*0.75)+'</span><span>≥ '+fmtD(s)+'</span>';
-}
-drawLegend();
-
-// timeline
-var playing = false, speed = 1, loop = true;
-$('play').onclick = function(){ playing = !playing; if (playing && curT >= Ttot - 1e-6) curT = 0; $('play').textContent = playing ? '⏸' : '▶'; };
-$('spd').onchange = function(){ speed = parseFloat($('spd').value); };
-$('loop').onchange = function(){ loop = $('loop').checked; };
-$('tl').oninput = function(){ curT = parseFloat($('tl').value)/1000*Ttot; dirty = true; };
-function fmtT(s){
-  s = Math.max(0, s);
-  if (s < 120) return s.toFixed(0)+' '+L.u_s;
-  var m = Math.floor(s/60), sc = Math.round(s - m*60);
-  if (m < 120) return m+' '+L.u_min+' '+(sc<10?'0':'')+sc+' '+L.u_s;
-  var h = Math.floor(m/60), mm = m - h*60;
-  return h+' '+L.u_h+' '+(mm<10?'0':'')+mm+' '+L.u_min;
-}
-
-// tooltip
-var tip = $('tt'), ray = new T.Raycaster(), mouse = new T.Vector2(), tipPend = null;
-function hideTip(){ tip.style.display = 'none'; }
-function hoverTip(e){ tipPend = e; }
-function doTip(){
-  if (!tipPend) return; var e = tipPend; tipPend = null;
-  var r = canvas.getBoundingClientRect();
-  mouse.x = ((e.clientX - r.left)/r.width)*2 - 1; mouse.y = -((e.clientY - r.top)/r.height)*2 + 1;
-  ray.setFromCamera(mouse, cam);
-  var hit = ray.intersectObject(terrain, false)[0];
-  if (!hit){ hideTip(); return; }
-  var f = hit.face, best = f.a, bd = 1e30, loc = world.worldToLocal(hit.point.clone());
-  [f.a, f.b, f.c].forEach(function(vi){ var d = (pos[3*vi]-loc.x)*(pos[3*vi]-loc.x) + (pos[3*vi+2]-loc.z)*(pos[3*vi+2]-loc.z); if (d < bd){ bd = d; best = vi; } });
-  if (sdf[best] < 0){ hideTip(); return; }
-  var dnow = depthAt(best), dpk = sampleFrame(NF*FS, best);
-  tip.innerHTML = '<b>'+ (meta.frame==='utm' ? 'E' : 'X') +'</b> '+(px[best]+E0).toFixed(1)+' &nbsp; <b>'+(meta.frame==='utm' ? 'N' : 'Y')+'</b> '+(py[best]+N0).toFixed(1)+
-    '<br><b>'+L.t_elev+'</b> '+pz[best].toFixed(2)+' m<br><b>'+L.t_depth+'</b> '+fmtD(dnow)+'<br><b>'+L.t_peak+'</b> '+fmtD(dpk);
-  tip.style.display = 'block';
-  var tx = e.clientX - r.left + 14, ty = e.clientY - r.top + 14;
-  if (tx + 190 > r.width) tx -= 210; if (ty + 90 > r.height) ty -= 100;
-  tip.style.left = tx + 'px'; tip.style.top = ty + 'px';
-}
-canvas.addEventListener('pointerleave', hideTip);
-
-// ---------------------------------------------------------------- resize + loop
-function resize(){
-  var w = $('wrap').clientWidth, h = $('wrap').clientHeight;
-  renderer.setSize(w, h, false); cam.aspect = w/Math.max(h,1); cam.updateProjectionMatrix(); dirty = true;
-}
-window.addEventListener('resize', resize);
-if (window.ResizeObserver) new ResizeObserver(resize).observe($('wrap'));
-
-if (hasTex){
-  var img = new Image();
-  img.onload = function(){ tex = mkTex(img); terrMat.uniforms.uTex.value = tex; terrMat.uniforms.uHasTex.value = 1; if (ctx) ctx.visible = true; dirty = true; };
-  img.onerror = function(){ hasTex = false; terrMat.uniforms.uHasTex.value = 0; if (ctx) ctx.visible = false; };
-  img.src = P.imagery.uri;
-}
-
-setVex(vex); resize(); applyCam(); updateWater();
-$('loading').style.display = 'none';
-var tPrev = performance.now(), tClock = 0;
-function frame(now){
-  requestAnimationFrame(frame);
-  var dt = Math.min((now - tPrev)/1000, 0.1); tPrev = now; tClock += dt;
-  if (playing){
-    curT += dt*speed*(Ttot/Math.max(meta.play_seconds,1));
-    if (curT >= Ttot){ if (loop){ curT = 0; } else { curT = Ttot; playing = false; $('play').textContent = '▶'; } }
-    dirty = true;
-  }
-  var key = peakMode ? 'pk' : curT.toFixed(2);
-  if ((key !== lastKey || dirty) && showWater){ lastKey = key; updateWater(); }
-  if (dirty || playing){
-    $('tl').value = Math.round(curT/Ttot*1000);
-    $('hudTm').textContent = (peakMode ? L.leg_peak : (L.t + ' = ' + fmtT(curT)));
-  }
-  var rainActive = meta.mode === 'rain' && rainOn && curT < meta.rain_dur_s && !peakMode;
-  updateRain(dt, rainActive);
-  if (ring){ var ph = (tClock % 1.6)/1.6; var rs = span*(0.004 + 0.03*ph); ring.scale.set(rs, rs, rs); ring.material.opacity = 0.75*(1-ph); if (beam) beam.material.opacity = 0.35 + 0.2*Math.sin(tClock*4); }
-  waterMat.uniforms.uTime.value = tClock;
-  doTip();
-  applyCam();
-  renderer.render(scene, cam);
-  dirty = false;
-}
-requestAnimationFrame(frame);
-window.__wsim_ready = true;
-} catch(err){ showErr(L.err_gen + ' ' + (err && err.message ? err.message : err)); try{console.error(err);}catch(e){} }
-}
-loadThree(main);
-})();
-</script>
-</body></html>
-'''
-
-
-# ---------------------------------------------------------------------------------------------
-# Pembangun scene 3D (HTML + three.js) dari hasil simulasi
-# ---------------------------------------------------------------------------------------------
-_WSIM_THREE_CDN = [
-    "https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js",
-    "https://unpkg.com/three@0.128.0/build/three.min.js",
-    "https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js",
-]
-
-
-def _wsim_find_local_three():
-    """Cari three.min.js lokal (opsional) supaya viewer bisa jalan OFFLINE. Letakkan file
-    'three.min.js' (three r128) di folder 'vendor/', 'static/' atau 'assets/' di samping app ini,
-    atau set env WSIM_THREE_JS. Kalau tidak ada, viewer memuat three.js dari CDN."""
-    import os as _os
-    cands = []
-    _env = _os.environ.get("WSIM_THREE_JS")
-    if _env:
-        cands.append(_env)
-    try:
-        _base = _os.path.dirname(_os.path.abspath(__file__))
-    except Exception:
-        _base = _os.getcwd()
-    for _b in (_base, _os.getcwd()):
-        for _sub in ("vendor", "static", "assets", ""):
-            cands.append(_os.path.join(_b, _sub, "three.min.js"))
-    for _c in cands:
-        try:
-            if _os.path.isfile(_c) and _os.path.getsize(_c) > 100_000:
-                with open(_c, "r", encoding="utf-8") as _f:
-                    return _f.read()
-        except Exception:
-            continue
-    return None
-
-
-def _wsim_b64(arr, dtype):
-    return _wsim_base64.b64encode(np.ascontiguousarray(np.asarray(arr, dtype=dtype)).tobytes()).decode("ascii")
-
-
-def _wsim_jpeg_datauri(rgb, max_side=2048, quality=86):
-    im = PILImage.fromarray(np.asarray(rgb, dtype=np.uint8)).convert("RGB")
-    w, h = im.size
-    if max(w, h) > max_side:
-        sc = max_side / float(max(w, h))
-        im = im.resize((max(2, int(round(w * sc))), max(2, int(round(h * sc)))), PILImage.LANCZOS)
-    buf = io.BytesIO()
-    im.save(buf, format="JPEG", quality=quality, optimize=True)
-    return "data:image/jpeg;base64," + _wsim_base64.b64encode(buf.getvalue()).decode("ascii")
-
-
-def _wsim_boundary_rings(geom):
-    polys = []
-    if geom is None:
-        return []
-    gt = getattr(geom, "geom_type", "")
-    if gt == "Polygon":
-        polys = [geom]
-    elif gt in ("MultiPolygon", "GeometryCollection"):
-        polys = [g for g in geom.geoms if getattr(g, "geom_type", "") == "Polygon"]
-    rings = []
-    for p in polys:
-        rings.append(np.asarray(p.exterior.coords, dtype=float)[:, :2])
-        for it in p.interiors:
-            rings.append(np.asarray(it.coords, dtype=float)[:, :2])
-    return rings
-
-
-def _wsim_signed_distance_cells(inside, X, Y, boundary, cell):
-    """Jarak bertanda ke boundary (satuan 'sel', + di dalam, - di luar). Jauh dari tepi: EDT cepat;
-    dekat tepi: jarak geometris ke poligon asli -> tepi area di 3D mulus (bukan tangga piksel)."""
-    d_in = _wsim_edt(inside)
-    d_out = _wsim_edt(~inside)
-    sdf = np.where(inside, d_in - 0.5, -(d_out - 0.5)).astype(np.float64)
-    near = np.abs(sdf) <= 3.0
-    if near.any():
-        try:
-            import shapely as _shp
-            line = boundary.boundary
-            pts = _shp.points(X[near], Y[near])
-            dist = np.asarray(_shp.distance(line, pts), dtype=float)
-        except Exception:
-            line = boundary.boundary
-            dist = np.array([line.distance(Point(float(a), float(b))) for a, b in zip(X[near], Y[near])])
-        sign = np.where(inside[near], 1.0, -1.0)
-        val = sign * dist / max(cell, 1e-9)
-        # jaga agar tanda konsisten dengan mask & tidak persis nol
-        val = np.where(inside[near], np.maximum(val, 0.02), np.minimum(val, -0.02))
-        sdf[near] = val
-    return sdf.astype(np.float32)
-
-
-def _wsim_build_scene_html(*, seg, prep, sim, mode, title, subtitle, imagery, to_utm, labels,
-                           vexag=2.0, nd_long=200, rain_dur_s=0.0, source_xy=None,
-                           play_seconds=24.0, three_inline=None, paths=None):
-    """Susun HTML viewer WebGL: medan 3D (DEM) + citra yg ditempel + air animasi."""
-    xs_n, ys_n, z_native = prep["native"]
-    x0, x1 = float(prep["xs"][0]), float(prep["xs"][-1])
-    y0, y1 = float(prep["ys"][0]), float(prep["ys"][-1])
-    ex, ey = x1 - x0, y1 - y0
-    if ex >= ey:
-        ndx = int(nd_long)
-        ndy = max(24, int(round(nd_long * ey / ex)))
-    else:
-        ndy = int(nd_long)
-        ndx = max(24, int(round(nd_long * ex / ey)))
-    xd = np.linspace(x0, x1, ndx)
-    yd = np.linspace(y0, y1, ndy)
-    Xd, Yd = np.meshgrid(xd, yd, indexing="ij")
-    II, JJ = np.meshgrid(_wsim_axis_index(xs_n, xd), _wsim_axis_index(ys_n, yd), indexing="ij")
-    zd = _wsim_map_coordinates(z_native, [II, JJ], order=3, mode="nearest")
-    zd = np.clip(zd, float(np.nanmin(z_native)), float(np.nanmax(z_native)))
-    inside_d = _wsim_contains_xy(seg["boundary"], Xd, Yd)
-    cell_d = 0.5 * (ex / (ndx - 1) + ey / (ndy - 1))
-    sdf = _wsim_signed_distance_cells(inside_d, Xd, Yd, seg["boundary"], cell_d)
-
-    frame = "local"
-    if imagery is not None and imagery.get("frame") == "utm" and to_utm is not None:
-        frame = "utm"
-    elif imagery is None and to_utm is not None:
-        frame = "utm"
-    if frame == "utm":
-        Ed, Nd = to_utm(Xd, Yd)
-        Ed = np.asarray(Ed, dtype=float)
-        Nd = np.asarray(Nd, dtype=float)
-    else:
-        Ed, Nd = Xd.astype(float), Yd.astype(float)
-    E0 = float(np.round(np.nanmean(Ed[inside_d]), 1))
-    N0 = float(np.round(np.nanmean(Nd[inside_d]), 1))
-    pxd = (Ed - E0).astype(np.float32)
-    pyd = (Nd - N0).astype(np.float32)
-    zmin = float(np.nanmin(zd[inside_d])) if inside_d.any() else float(np.nanmin(zd))
-    zmax = float(np.nanmax(zd[inside_d])) if inside_d.any() else float(np.nanmax(zd))
-
-    # ---- garis batas area (di-drape ke medan) ----
-    outline = []
-    budget = 3500
-    rings = _wsim_boundary_rings(seg["boundary"])
-    tot_pts = sum(len(r) for r in rings) or 1
-    step = max(1, int(np.ceil(tot_pts / float(budget))))
-    for r in rings:
-        rr = r[::step]
-        if len(rr) < 2:
-            continue
-        rr = np.vstack([rr, rr[:1]])
-        fi = _wsim_axis_index(xs_n, rr[:, 0])
-        fj = _wsim_axis_index(ys_n, rr[:, 1])
-        zr = _wsim_map_coordinates(z_native, [fi, fj], order=1, mode="nearest")
-        if frame == "utm":
-            er, nr = to_utm(rr[:, 0], rr[:, 1])
-        else:
-            er, nr = rr[:, 0], rr[:, 1]
-        trip = np.column_stack([np.asarray(er) - E0, zr, np.asarray(nr) - N0]).ravel()
-        outline.append([round(float(v), 2) for v in trip])
-
-    # ---- jalur aliran dari Erosion Mapping (pembanding sinkronisasi) ----
-    path_out = []
-    for (pxs, pys) in (paths or []):
-        pxs = np.asarray(pxs, dtype=float)
-        pys = np.asarray(pys, dtype=float)
-        if pxs.size < 2:
-            continue
-        stp = max(1, int(np.ceil(pxs.size / 600.0)))
-        pxs, pys = pxs[::stp], pys[::stp]
-        fi = _wsim_axis_index(xs_n, pxs)
-        fj = _wsim_axis_index(ys_n, pys)
-        zr = _wsim_map_coordinates(z_native, [fi, fj], order=1, mode="nearest")
-        if frame == "utm":
-            er, nr = to_utm(pxs, pys)
-        else:
-            er, nr = pxs, pys
-        trip = np.column_stack([np.asarray(er) - E0, zr, np.asarray(nr) - N0]).ravel()
-        path_out.append([round(float(v), 2) for v in trip])
-
-    # ---- frame kedalaman (mm, uint16) + puncak ----
-    frames_mm = [np.clip(np.rint(f.astype(np.float64) * 1000.0), 0, 65535).astype(np.uint16) for f in sim["frames"]]
-    peak_mm = np.clip(np.rint(sim["peak"].astype(np.float64) * 1000.0), 0, 65535).astype(np.uint16)
-    all_mm = np.stack(frames_mm + [peak_mm], axis=0)
-    nsx, nsy = sim["frames"][0].shape
-    pk = sim["peak"][prep["inside"]]
-    thr_m = 0.0015 if mode == "rain" else 0.004
-    pos_pk = pk[pk > max(thr_m, 0.003)]
-    hscale = float(np.percentile(pos_pk, 98)) if pos_pk.size else 0.1
-    hscale = float(np.clip(hscale, 0.02, 25.0))
-    hscale = float(float("%.2g" % hscale))
-
-    img_payload = None
-    if imagery is not None:
-        img_payload = {"uri": _wsim_jpeg_datauri(imagery["rgb"]), "extent": [float(v) for v in imagery["extent"]]}
-
-    src_payload = None
-    if source_xy is not None:
-        sx, sy = float(source_xy[0]), float(source_xy[1])
-        fi = _wsim_axis_index(xs_n, np.array([sx]))
-        fj = _wsim_axis_index(ys_n, np.array([sy]))
-        sz = float(_wsim_map_coordinates(z_native, [fi, fj], order=1, mode="nearest")[0])
-        if frame == "utm":
-            se, sn = to_utm(np.array([sx]), np.array([sy]))
-            se, sn = float(np.asarray(se)[0]), float(np.asarray(sn)[0])
-        else:
-            se, sn = sx, sy
-        src_payload = {"x": se - E0, "y": sz, "n": sn - N0}
-
-    payload = {
-        "labels": labels,
-        "three_cdn": _WSIM_THREE_CDN,
-        "grid": {
-            "nx": int(ndx), "ny": int(ndy),
-            "px": _wsim_b64(pxd, "<f4"), "py": _wsim_b64(pyd, "<f4"), "pz": _wsim_b64(zd, "<f4"),
-            "sdf": _wsim_b64(sdf, "<f4"),
-            "zmin": zmin, "zmax": zmax, "E0": E0, "N0": N0,
-            "xmin_s": float(pxd.min()), "xmax_s": float(pxd.max()),
-            "ymin_s": float(pyd.min()), "ymax_s": float(pyd.max()),
-            "xspan": float(pxd.max() - pxd.min()), "yspan": float(pyd.max() - pyd.min()),
-        },
-        "sim": {"nx": int(nsx), "ny": int(nsy), "nframes": int(len(sim["frames"])),
-                "times": [float(t) for t in sim["times"]], "frames": _wsim_b64(all_mm, "<u2")},
-        "imagery": img_payload,
-        "outline": outline,
-        "paths": path_out,
-        "source": src_payload,
-        "meta": {"mode": mode, "title": title, "subtitle": subtitle, "frame": frame,
-                 "vexag": float(vexag), "hscale": hscale, "thr_m": float(thr_m),
-                 "rain_dur_s": float(rain_dur_s), "play_seconds": float(play_seconds)},
-    }
-    js = _wsim_json.dumps(payload, separators=(",", ":")).replace("</", "<\\/")
-    html = _WSIM_VIEWER_TEMPLATE.replace("/*__PAYLOAD__*/null", js)
-    inline = ""
-    if three_inline:
-        inline = three_inline.replace("</script", "<\\/script")
-    html = html.replace("/*__THREE_INLINE__*/", inline)
-    return html, {"hscale": hscale, "E0": E0, "N0": N0, "frame": frame,
-                  "display_shape": (int(ndx), int(ndy)), "html_mb": len(html) / 1.0e6}
-
-
-def _wsim_labels():
-    """Teks UI di dalam viewer 3D (mengikuti pilihan bahasa aplikasi lewat _t)."""
-    return {
-        "loading": _t("Memuat scene 3D...", "Loading 3D scene..."),
-        "err_three": _t(
-            "Pustaka 3D (three.js) gagal dimuat dari CDN. Cek koneksi internet / firewall, atau letakkan file "
-            "<b>three.min.js</b> (three r128) di folder <b>vendor/</b> di samping aplikasi agar viewer bisa jalan offline.",
-            "The 3D library (three.js) could not be loaded from the CDN. Check your internet connection / firewall, or put "
-            "<b>three.min.js</b> (three r128) in a <b>vendor/</b> folder next to the app to run the viewer offline."),
-        "err_gen": _t("Viewer 3D gagal dibuat:", "The 3D viewer failed to start:"),
-        "reset": _t("Reset kamera (atau klik ganda)", "Reset camera (or double-click)"),
-        "top": _t("Tampak atas", "Top view"),
-        "iso": _t("Tampak miring", "Oblique view"),
-        "full": _t("Layar penuh", "Fullscreen"),
-        "shot": _t("Simpan gambar PNG", "Save PNG image"),
-        "loop": _t("ulang", "loop"),
-        "layers": _t("Lapisan & tampilan", "Layers & display"),
-        "l_tex": _t("Citra di permukaan medan", "Imagery draped on terrain"),
-        "l_tex_na": _t("Citra tidak tersedia", "Imagery unavailable"),
-        "l_ctx": _t("Citra area sekitar", "Surrounding imagery"),
-        "l_water": _t("Air", "Water"),
-        "l_peak": _t("Kedalaman maksimum (puncak)", "Maximum depth (peak)"),
-        "l_out": _t("Garis batas area", "Study-area outline"),
-        "l_paths": _t("Jalur aliran Erosion Mapping", "Erosion Mapping flow path"),
-        "l_rain": _t("Efek hujan", "Rain effect"),
-        "s_vex": _t("Eksagerasi vertikal", "Vertical exaggeration"),
-        "s_scale": _t("Skala warna kedalaman", "Depth colour scale"),
-        "s_thr": _t("Ambang tampil air", "Water display threshold"),
-        "s_op": _t("Opasitas air", "Water opacity"),
-        "s_shade": _t("Bayangan relief", "Relief shading"),
-        "leg_depth": _t("Kedalaman air", "Water depth"),
-        "leg_peak": _t("Kedalaman maksimum selama simulasi", "Maximum depth during simulation"),
-        "t": _t("Waktu", "Time"),
-        "t_elev": _t("Elevasi", "Elevation"),
-        "t_depth": _t("Kedalaman saat ini", "Current depth"),
-        "t_peak": _t("Kedalaman maks.", "Peak depth"),
-        "u_s": _t("dtk", "s"), "u_min": _t("mnt", "min"), "u_h": _t("jam", "h"),
-    }
-
-
-# ---------------------------------------------------------------------------------------------
-# Antarmuka (Streamlit)
-# ---------------------------------------------------------------------------------------------
-try:
-    import streamlit.components.v1 as _wsim_components
-except Exception:
-    _wsim_components = None
-
-_WSIM_SRC_POINT = "Satu Titik (Point Source)"   # nilai selectbox 'source_type_*' di tab Erosion Mapping
-
-
-def _wsim_erosion_source(seg_results):
-    """Baca skenario sumber aliran yang SEDANG dipakai di tab Erosion Mapping (Section B):
-    jenis sumber, titik hulu (klik-peta / ketik manual / awal jalur aliran), dan tebal air awal.
-    Tidak ada input koordinat di tab simulasi -- semuanya diambil dari sini."""
-    ss = st.session_state
-    segs = ss.get("segments") or []
-    main_sid = segs[0] if segs else (next(iter(seg_results)) if seg_results else None)
-    out = {"main_sid": main_sid, "source_type": "Hujan (Uniform)", "point": None,
-           "point_origin": None, "point_depth": 0.20}
-    if main_sid is None:
-        return out
-    out["source_type"] = ss.get(f"source_type_{main_sid}", "Hujan (Uniform)")
-    try:
-        _d = ss.get(f"point_depth_{main_sid}")
-        if _d:
-            out["point_depth"] = float(_d)
-    except Exception:
-        pass
-    method = str(ss.get(f"point_method_{main_sid}", "Ketik Koordinat Manual"))
-    click = ss.get(f"flow_click_xy_{main_sid}")
-    mx, my = ss.get(f"point_x_{main_sid}"), ss.get(f"point_y_{main_sid}")
-    manual = None
-    try:
-        if mx is not None and my is not None and (abs(float(mx)) + abs(float(my))) > 0:
-            manual = (float(mx), float(my))
-    except Exception:
-        manual = None
-    cands = [(_t("klik di peta desain", "map click"), click), (_t("input koordinat manual", "manual coordinates"), manual)]
-    if not method.startswith("Klik"):
-        cands.reverse()
-    main_res = (seg_results or {}).get(main_sid) or {}
-    try:
-        _fp = main_res.get("flow_paths") or []
-        if _fp and len(_fp[0][0]) > 0:
-            cands.append((_t("awal jalur aliran hasil analisis", "start of analysed flow path"),
-                          (float(_fp[0][0][0]), float(_fp[0][1][0]))))
-    except Exception:
-        pass
-    bnd = main_res.get("boundary")
-    for origin, pt in cands:
-        if pt is None:
-            continue
-        try:
-            x, y = float(pt[0]), float(pt[1])
-        except Exception:
-            continue
-        if not (np.isfinite(x) and np.isfinite(y)):
-            continue
-        if bnd is not None:
-            try:
-                if not bnd.contains(Point(x, y)):
-                    continue
-            except Exception:
-                pass
-        out["point"] = (x, y)
-        out["point_origin"] = origin
-        break
-    return out
-
-
-def _wsim_em_paths(seg, em):
-    """Jalur aliran hasil Erosion Mapping (tab 1) untuk ditumpuk di 3D sbg pembanding (mode titik)."""
-    out = []
-    try:
-        for fp in (seg.get("flow_paths") or [])[:12]:
-            out.append((list(fp[0]), list(fp[1])))
-    except Exception:
-        pass
-    return out
-
-
-def _wsim_defaults(seg):
-    """Nilai awal parameter dari hasil RUN ANALYSIS segmen (hujan R24, koef. limpasan C, debit rencana)."""
-    R, R_src = None, ""
-    try:
-        v = seg.get("r24_mm_extreme")
-        if v:
-            R, R_src = float(v), _t("R24 ekstrem (Erosion Mapping)", "extreme R24 (Erosion Mapping)")
-        if not R:
-            base = seg.get("online_rainfall")
-            if base:
-                R = float(base) * float(seg.get("rain_factor") or 1.0)
-                R_src = _t("hujan analisis × faktor ekstrem (Erosion Mapping)", "analysis rainfall × extreme factor (Erosion Mapping)")
-    except Exception:
-        R = None
-    if not R or R <= 0:
-        R, R_src = 100.0, _t("nilai bawaan (belum ada data hujan di Erosion Mapping)", "default (no rainfall data in Erosion Mapping yet)")
-    C, C_src = 0.70, _t("nilai bawaan", "default")
-    try:
-        ci = seg.get("cover_info") or {}
-        if ci.get("runoff_used") and ci.get("runoff_c_eff"):
-            C, C_src = float(ci["runoff_c_eff"]), _t("C efektif dgn cover (Surface/Cover)", "effective C with cover (Surface/Cover)")
-        elif seg.get("runoff_c_base"):
-            C, C_src = float(seg["runoff_c_base"]), _t("C dari Erosion Mapping", "C from Erosion Mapping")
-    except Exception:
-        pass
-    C = float(min(max(C, 0.05), 1.0))
-    Q, Q_src = 2.0, _t("nilai bawaan", "default")
-    try:
-        hr = seg.get("hydraulics_result") or {}
-        if hr.get("q_design_m3s"):
-            Q, Q_src = float(hr["q_design_m3s"]), _t("debit rencana (Rational, Erosion Mapping)", "design discharge (Rational, Erosion Mapping)")
-    except Exception:
-        pass
-    Q = float(min(max(Q, 0.05), 5000.0))
-    try:
-        vx = float(seg.get("vertical_exaggeration") or 2.0)
-    except Exception:
-        vx = 2.0
-    return {"R": float(min(max(R, 1.0), 2000.0)), "R_src": R_src, "C": C, "C_src": C_src,
-            "Q": round(Q, 2), "Q_src": Q_src, "vexag": float(min(max(vx, 1.0), 6.0))}
-
-
-def _wsim_get_imagery(seg, sid, choice, prep):
-    """Siapkan citra yang akan ditempel di medan. Return (dict|None, pesan|None)."""
-    if choice == "none":
-        return None, None
-    if choice == "ortho":
-        o = seg.get("orthophoto")
-        if o is None or "rgb" not in o:
-            return None, _t("Orthophoto tidak tersedia pada segmen ini.", "No orthophoto available for this segment.")
-        ext = [float(v) for v in o["extent"]]
-        x0, x1 = float(prep["xs"][0]), float(prep["xs"][-1])
-        y0, y1 = float(prep["ys"][0]), float(prep["ys"][-1])
-        if ext[1] < x0 or ext[0] > x1 or ext[3] < y0 or ext[2] > y1:
-            return None, _t("Orthophoto tidak beririsan dengan area kajian (cek sistem koordinat).",
-                            "The orthophoto does not overlap the study area (check the coordinate system).")
-        return {"rgb": o["rgb"], "extent": ext, "frame": "local"}, None
-    to_utm = globals().get("_grid_lokal_to_utm")
-    fetch = globals().get("_fetch_satellite_basemap_utm")
-    if to_utm is None or fetch is None:
-        return None, _t("Fungsi citra satelit belum tersedia (jalankan tab Erosion Mapping dulu).",
-                        "Satellite imagery helper is not available yet (open the Erosion Mapping tab first).")
-    xs, ys = prep["xs"], prep["ys"]
-    ex = np.concatenate([xs, xs, np.full_like(ys, xs[0]), np.full_like(ys, xs[-1])])
-    ey = np.concatenate([np.full_like(xs, ys[0]), np.full_like(xs, ys[-1]), ys, ys])
-    E, N = to_utm(ex, ey)
-    ext = (float(np.min(E)), float(np.max(E)), float(np.min(N)), float(np.max(N)))
-    sig = tuple(round(v, 1) for v in ext)
-    ck = f"wsim_sat_{sid}"
-    cached = st.session_state.get(ck)
-    sat = None
-    if cached is not None and cached.get("sig") == sig and cached.get("data") is not None:
-        sat = cached["data"]
-    else:
-        try:
-            sat = fetch(ext, out_size=2048, pad_frac=0.12)
-        except Exception:
-            sat = None
-        if sat is not None:
-            st.session_state[ck] = {"sig": sig, "data": sat}
-    msg = None
-    if sat is None:
-        sat = seg.get("satellite_basemap")
-        if sat is not None:
-            msg = _t("Citra online gagal diambil -- memakai citra satelit tersimpan dari Erosion Mapping.",
-                     "Online imagery failed -- using the satellite basemap stored by Erosion Mapping.")
-        else:
-            msg = _t("Citra satelit gagal diambil (cek internet). Simulasi tetap ditampilkan tanpa citra.",
-                     "Satellite imagery could not be fetched (check internet). The simulation is shown without imagery.")
-    if sat is None:
-        return None, msg
-    return {"rgb": sat["rgb"], "extent": [float(v) for v in sat["extent"]], "frame": "utm"}, msg
-
-
-def _wsim_top_ponds(sim, prep, to_utm, n=6):
-    pk = np.where(prep["inside"], sim["peak"], 0.0)
-    mf = _wsim_maxfilter(pk, size=7)
-    cand = np.argwhere((pk >= mf - 1e-9) & (pk > 0.05))
-    rows, taken = [], []
-    for ix, iy in sorted(cand.tolist(), key=lambda c: -pk[c[0], c[1]]):
-        if any(abs(ix - a) < 5 and abs(iy - b) < 5 for a, b in taken):
-            continue
-        taken.append((ix, iy))
-        x, y = float(prep["X"][ix, iy]), float(prep["Y"][ix, iy])
-        row = {"No": len(rows) + 1, "X (lokal)": round(x, 2), "Y (lokal)": round(y, 2)}
-        if to_utm is not None:
-            try:
-                e, nn = to_utm(np.array([x]), np.array([y]))
-                row["Easting (UTM)"] = round(float(np.asarray(e)[0]), 2)
-                row["Northing (UTM)"] = round(float(np.asarray(nn)[0]), 2)
-            except Exception:
-                pass
-        row["Elevasi (m)"] = round(float(prep["z"][ix, iy]), 2)
-        row["Kedalaman maks (m)"] = round(float(pk[ix, iy]), 3)
-        rows.append(row)
-        if len(rows) >= n:
-            break
-    return rows
-
-
-def _wsim_show_result(res):
-    """Tampilkan hasil tersimpan: viewer 3D, ringkasan, hidrograf, titik genangan terdalam, unduhan."""
-    m = res["metrics"]
-    c1, c2, c3 = st.columns(3)
-    _metric_card(_t("Kedalaman maksimum", "Maximum depth"), f"{m['peak_max']:.2f} m", container=c1)
-    _metric_card(_t("Luas genangan > 5 cm", "Area flooded > 5 cm"), f"{m['wet_ha']:.2f} ha", container=c2)
-    _metric_card(_t("Debit keluar puncak", "Peak outflow"), f"{m['q_out_peak']:.2f} m³/s", container=c3)
-    c4, c5, c6 = st.columns(3)
-    _metric_card(_t("Volume air masuk", "Water volume in"), f"{m['v_in']:,.0f} m³", container=c4)
-    _metric_card(_t("Volume keluar area", "Volume leaving the area"), f"{m['v_out']:,.0f} m³", container=c5)
-    _metric_card(_t("Galat neraca massa", "Mass-balance error"), f"{m['bal']:.3f} %",
-                 help_text=_t("(masuk + awal − keluar − tersisa) / (masuk + awal). Harus ≈ 0.",
-                              "(in + initial − out − remaining) / (in + initial). Should be ≈ 0."), container=c6)
-
-    if hasattr(st, "iframe"):
-        # Streamlit baru: st.components.v1.html sudah deprecated -> pakai st.iframe (HTML string)
-        st.iframe(res["html"], width="stretch", height=int(res["height"]))
-    else:
-        _wsim_components.html(res["html"], height=int(res["height"]), scrolling=False)
-    st.caption(_t(
-        "Putar ▶ untuk animasi; seret = putar, klik kanan/Shift+seret = geser, scroll = zoom, klik ganda = reset. "
-        "Citra ditempel langsung di permukaan medan 3D; arahkan kursor ke medan untuk melihat elevasi & kedalaman air. "
-        "Centang 'Kedalaman maksimum' untuk peta genangan puncak. Model ilustratif, belum terkalibrasi.",
-        "Press ▶ to animate; drag = rotate, right-click/Shift+drag = pan, scroll = zoom, double-click = reset. "
-        "Imagery is draped directly on the 3D terrain; hover the terrain for elevation & water depth. "
-        "Tick 'Maximum depth' for the peak inundation map. Illustrative model, not calibrated."))
-
-    fig = go.Figure()
-    tmid = (res["times"][1:] + res["times"][:-1]) / 2.0 / 60.0
-    fig.add_trace(go.Scatter(x=tmid, y=res["q_in"], mode="lines", line=dict(color="#2f9bdb", width=2, shape="hv"),
-                             name=_t("Air masuk ke area (hujan efektif / titik)", "Water entering the area (excess rain / point)")))
-    fig.add_trace(go.Scatter(x=tmid, y=res["q_out"], mode="lines", line=dict(color="#e08a2b", width=2, shape="hv"),
-                             name=_t("Air keluar dari area", "Water leaving the area")))
-    fig.update_layout(height=300, margin=dict(l=10, r=10, t=30, b=10),
-                      title=_t("Hidrograf debit masuk & keluar area kajian", "Inflow & outflow hydrograph of the study area"),
-                      xaxis_title=_t("Waktu (menit)", "Time (min)"), yaxis_title="Q (m³/s)",
-                      legend=dict(orientation="h", y=-0.25))
-    st.plotly_chart(fig, width="stretch")
-
-    if res.get("ponds"):
-        st.markdown("**" + _t("Titik genangan terdalam (maksimum selama simulasi)", "Deepest ponding locations (maximum during simulation)") + "**")
-        st.dataframe(pd.DataFrame(res["ponds"]), width="stretch", hide_index=True)
-    st.download_button(
-        _t("Unduh peta kedalaman maksimum (CSV)", "Download maximum-depth map (CSV)"),
-        data=res["csv"], file_name="peta_kedalaman_maks_simulasi_air.csv", mime="text/csv",
-        key=f"wsim_dl_{res['sid']}")
+        overflow_pts.append({
+            "X": float(grid_x[_iy, _ix]), "Y": float(grid_y[_iy, _ix]),
+            "Elevasi (m)": float(z[_iy, _ix]),
+            "Volume terlimpas (m³, kumulatif)": float(score[_iy, _ix]),
+        })
+
+    return h_frames, overflow_track, overflow_pts, z, dx, dy, cell_area
 
 
 # =========================================================
-# =========== TAB 8: SIMULASI AIR 3D (HUJAN / TITIK) ======
+# =========== TAB 5: SIMULASI ALIRAN 3D (DEBRIS FLOW) =====
 # =========================================================
 with tab5:
 
-    _sub_header(_t("Simulasi Air 3D — Hujan / Titik Point", "3D Water Simulation — Rainfall / Point Source"))
-    st.caption(_t(
-        "Satu simulasi air di atas medan 3D hasil DEM segmen, dengan citra satelit/orthophoto ditempel langsung di "
-        "permukaan medan. Pilih skenario HUJAN (merata) atau TITIK (debit masuk di titik hulu) -- titik, curah hujan "
-        "dan koefisien limpasan diambil otomatis dari tab Erosion Mapping, tidak perlu input koordinat lagi.",
-        "A single water simulation over the segment's 3D DEM, with satellite/orthophoto imagery draped directly on the "
-        "terrain. Choose RAINFALL (uniform) or POINT (inflow at the upstream point) -- the point, rainfall and runoff "
-        "coefficient come automatically from the Erosion Mapping tab, no coordinate entry needed."))
-    _ui_warning(_t(
-        "Model shallow-water 2D sederhana (local-inertia, setara inti LISFLOOD-FP) untuk visualisasi & kajian awal -- "
-        "BUKAN pengganti HEC-RAS 2D / FLO-2D / TUFLOW dan belum dikalibrasi dengan kejadian aktual. Jangan dipakai "
-        "sendirian untuk desain mitigasi tanpa konfirmasi model hidraulik tervalidasi.",
-        "Simplified 2D shallow-water model (local-inertia, the LISFLOOD-FP core) for visualisation & screening -- NOT a "
-        "substitute for HEC-RAS 2D / FLO-2D / TUFLOW and not calibrated against real events. Do not use alone for "
-        "mitigation design without a validated hydraulic model."))
+    _sub_header(_t("Simulasi Aliran 3D — Debris Flow / Longsoran", "3D Flow Simulation — Debris Flow / Landslide"))
+    st.caption(
+        "Simulasi penjalaran massa (debris flow/longsoran/aliran sedimen) menuruni medan 3D dari "
+        "hasil DEM segmen yang sudah dianalisis, lengkap dengan animasi seiring waktu."
+    )
+    _ui_warning(
+        "Ini model **cellular-automaton yang disederhanakan** (penyebaran berbasis kemiringan "
+        "& sudut friksi) untuk visualisasi ilustratif/edukatif — BUKAN solver fisika penuh "
+        "(beda dengan RAMMS/FLO-2D/DAN3D/r.avaflow). Jangan dipakai sebagai satu-satunya dasar "
+        "desain mitigasi tanpa dikonfirmasi model rekayasa yang tervalidasi."
+    )
 
     _seg_results_sim = st.session_state.get("segment_results", {})
 
     if not _seg_results_sim:
-        _ui_info(_t(
-            "Belum ada hasil RUN ANALYSIS tersimpan. Jalankan analisis di tab 'Erosion Mapping' dulu untuk minimal "
-            "satu segmen, baru kembali ke sini.",
-            "No saved RUN ANALYSIS results yet. Run the analysis in the 'Erosion Mapping' tab for at least one "
-            "segment first, then come back here."))
+        _ui_info(
+            "Belum ada hasil RUN ANALYSIS tersimpan. Jalankan analisis di tab 'Erosion Mapping' "
+            "dulu untuk minimal satu segmen, baru kembali ke sini."
+        )
     else:
-        _em = _wsim_erosion_source(_seg_results_sim)
-        _sids = list(_seg_results_sim.keys())
-        if st.session_state.get("wsim_segment_choice") not in _sids:
-            st.session_state["wsim_segment_choice"] = _em["main_sid"] if _em["main_sid"] in _sids else _sids[0]
         _sim_sid = st.selectbox(
-            _t("Segmen (sumber DEM)", "Segment (DEM source)"), _sids,
-            format_func=lambda s: _seg_results_sim[s].get("label", s), key="wsim_segment_choice")
-        _seg = _seg_results_sim[_sim_sid]
-        _seg_ok = (_seg.get("grid_x") is not None and _seg.get("grid_z") is not None
-                   and _seg.get("boundary") is not None)
-        if not _seg_ok:
-            st.error(_t("Hasil segmen ini tidak lengkap (grid elevasi/boundary tidak tersimpan) -- jalankan ulang RUN ANALYSIS.",
-                        "This segment's result is incomplete (elevation grid/boundary not stored) -- run RUN ANALYSIS again."))
+            "Segmen (sumber DEM)",
+            list(_seg_results_sim.keys()),
+            format_func=lambda s: _seg_results_sim[s].get("label", s),
+            key="sim3d_segment_choice",
+        )
+        _sim_res = _seg_results_sim[_sim_sid]
+
+        _gx_full = _sim_res.get("grid_x")
+        _gy_full = _sim_res.get("grid_y")
+        _gz_full = _sim_res.get("grid_z")
+        _bnd_sim = _sim_res.get("boundary")
+        _inside_full = _sim_res.get("inside")
+
+        if _gx_full is None or _gz_full is None or _bnd_sim is None:
+            st.error(
+                "Hasil segmen ini tidak lengkap (grid elevasi/boundary tidak tersimpan) — jalankan "
+                "ulang RUN ANALYSIS untuk segmen ini."
+            )
         else:
-            _dfl = _wsim_defaults(_seg)
-            _is_pt_em = (_em["source_type"] == _WSIM_SRC_POINT)
+            _sub_header(_t("1. Setup Sumber Longsoran/Debris", "1. Landslide/Debris Source Setup"))
 
-            # ---- 1. skenario -------------------------------------------------------------
-            _sub_header(_t("1. Skenario simulasi", "1. Simulation scenario"))
-            _mode_key = f"wsim_mode_{_sim_sid}"
-            _last_key = f"wsim_lastsrc_{_sim_sid}"
-            if st.session_state.get(_last_key) != _em["source_type"]:
-                # ikuti pilihan sumber aliran di Erosion Mapping setiap kali pilihan itu berubah
-                st.session_state[_mode_key] = "point" if _is_pt_em else "rain"
-                st.session_state[_last_key] = _em["source_type"]
-            _mode = st.radio(
-                _t("Sumber air", "Water source"), ["rain", "point"], horizontal=True, key=_mode_key,
-                format_func=lambda k: (_t("🌧️ Hujan (merata di seluruh area)", "🌧️ Rainfall (uniform over the area)")
-                                       if k == "rain" else
-                                       _t("📍 Titik Point (dari Erosion Mapping)", "📍 Point source (from Erosion Mapping)")))
+            _res_native = _gx_full.shape[0]
+            _sim_res_n = st.slider(
+                "Resolusi grid simulasi (lebih tinggi = lebih detail, lebih lambat)",
+                min_value=25, max_value=min(140, _res_native), value=min(70, _res_native),
+                step=5, key=f"sim3d_res_{_sim_sid}",
+                help="Grid DEM asli di-downsample ke resolusi ini supaya animasi 3D tetap responsif.",
+            )
 
-            _pt = _em["point"]
-            _pt_in_seg = False
-            if _pt is not None:
-                try:
-                    _pt_in_seg = bool(_seg["boundary"].contains(Point(_pt[0], _pt[1])))
-                except Exception:
-                    _pt_in_seg = False
+            _step_n = max(1, _res_native // _sim_res_n)
+            _grid_x = _gx_full[::_step_n, ::_step_n]
+            _grid_y = _gy_full[::_step_n, ::_step_n]
+            _grid_z = _gz_full[::_step_n, ::_step_n]
+            _inside_sim = (
+                _inside_full[::_step_n, ::_step_n] if _inside_full is not None
+                else np.ones_like(_grid_z, dtype=bool)
+            )
+            _inside_sim = _inside_sim & ~np.isnan(_grid_z)
 
-            if _mode == "point":
-                if _pt is None:
-                    _ui_warning(_t(
-                        "Belum ada titik aliran dari Erosion Mapping. Buka tab 'Erosion Mapping' → Skenario Sumber Aliran → "
-                        "pilih 'Satu Titik (Point Source)' lalu tentukan titiknya (ketik koordinat / klik di peta desain). "
-                        "Atau pilih skenario Hujan di atas.",
-                        "No flow point from Erosion Mapping yet. Open 'Erosion Mapping' → Flow Source Scenario → choose "
-                        "'Satu Titik (Point Source)' and set the point (type coordinates / click on the design map). "
-                        "Or choose the Rainfall scenario above."))
+            _bnds_sim = _bnd_sim.bounds
+
+            # --- siapkan koordinat UTM (utk overlay citra satelit, spt tab 1) ---
+            # Sumbu lokal DXF miring ~57° thd UTM sebenarnya, jadi citra satelit (yg
+            # north-up) hanya bisa dioverlay dgn benar kalau plot-nya juga dlm UTM,
+            # bukan koordinat lokal -- makanya semua trace di bawah pakai _utm_gx/_utm_gy.
+            _utm_gx, _utm_gy = _grid_lokal_to_utm(_grid_x, _grid_y)
+            _sbx_sim, _sby_sim = _boundary_xy_flat(_bnd_sim)
+            _utm_bx_sim, _utm_by_sim = _ring_lokal_to_utm(_sbx_sim, _sby_sim)
+
+            _sat_cache_key_sim = f"sim3d_sat_{_sim_sid}"
+            _sat_sig_sim = (round(float(_bnds_sim[0]), 1), round(float(_bnds_sim[1]), 1),
+                            round(float(_bnds_sim[2]), 1), round(float(_bnds_sim[3]), 1))
+            _cached_sat_sim = st.session_state.get(_sat_cache_key_sim)
+            if _cached_sat_sim is not None and _cached_sat_sim.get("sig") == _sat_sig_sim:
+                _sat_sim = _cached_sat_sim.get("data")
+            else:
+                _utm_ext_sim = (float(np.nanmin(_utm_gx)), float(np.nanmax(_utm_gx)),
+                                 float(np.nanmin(_utm_gy)), float(np.nanmax(_utm_gy)))
+                _sat_sim = _fetch_satellite_basemap_utm(_utm_ext_sim, out_size=512, pad_frac=0.15)
+                st.session_state[_sat_cache_key_sim] = {"sig": _sat_sig_sim, "data": _sat_sim}
+
+            def _sample_rgb_grid(_sat_data, _n=70):
+                """Bangun grid UTM kasar (n x n) sekitar boundary + sample warna RGB dari
+                citra satelit di tiap titiknya -- dipakai sbg 'lantai' konteks visual di
+                luar boundary pada scene 3D (Mesh3d w/ vertexcolor)."""
+                if _sat_data is None:
+                    return None
+                _xmin, _xmax, _ymin, _ymax = _sat_data["extent"]
+                _xs = np.linspace(_xmin, _xmax, _n)
+                _ys = np.linspace(_ymin, _ymax, _n)
+                _GXu, _GYu = np.meshgrid(_xs, _ys)
+                _rgb = _sat_data["rgb"]
+                _h, _w = _rgb.shape[0], _rgb.shape[1]
+                _col = np.clip(((_GXu - _xmin) / max(_xmax - _xmin, 1e-9) * (_w - 1)).astype(int), 0, _w - 1)
+                _row = np.clip(((_ymax - _GYu) / max(_ymax - _ymin, 1e-9) * (_h - 1)).astype(int), 0, _h - 1)
+                _colors = _rgb[_row, _col]
+                return _GXu, _GYu, _colors
+
+            def _make_satellite_plane_trace(_sat_data, _z_level, _n=70):
+                _sampled = _sample_rgb_grid(_sat_data, _n)
+                if _sampled is None:
+                    return None
+                _GXu, _GYu, _colors = _sampled
+                _Xf, _Yf = _GXu.ravel(), _GYu.ravel()
+                _Zf = np.full_like(_Xf, _z_level)
+                _vcolor = [f"rgb({r},{g},{b})" for r, g, b in _colors.reshape(-1, 3)]
+                _idx = np.arange(_n * _n).reshape(_n, _n)
+                _i, _j, _k = [], [], []
+                for _r in range(_n - 1):
+                    for _c in range(_n - 1):
+                        _a, _b2, _d, _e = _idx[_r, _c], _idx[_r, _c + 1], _idx[_r + 1, _c], _idx[_r + 1, _c + 1]
+                        _i += [_a, _b2]
+                        _j += [_b2, _e]
+                        _k += [_d, _d]
+                return go.Mesh3d(
+                    x=_Xf, y=_Yf, z=_Zf, i=_i, j=_j, k=_k, vertexcolor=_vcolor,
+                    lighting=dict(ambient=1.0, diffuse=0.0, specular=0.0),
+                    flatshading=False, name="Citra satelit", showlegend=False, hoverinfo="skip",
+                )
+
+            _erosion_mapping_pt = None
+            _main_sid_for_pt = (st.session_state.get("segments") or [None])[0]
+            if _main_sid_for_pt is not None and st.session_state.get(f"source_type_{_main_sid_for_pt}") == "Satu Titik (Point Source)":
+                _pt_x_em = st.session_state.get(f"point_x_{_main_sid_for_pt}")
+                _pt_y_em = st.session_state.get(f"point_y_{_main_sid_for_pt}")
+                if _pt_x_em is not None and _pt_y_em is not None:
+                    _erosion_mapping_pt = (float(_pt_x_em), float(_pt_y_em))
+
+            _src_method_sim = st.radio(
+                _t("Cara menentukan titik sumber", "Method to set source point"),
+                (
+                    [_t("Input Koordinat Manual", "Manual Coordinate Input"),
+                     _t("Ambil dari Titik Hulu (Erosion Mapping)", "Use Upstream Point (from Erosion Mapping)")]
+                    if _erosion_mapping_pt is not None
+                    else [_t("Input Koordinat Manual", "Manual Coordinate Input")]
+                ),
+                key=f"sim3d_src_method_{_sim_sid}",
+                horizontal=True,
+                help=_t(
+                    "'Ambil dari Titik Hulu' memakai koordinat yang sama dengan opsi 'Satu Titik (Point "
+                    "Source)' di Section B tab Erosion Mapping — supaya tidak perlu input dua kali titik "
+                    "yang sama. Hanya muncul kalau opsi tsb sedang aktif di sana.",
+                    "'Use Upstream Point' reuses the same coordinate as the 'Point Source' option in "
+                    "Section B of the Erosion Mapping tab — so you don't need to enter the same point "
+                    "twice. Only shown when that option is active there."
+                ),
+            )
+
+            if _src_method_sim.startswith(_t("Ambil dari Titik Hulu", "Use Upstream Point")):
+                _src_x, _src_y = _erosion_mapping_pt
+                st.caption(
+                    _t(
+                        f"Memakai titik hulu dari Erosion Mapping: X={_src_x:.3f}, Y={_src_y:.3f}. "
+                        "Ganti ke 'Input Koordinat Manual' kalau ingin titik sumber yang berbeda khusus "
+                        "untuk simulasi ini.",
+                        f"Using upstream point from Erosion Mapping: X={_src_x:.3f}, Y={_src_y:.3f}. "
+                        "Switch to 'Manual Coordinate Input' if this simulation needs a different source point."
+                    )
+                )
+            else:
+                _ui_info(
+                    "Titik sumber ditandai lewat input koordinat manual di bawah (opsi klik-di-peta "
+                    "sudah dihapus karena tidak reliable di semua environment browser/Streamlit)."
+                )
+                _mcs1, _mcs2 = st.columns(2)
+                with _mcs1:
+                    _src_x = st.number_input(
+                        "Koordinat X sumber", value=float((_bnds_sim[0] + _bnds_sim[2]) / 2),
+                        format="%.3f", key=f"sim3d_srcx_{_sim_sid}",
+                    )
+                with _mcs2:
+                    _src_y = st.number_input(
+                        "Koordinat Y sumber", value=float((_bnds_sim[1] + _bnds_sim[3]) / 2),
+                        format="%.3f", key=f"sim3d_srcy_{_sim_sid}",
+                    )
+            st.session_state[f"sim3d_click_xy_{_sim_sid}"] = (float(_src_x), float(_src_y))
+
+            _click_sim = st.session_state.get(f"sim3d_click_xy_{_sim_sid}")
+            if _click_sim is not None:
+                st.success(_t(f"Titik sumber saat ini: X={_click_sim[0]:.2f}, Y={_click_sim[1]:.2f}", f"Current source point: X={_click_sim[0]:.2f}, Y={_click_sim[1]:.2f}"))
+            else:
+                _ui_warning("Belum ada titik sumber ditandai.")
+
+            _sub_header(_t("2. Parameter Simulasi", "2. Simulation Parameters"))
+            _pc1, _pc2, _pc3 = st.columns(3)
+            with _pc1:
+                _src_radius = st.number_input(
+                    "Radius sumber material (m)", min_value=5.0, value=30.0, step=5.0,
+                    key=f"sim3d_radius_{_sim_sid}",
+                )
+                _vol_sim = st.number_input(
+                    "Volume material awal (m³)", min_value=10.0, value=2000.0, step=100.0,
+                    key=f"sim3d_vol_{_sim_sid}",
+                )
+            with _pc2:
+                _friction_deg = st.slider(
+                    "Sudut friksi/berhenti (°) — makin kecil, makin jauh larinya", 3, 30, 12,
+                    key=f"sim3d_friction_{_sim_sid}",
+                )
+                _mobility_sim = st.slider(
+                    "Mobilitas aliran (kecepatan penyebaran)", 0.1, 1.0, 0.6, step=0.05,
+                    key=f"sim3d_mobility_{_sim_sid}",
+                )
+            with _pc3:
+                _n_frames_sim = st.slider(
+                    _t("Jumlah frame animasi", "Number of animation frames"), 10, 50, 24, key=f"sim3d_nframes_{_sim_sid}",
+                )
+                _sec_per_frame = st.number_input(
+                    "Durasi tersimulasi per frame (detik)", min_value=0.5, value=3.0, step=0.5,
+                    key=f"sim3d_secframe_{_sim_sid}",
+                )
+                _vexag = st.slider(
+                    "Eksagerasi vertikal tampilan", 1.0, 4.0, 1.8, step=0.1,
+                    key=f"sim3d_vexag_{_sim_sid}",
+                )
+
+            _run_sim = st.button(_t("Jalankan Simulasi", "Run Simulation"), key=f"sim3d_run_{_sim_sid}", type="primary")
+
+            if _click_sim is None:
+                _ui_info("Tandai dulu lokasi sumber (klik peta / input koordinat) sebelum menjalankan simulasi.")
+            elif _run_sim:
+                _scx, _scy = _click_sim
+                if not _bnd_sim.contains(Point(_scx, _scy)):
+                    st.error(_t("Titik sumber berada di luar boundary area kajian.", "The source point is outside the study area boundary."))
                 else:
-                    if not _pt_in_seg:
-                        _ui_warning(_t(
-                            f"Titik Erosion Mapping (X={_pt[0]:.2f}, Y={_pt[1]:.2f}) berada di luar boundary segmen ini -- "
-                            "pilih segmen Main (Segmen 1) yang memuat titik tersebut.",
-                            f"The Erosion Mapping point (X={_pt[0]:.2f}, Y={_pt[1]:.2f}) is outside this segment's boundary -- "
-                            "pick the Main segment (Segment 1) that contains it."))
-                    st.success(_t(
-                        f"Titik sumber otomatis dari Erosion Mapping ({_em['point_origin']}): X = {_pt[0]:.2f}, Y = {_pt[1]:.2f}",
-                        f"Source point taken automatically from Erosion Mapping ({_em['point_origin']}): X = {_pt[0]:.2f}, Y = {_pt[1]:.2f}"))
-                    if not _is_pt_em:
-                        st.caption(_t("Catatan: di Erosion Mapping sumber aliran saat ini 'Hujan'; titik di atas adalah titik "
-                                      "terakhir yang tersimpan di sana.",
-                                      "Note: Erosion Mapping currently uses 'Rainfall'; the point above is the last one stored there."))
-            else:
-                st.caption(_t(
-                    f"Hujan R = {_dfl['R']:.1f} mm ← {_dfl['R_src']}; koefisien limpasan C = {_dfl['C']:.2f} ← {_dfl['C_src']}. "
-                    "Ubah di bawah bila perlu.",
-                    f"Rainfall R = {_dfl['R']:.1f} mm ← {_dfl['R_src']}; runoff coefficient C = {_dfl['C']:.2f} ← {_dfl['C_src']}. "
-                    "Change below if needed."))
+                    with st.spinner("Menjalankan simulasi penyebaran massa..."):
+                        _dx_sim = float(np.nanmean(np.abs(np.diff(_grid_x[:, 0])))) or 1.0
+                        _dy_sim = float(np.nanmean(np.abs(np.diff(_grid_y[0, :])))) or 1.0
 
-            # ---- 2. parameter ------------------------------------------------------------
-            _sub_header(_t("2. Parameter", "2. Parameters"))
-            if _mode == "rain":
-                _p1, _p2, _p3 = st.columns(3)
-                with _p1:
-                    _R_mm = st.number_input(_t("Curah hujan total R (mm)", "Total rainfall R (mm)"),
-                                            min_value=1.0, max_value=2000.0, value=float(round(_dfl["R"], 1)), step=5.0,
-                                            help=_t("Diambil otomatis dari tab Erosion Mapping (R24 × faktor ekstrem).",
-                                                    "Taken automatically from the Erosion Mapping tab (R24 × extreme factor)."))
-                    _C_run = st.number_input(_t("Koefisien limpasan C", "Runoff coefficient C"),
-                                             min_value=0.05, max_value=1.0, value=float(round(_dfl["C"], 2)), step=0.05,
-                                             help=_t("Bagian hujan yang menjadi limpasan permukaan (sisanya meresap/tertahan).",
-                                                     "Fraction of rain that becomes surface runoff (the rest infiltrates/is stored)."))
-                with _p2:
-                    _Tr_min = st.number_input(_t("Durasi hujan (menit)", "Rain duration (min)"),
-                                              min_value=5.0, max_value=1440.0, value=120.0, step=5.0, key=f"wsim_tr_{_sim_sid}")
-                    _post_min = st.number_input(_t("Waktu setelah hujan berhenti (menit)", "Time after rain stops (min)"),
-                                                min_value=0.0, max_value=1440.0, value=45.0, step=5.0, key=f"wsim_post_{_sim_sid}",
-                                                help=_t("Agar terlihat air surut / mengalir keluar area.", "To see the water recede / drain out of the area."))
-                with _p3:
-                    _i_mmh = _C_run * _R_mm / max(_Tr_min / 60.0, 1e-6)
-                    st.metric(_t("Intensitas hujan efektif", "Effective rain intensity"), f"{_i_mmh:.1f} mm/jam")
-                    st.caption(_t(f"Volume limpasan ≈ {_C_run * _R_mm / 1000.0 * float(_seg['boundary'].area):,.0f} m³ "
-                                  "pada seluruh segmen.",
-                                  f"Runoff volume ≈ {_C_run * _R_mm / 1000.0 * float(_seg['boundary'].area):,.0f} m³ over the whole segment."))
-            else:
-                _p1, _p2, _p3 = st.columns(3)
-                with _p1:
-                    _Q_in = st.number_input(_t("Debit masuk di titik (m³/detik)", "Inflow at the point (m³/s)"),
-                                            min_value=0.05, max_value=5000.0, value=float(_dfl["Q"]), step=0.5,
-                                            help=_t(f"Bawaan: {_dfl['Q_src']}.", f"Default: {_dfl['Q_src']}."))
-                    _d0 = st.number_input(_t("Tebal air awal di titik (m)", "Initial water depth at the point (m)"),
-                                          min_value=0.0, max_value=10.0, value=float(min(max(_em["point_depth"], 0.0), 10.0)), step=0.05,
-                                          help=_t("Diambil dari 'Kedalaman/Ketebalan Air Awal di Titik Hulu' di Erosion Mapping.",
-                                                  "Taken from 'Initial Water Depth/Thickness at Upstream Point' in Erosion Mapping."))
-                with _p2:
-                    _Tin_min = st.number_input(_t("Durasi aliran masuk (menit)", "Inflow duration (min)"),
-                                               min_value=1.0, max_value=1440.0, value=30.0, step=5.0, key=f"wsim_tin_{_sim_sid}")
-                    _post_min = st.number_input(_t("Waktu setelah aliran berhenti (menit)", "Time after inflow stops (min)"),
-                                                min_value=0.0, max_value=1440.0, value=15.0, step=5.0, key=f"wsim_postp_{_sim_sid}")
-                with _p3:
-                    _rad_m = st.number_input(_t("Radius area sumber (m)", "Source area radius (m)"),
-                                             min_value=1.0, max_value=200.0, value=8.0, step=1.0, key=f"wsim_rad_{_sim_sid}")
-                    st.caption(_t(f"Volume masuk ≈ {_Q_in * _Tin_min * 60.0:,.0f} m³.", f"Inflow volume ≈ {_Q_in * _Tin_min * 60.0:,.0f} m³."))
+                        _src_mask_sim = (
+                            (_grid_x - _scx) ** 2 + (_grid_y - _scy) ** 2
+                        ) <= _src_radius ** 2
+                        _src_mask_sim = _src_mask_sim & _inside_sim
+                        if not _src_mask_sim.any():
+                            _iix = int(np.abs(_grid_x[:, 0] - _scx).argmin())
+                            _iiy = int(np.abs(_grid_y[0, :] - _scy).argmin())
+                            _src_mask_sim = np.zeros_like(_inside_sim)
+                            _src_mask_sim[_iix, _iiy] = True
 
-            with st.expander(_t("Pengaturan lanjutan (resolusi, citra, tampilan)", "Advanced settings (resolution, imagery, display)")):
-                _a1, _a2, _a3 = st.columns(3)
-                with _a1:
-                    _res_sim = st.slider(_t("Resolusi grid simulasi (sel sisi terpanjang)", "Simulation grid resolution (cells, long side)"),
-                                         40, 160, 90, 10, key=f"wsim_res_{_sim_sid}",
-                                         help=_t("Makin tinggi = lebih detail tapi lebih lambat.", "Higher = more detail but slower."))
-                    _nfr = st.slider(_t("Jumlah frame animasi", "Number of animation frames"), 24, 80, 48, 4, key=f"wsim_nfr_{_sim_sid}")
-                with _a2:
-                    _man_n = st.number_input(_t("Koefisien Manning (n)", "Manning coefficient (n)"),
-                                             min_value=0.010, max_value=0.300, value=0.035, step=0.005, format="%.3f",
-                                             key=f"wsim_n_{_sim_sid}",
-                                             help=_t("≈0.03–0.04 tanah/sungai alami, ≈0.02 beton, ≈0.05–0.08 vegetasi lebat.",
-                                                     "≈0.03–0.04 natural soil/river, ≈0.02 concrete, ≈0.05–0.08 dense vegetation."))
-                    _fill = st.checkbox(_t("Isi cekungan palsu DEM (konsisten dgn Erosion Mapping)", "Fill spurious DEM pits (consistent with Erosion Mapping)"),
-                                        value=True, key=f"wsim_fill_{_sim_sid}",
-                                        help=_t("Cekungan kecil hasil artefak interpolasi kontur dinaikkan agar air tidak tertahan palsu. "
-                                                "Matikan bila cekungan di DEM memang kolam/sump nyata.",
-                                                "Small pits caused by contour-interpolation artefacts are raised so water is not trapped falsely. "
-                                                "Turn off if pits in the DEM are real ponds/sumps."))
-                    _minslope = st.slider(_t("Kemiringan minimum di area datar/cekungan (%)", "Minimum slope on flats/pits (%)"),
-                                          0.0, 5.0, 1.0, 0.25, key=f"wsim_ms_{_sim_sid}",
-                                          help=_t("Menyamakan aliran dgn Erosion Mapping (D8): air tetap mengalir turun lewat dataran/bench/cekungan "
-                                                  "terisi, tidak menggenang. 0 = DEM apa adanya (air akan tertahan di cekungan).",
-                                                  "Matches the Erosion Mapping (D8) behaviour: water keeps flowing downhill across flats/benches/filled pits "
-                                                  "instead of ponding. 0 = DEM as is (water will be trapped in pits)."))
-                    _follow = st.checkbox(_t("Ikuti jalur aliran Erosion Mapping (mode titik)", "Follow the Erosion Mapping flow path (point mode)"),
-                                          value=True, key=f"wsim_follow_{_sim_sid}",
-                                          help=_t("Jalur aliran D8 dari tab 1 'dibakar' ke DEM simulasi sehingga air dari titik sumber mengalir "
-                                                  "melalui jalur yang sama persis (menembus bench/cekungan kecil), lalu menyebar sesuai kedalamannya.",
-                                                  "The D8 flow path from tab 1 is burned into the simulation DEM so water from the source follows exactly "
-                                                  "the same path (cutting through benches/small pits), then spreads according to its depth."))
-                with _a3:
-                    _vex_def = st.slider(_t("Eksagerasi vertikal awal", "Initial vertical exaggeration"), 1.0, 6.0,
-                                         float(_dfl["vexag"] if _dfl["vexag"] <= 6 else 2.0), 0.5, key=f"wsim_vex_{_sim_sid}")
-                    _detail = st.select_slider(_t("Detail permukaan 3D", "3D surface detail"),
-                                               options=[140, 200, 260, 320], value=200, key=f"wsim_det_{_sim_sid}")
-                    _view_h = st.slider(_t("Tinggi viewer (px)", "Viewer height (px)"), 480, 960, 700, 20, key=f"wsim_vh_{_sim_sid}")
-                _img_opts = ["sat"] + (["ortho"] if _seg.get("orthophoto") is not None else []) + ["none"]
-                _img_fmt = {"sat": _t("Citra satelit online (Esri World Imagery)", "Online satellite imagery (Esri World Imagery)"),
-                            "ortho": _t("Orthophoto yang diupload di Erosion Mapping", "Orthophoto uploaded in Erosion Mapping"),
-                            "none": _t("Tanpa citra (warna elevasi)", "No imagery (elevation colours)")}
-                _img_choice = st.radio(_t("Citra yang ditempel di medan 3D", "Imagery draped on the 3D terrain"), _img_opts,
-                                       index=(1 if "ortho" in _img_opts else 0), horizontal=True,
-                                       format_func=lambda k: _img_fmt[k], key=f"wsim_img_{_sim_sid}_{len(_img_opts)}")
-                if st.button(_t("Ambil ulang citra satelit", "Re-fetch satellite imagery"), key=f"wsim_refetch_{_sim_sid}"):
-                    st.session_state.pop(f"wsim_sat_{_sim_sid}", None)
-                    try:
-                        globals()["_fetch_satellite_basemap_utm"].clear()
-                    except Exception:
-                        pass
-                    st.rerun()
+                        _z_fill = np.where(np.isnan(_grid_z), np.nanmin(_grid_z), _grid_z)
+                        # PERBAIKAN: elevasi mentah (_z_fill) sering punya cekungan kecil PALSU (artefak
+                        # interpolasi griddata di area data jarang) yg dulu bikin massa "berhenti"/menggenang
+                        # di situ alih-alih terus mengalir turun -- sekarang arah aliran dihitung dari versi
+                        # yg SUDAH di-fill (teknik priority-flood yg SAMA dipakai tab Erosion Mapping utk D8),
+                        # supaya alirannya konsisten & benar-benar menuruni lereng seperti di Erosion Mapping.
+                        # Elevasi ASLI (_z_fill) tetap dipakai apa adanya utk tampilan mesh 3D.
+                        _z_route = _dem_fill_depressions(_z_fill, _inside_sim)
 
-            _can_run = not (_mode == "point" and (_pt is None or not _pt_in_seg))
-            _run = st.button(_t("▶ Jalankan simulasi air 3D", "▶ Run 3D water simulation"), type="primary",
-                             key=f"wsim_run_{_sim_sid}", disabled=not _can_run)
+                        _sub_steps_sim = 4
+                        _h = np.zeros_like(_z_fill, dtype=float)
+                        _src_area_sim = _src_mask_sim.sum() * _dx_sim * _dy_sim
+                        _h[_src_mask_sim] = _vol_sim / max(_src_area_sim, 1e-6)
+                        _h[~_inside_sim] = 0.0
 
-            _res_key = f"wsim_result_{_sim_sid}"
-            if _run:
-                try:
-                    _prog = st.progress(0.0, text=_t("Menyiapkan grid & DEM...", "Preparing grid & DEM..."))
-                    _prep = _wsim_prepare_grid(_seg, _res_sim, _fill, _minslope / 100.0,
-                                               paths=(_wsim_em_paths(_seg, _em) if (_mode == 'point' and _follow) else None))
-                    _dxs, _dys = _prep["dx"], _prep["dy"]
-                    if _mode == "rain":
-                        _rate = _C_run * (_R_mm / 1000.0) / (_Tr_min * 60.0)
-                        _T_tot = (_Tr_min + _post_min) * 60.0
-                        _kw = dict(rain_rate_ms=_rate, rain_dur_s=_Tr_min * 60.0)
-                        _title = _t("Simulasi Hujan", "Rainfall simulation")
-                        _sub = _t(f"{_seg.get('label', _sim_sid)} · R = {_R_mm:.0f} mm · C = {_C_run:.2f} · {_Tr_min:.0f} menit",
-                                  f"{_seg.get('label', _sim_sid)} · R = {_R_mm:.0f} mm · C = {_C_run:.2f} · {_Tr_min:.0f} min")
-                        _src_xy = None
-                        _rain_dur = _Tr_min * 60.0
+                        _friction_slope_sim = np.tan(np.radians(_friction_deg))
+                        _offsets_sim = [(-1, 0), (1, 0), (0, -1), (0, 1),
+                                        (-1, -1), (-1, 1), (1, -1), (1, 1)]
+
+                        _h_frames = [_h.copy()]
+                        for _f in range(_n_frames_sim):
+                            for _s in range(_sub_steps_sim):
+                                _surf = _z_route + _h
+                                _weights = []
+                                _tot_w = np.zeros_like(_h)
+                                for (_oy, _ox) in _offsets_sim:
+                                    # tetangga di luar grid diberi elevasi +inf (tembok, bukan wrap-around)
+                                    # supaya materi tidak "meloncat" dari tepi seberang, dan juga tidak
+                                    # dipaksa keluar dari grid krn dianggap curam ke arah yg tak ada datanya.
+                                    _nsurf = _grid_shift_no_wrap(_surf, _oy, _ox, np.inf)
+                                    _dist = float(np.hypot(_oy * _dy_sim, _ox * _dx_sim))
+                                    _slope_local = (_surf - _nsurf) / _dist
+                                    _w = np.clip(_slope_local, 0, None)
+                                    _w = np.where(_w > _friction_slope_sim, _w, 0.0)
+                                    _weights.append(_w)
+                                    _tot_w += _w
+                                _safe_tot = np.where(_tot_w > 0, _tot_w, 1.0)
+                                _outflow_frac = np.clip(_mobility_sim * _tot_w, 0, 0.5)
+                                _h_new = _h * (1 - _outflow_frac)
+                                for (_oy, _ox), _w in zip(_offsets_sim, _weights):
+                                    _flow = _h * _outflow_frac * (_w / _safe_tot)
+                                    # PERBAIKAN BUG ARAH: _flow[i,j] = jumlah yg dikirim dari sel (i,j) ke
+                                    # tetangga (i-_oy, j-_ox) -- jadi sel penerima yg benar itu (i+_oy,
+                                    # j+_ox), diambil dgn shift (-_oy,-_ox), BUKAN (_oy,_ox) spt kode lama.
+                                    # Kode lama memakai shift yg sama dgn arah pengiriman -> materi
+                                    # dikreditkan ke sel yg SALAH (bukan tetangga sebenarnya), sehingga
+                                    # sebarannya tidak benar2 mengikuti kemiringan turun spt yg terlihat
+                                    # di tab Erosion Mapping. Sel penerima yg tak punya pengirim sah (di
+                                    # tepi grid) diisi 0, bukan wrap-around dari tepi seberang.
+                                    _received = _grid_shift_no_wrap(_flow, -_oy, -_ox, 0.0)
+                                    _h_new = _h_new + _received
+                                _h_new[~_inside_sim] = 0.0
+                                _h = _h_new
+                            _h_frames.append(_h.copy())
+
+                        st.session_state[f"sim3d_result_{_sim_sid}"] = {
+                            "h_frames": _h_frames,
+                            "grid_x": _grid_x, "grid_y": _grid_y, "z_fill": _z_fill,
+                            "inside": _inside_sim, "sec_per_frame": _sec_per_frame,
+                            "cell_area": _dx_sim * _dy_sim,
+                            "vexag": _vexag,
+                        }
+
+            _sim_out = st.session_state.get(f"sim3d_result_{_sim_sid}")
+
+            if _sim_out is not None:
+                _sub_header(_t("3. Hasil Animasi 3D", "3. 3D Animation Results"))
+
+                _hf = _sim_out["h_frames"]
+                _gx3 = _sim_out["grid_x"]
+                _gy3 = _sim_out["grid_y"]
+                _z3 = _sim_out["z_fill"]
+                _ins3 = _sim_out["inside"]
+                _utm_gx3, _utm_gy3 = _grid_lokal_to_utm(_gx3, _gy3)
+                _spf = _sim_out["sec_per_frame"]
+                _vex = _sim_out["vexag"]
+                _cell_area_sim = _sim_out.get("cell_area", 1.0)
+
+                _zmin, _zmax = float(np.nanmin(_z3)), float(np.nanmax(_z3))
+                _zrange = max(_zmax - _zmin, 1e-6)
+                _depth_max = max(float(np.max([hf.max() for hf in _hf])), 1e-6)
+                _depth_thresh = _depth_max * 0.02
+
+                _terrain_colorscale = [
+                    [0.00, "#8b0000"], [0.15, "#c1440e"], [0.32, "#e08a2b"], [0.48, "#e8c93d"],
+                    [0.65, "#a8c93d"], [0.799, "#1b5e28"],
+                    [0.80, "#aee9ff"], [0.87, "#2f9bdb"], [0.94, "#0b4c91"], [1.00, "#021a49"],
+                ]
+
+                def _make_surfacecolor(_h_layer):
+                    _elev_norm = np.clip((_z3 - _zmin) / _zrange, 0, 1) * 0.799
+                    _flow_norm = np.clip(_h_layer / _depth_max, 0, 1)
+                    _disp = np.where(
+                        _h_layer > _depth_thresh,
+                        0.80 + _flow_norm * 0.20,
+                        _elev_norm,
+                    )
+                    _disp = np.where(_ins3, _disp, np.nan)
+                    return _disp
+
+                _z_display = _z3 * _vex
+                # Sembunyikan mesh permukaan animasi DI LUAR boundary kajian -- z diberi NaN
+                # dan connectgaps=False supaya Plotly benar-benar membuat lubang di situ
+                # (bukan sekadar mewarnainya NaN, yang sebelumnya malah tampil merah solid).
+                _z_display = np.where(_ins3, _z_display, np.nan)
+
+                _sat_z_level_debris = float(np.nanmin(_z_display)) - 0.05 * (
+                    float(np.nanmax(_z_display)) - float(np.nanmin(_z_display)) + 1e-6
+                )
+                _sat_trace_debris = _make_satellite_plane_trace(_sat_sim, _sat_z_level_debris, _n=60)
+                _debris_data = ([_sat_trace_debris] if _sat_trace_debris is not None else []) + [go.Surface(
+                    x=_utm_gx3, y=_utm_gy3, z=_z_display,
+                    surfacecolor=_make_surfacecolor(_hf[0]),
+                    colorscale=_terrain_colorscale, cmin=0, cmax=1,
+                    showscale=False, connectgaps=False,
+                    lighting=dict(ambient=0.55, diffuse=0.7, specular=0.15, roughness=0.9),
+                )]
+                _surf_idx_debris = len(_debris_data) - 1
+
+                _fig3d = go.Figure(
+                    data=_debris_data,
+                    layout=go.Layout(
+                        height=560,
+                        margin=dict(l=0, r=0, t=30, b=0),
+                        scene=dict(
+                            xaxis_title="Easting (m)", yaxis_title="Northing (m)", zaxis_title="Elevasi (m)",
+                            aspectmode="data",
+                            camera=dict(eye=dict(x=1.2, y=-1.6, z=0.9)),
+                        ),
+                        title=f"t = 0 s",
+                        updatemenus=[dict(
+                            type="buttons", showactive=False,
+                            y=1, x=0.05, xanchor="left", yanchor="top",
+                            buttons=[
+                                dict(label="▶ Play", method="animate",
+                                     args=[None, dict(frame=dict(duration=250, redraw=True),
+                                                       fromcurrent=True, transition=dict(duration=0))]),
+                                dict(label="⏸ Pause", method="animate",
+                                     args=[[None], dict(frame=dict(duration=0, redraw=False),
+                                                         mode="immediate")]),
+                            ],
+                        )],
+                        sliders=[dict(
+                            active=0, x=0.1, y=0, len=0.85,
+                            steps=[
+                                dict(label=f"{int(i * _spf)}s", method="animate",
+                                     args=[[str(i)], dict(mode="immediate",
+                                                           frame=dict(duration=0, redraw=True))])
+                                for i in range(len(_hf))
+                            ],
+                        )],
+                    ),
+                    frames=[
+                        go.Frame(
+                            data=[go.Surface(
+                                z=_z_display, surfacecolor=_make_surfacecolor(_hf[i]),
+                                colorscale=_terrain_colorscale, cmin=0, cmax=1, connectgaps=False,
+                            )],
+                            traces=[_surf_idx_debris],
+                            name=str(i),
+                            layout=go.Layout(title=f"t = {int(i * _spf)} s"),
+                        )
+                        for i in range(len(_hf))
+                    ],
+                )
+
+                st.plotly_chart(_fig3d, width="stretch")
+                st.caption(
+                    "Drag untuk rotasi, scroll untuk zoom. Tekan ▶ Play untuk animasi, atau geser "
+                    "slider di bawah plot untuk lompat ke waktu tertentu. Warna merah→kuning→hijau "
+                    "menandai elevasi medan (rendah→tinggi); biru muda→biru tua menandai keberadaan "
+                    "& ketebalan relatif material/air yang bergerak. Area di luar boundary kajian "
+                    "ditampilkan sbg citra satelit sebagai konteks lokasi."
+                )
+
+                _final_depth = _hf[-1]
+                _c_a, _c_b, _c_c = st.columns(3)
+                _metric_card("Kedalaman maks. tersisa", f"{_final_depth.max():.2f} m", container=_c_a)
+                _metric_card("Total volume (cek konservasi)",
+                            f"{float(_final_depth[_ins3].sum() * _cell_area_sim):.0f} m³", container=_c_b)
+                _metric_card("Durasi tersimulasi total", f"{int((len(_hf)-1) * _spf)} s", container=_c_c)
+
+            # =================================================================
+            # MODE BARU: SIMULASI GENANGAN BANJIR (diffusive-wave, bukan CA)
+            # =================================================================
+            st.markdown("---")
+            _sub_header(_t("Simulasi Genangan Banjir (Shallow-Water — mengikuti kontur)", "Flood Inundation Simulation (Shallow-Water — contour-following)"))
+            _ui_info(
+                "Mode terpisah dari simulasi debris-flow di atas. Di sini arah & besar aliran "
+                "dihitung dari **beda elevasi muka air** (bed + kedalaman) memakai persamaan "
+                "Manning — bukan aturan penyebaran sederhana. Air baru menyeberang ke sel "
+                "tetangga begitu muka airnya melebihi titik tertinggi di antara keduanya, "
+                "sehingga **lokasi limpasan/overtopping tanggul atau punggungan muncul otomatis** "
+                "dari hasil hitungan, dan batas genangan mengikuti kontur medan secara halus."
+            )
+
+            _fc1, _fc2, _fc3 = st.columns(3)
+            with _fc1:
+                _flood_src_mode = st.radio(
+                    "Sumber air",
+                    ["Muka air awal (reservoir / dam-break)", "Debit masuk kontinu (inflow sungai)"],
+                    key=f"flood_srcmode_{_sim_sid}",
+                )
+                _flood_radius = st.number_input(
+                    "Radius area sumber (m)", min_value=5.0, value=30.0, step=5.0,
+                    key=f"flood_radius_{_sim_sid}",
+                    help="Pakai titik sumber yang sama dengan yang ditandai di bagian '1. Setup' di atas.",
+                )
+            with _fc2:
+                if _flood_src_mode.startswith("Muka air"):
+                    # PERBAIKAN: dulu default-nya dipatok ke elevasi TERTINGGI DI SELURUH
+                    # DOMAIN -- kalau titik sumber yang diklik tidak persis di puncak
+                    # tertinggi itu (kasus paling umum), kedalaman awal jadi nyaris NOL,
+                    # sehingga air nyaris tidak mengalir sama sekali (persis keluhan
+                    # "airnya dikit banget"). Sekarang dipatok relatif ke elevasi DI TITIK
+                    # SUMBER itu sendiri + kedalaman awal wajar, supaya selalu ada air yang
+                    # benar-benar bisa mengalir berapa pun titik sumbernya.
+                    if _click_sim is not None:
+                        _z_at_src_default = float(griddata(
+                            (_grid_x.ravel(), _grid_y.ravel()), _grid_z.ravel(),
+                            (_click_sim[0], _click_sim[1]), method="linear"
+                        ))
+                        if np.isnan(_z_at_src_default):
+                            _z_at_src_default = float(np.nanmax(_grid_z[_inside_sim])) if _inside_sim.any() else float(np.nanmax(_grid_z))
                     else:
-                        _rr = max(_rad_m, 1.5 * max(_dxs, _dys))
-                        _smask = ((_prep["X"] - _pt[0]) ** 2 + (_prep["Y"] - _pt[1]) ** 2) <= _rr ** 2
-                        if not (_smask & _prep["inside"]).any():
-                            _ix = int(np.abs(_prep["xs"] - _pt[0]).argmin())
-                            _iy = int(np.abs(_prep["ys"] - _pt[1]).argmin())
-                            _smask = np.zeros_like(_prep["inside"])
-                            _smask[_ix, _iy] = True
-                        _T_tot = (_Tin_min + _post_min) * 60.0
-                        _kw = dict(src_mask=_smask, src_q=_Q_in, src_dur_s=_Tin_min * 60.0, init_depth=_d0)
-                        _title = _t("Simulasi Titik Point", "Point-source simulation")
-                        _sub = _t(f"{_seg.get('label', _sim_sid)} · Q = {_Q_in:.2f} m³/s · {_Tin_min:.0f} menit · X={_pt[0]:.1f}, Y={_pt[1]:.1f}",
-                                  f"{_seg.get('label', _sim_sid)} · Q = {_Q_in:.2f} m³/s · {_Tin_min:.0f} min · X={_pt[0]:.1f}, Y={_pt[1]:.1f}")
-                        _src_xy = _pt
-                        _rain_dur = 0.0
+                        _z_at_src_default = float(np.nanmax(_grid_z[_inside_sim])) if _inside_sim.any() else float(np.nanmax(_grid_z))
+                    _flood_level = st.number_input(
+                        "Elevasi muka air awal di sumber (m)",
+                        value=_z_at_src_default + 2.0,
+                        format="%.2f", key=f"flood_level_{_sim_sid}",
+                        help=(
+                            "Mis. elevasi puncak tampungan/dam sebelum meluap atau jebol. "
+                            "Default = elevasi tanah di titik sumber + 2 m (supaya ada kedalaman "
+                            "awal yang cukup untuk benar-benar mengalir) — sesuaikan kalau elevasi "
+                            "tampungan sebenarnya berbeda."
+                        ),
+                    )
+                    _flood_q = None
+                else:
+                    _flood_level = None
+                    _flood_q = st.number_input(
+                        "Debit masuk (m³/detik)", min_value=0.1, value=20.0, step=1.0,
+                        key=f"flood_q_{_sim_sid}",
+                    )
+                _manning_n = st.number_input(
+                    "Koefisien kekasaran Manning (n)", min_value=0.010, max_value=0.200,
+                    value=0.035, step=0.005, format="%.3f", key=f"flood_manning_{_sim_sid}",
+                    help="≈0.030–0.040 sungai alami/tanah, ≈0.020–0.025 saluran beton, "
+                         "≈0.050–0.080 semak/vegetasi lebat.",
+                )
+            with _fc3:
+                _flood_nframes = st.slider(
+                    _t("Jumlah frame animasi", "Number of animation frames"), 10, 60, 30, key=f"flood_nframes_{_sim_sid}",
+                )
+                _flood_secpf = st.number_input(
+                    "Durasi tersimulasi per frame (detik)", min_value=1.0, value=60.0, step=5.0,
+                    key=f"flood_secpf_{_sim_sid}",
+                    help=(
+                        "Air yang mengalir dangkal (model shallow-water) butuh waktu nyata yang "
+                        "cukup untuk merambat jauh — durasi terlalu pendek (mis. 10 detik/frame) "
+                        "membuat air terkesan 'diam'/hampir tidak bergerak walau perhitungannya "
+                        "benar. Default 60 detik/frame x 30 frame = 30 menit tersimulasi, cukup "
+                        "untuk air merambat mengikuti kontur secara terlihat jelas."
+                    ),
+                )
+                _flood_vexag = st.slider(
+                    "Eksagerasi vertikal tampilan", 1.0, 4.0, 1.8, step=0.1,
+                    key=f"flood_vexag_{_sim_sid}",
+                )
 
-                    def _wsim_cb(f):
-                        _prog.progress(min(max(f, 0.0), 1.0), text=_t(f"Menghitung aliran air... {int(f * 100)}%",
-                                                                      f"Computing water flow... {int(f * 100)}%"))
-                    _sim = _wsim_solve(_prep["z_route"], _prep["inside"], _dxs, _dys, _man_n, _T_tot, _nfr,
-                                       progress_cb=_wsim_cb, **_kw)
-                    _prog.progress(1.0, text=_t("Menyusun scene 3D + citra...", "Building 3D scene + imagery..."))
-                    _imagery, _img_msg = _wsim_get_imagery(_seg, _sim_sid, _img_choice, _prep)
-                    _to_utm = globals().get("_grid_lokal_to_utm")
-                    _html, _info = _wsim_build_scene_html(
-                        seg=_seg, prep=_prep, sim=_sim, mode=_mode, title=_title, subtitle=_sub, imagery=_imagery,
-                        to_utm=_to_utm, labels=_wsim_labels(), vexag=_vex_def, nd_long=int(_detail),
-                        rain_dur_s=_rain_dur, source_xy=_src_xy, three_inline=_wsim_find_local_three(),
-                        paths=_wsim_em_paths(_seg, _em))
-                    _inside = _prep["inside"]
-                    _pk = _sim["peak"]
-                    _cell_a = _sim["cell_area"]
-                    _ponds = _wsim_top_ponds(_sim, _prep, _to_utm)
-                    # CSV peta kedalaman maksimum (sel basah saja)
-                    _wet = _inside & (_pk > 0.001)
-                    _csv_df = pd.DataFrame({"X_lokal": _prep["X"][_wet], "Y_lokal": _prep["Y"][_wet],
-                                            "Elevasi_m": _prep["z"][_wet], "Kedalaman_maks_m": _pk[_wet]})
-                    if _to_utm is not None and _wet.any():
-                        _ee, _nn = _to_utm(_prep["X"][_wet], _prep["Y"][_wet])
-                        _csv_df.insert(2, "Easting_UTM", np.asarray(_ee))
-                        _csv_df.insert(3, "Northing_UTM", np.asarray(_nn))
-                    st.session_state[_res_key] = {
-                        "sid": _sim_sid, "html": _html, "height": int(_view_h), "times": _sim["times"],
-                        "q_in": _sim["q_in"], "q_out": _sim["q_out"], "ponds": _ponds,
-                        "csv": _csv_df.to_csv(index=False).encode("utf-8"),
-                        "metrics": {
-                            "peak_max": float(_pk[_inside].max()) if _inside.any() else 0.0,
-                            "wet_ha": float((_pk[_inside] > 0.05).sum() * _cell_a / 10000.0),
-                            "q_out_peak": float(np.max(_sim["q_out"])) if len(_sim["q_out"]) else 0.0,
-                            "v_in": float(_sim["v_in"] + _sim["v_init"]), "v_out": float(_sim["v_out"]),
-                            "bal": float(_sim["balance_err_pct"]),
-                        },
-                        "img_msg": _img_msg, "steps": _sim["steps"], "mode": _mode,
-                    }
-                    _prog.empty()
-                except Exception as _e_wsim:
-                    st.error(_t(f"Simulasi gagal: {_e_wsim}", f"Simulation failed: {_e_wsim}"))
+            _flood_run = st.button(
+                "Jalankan Simulasi Genangan", key=f"flood_run_{_sim_sid}", type="primary",
+            )
 
-            _res_out = st.session_state.get(_res_key)
-            if _res_out is not None:
-                _sub_header(_t("3. Hasil simulasi air 3D", "3. 3D water simulation results"))
-                if _res_out.get("img_msg"):
-                    _ui_warning(_res_out["img_msg"])
-                _wsim_show_result(_res_out)
-            elif _can_run:
-                _ui_info(_t("Atur parameter lalu tekan 'Jalankan simulasi air 3D'.",
-                            "Set the parameters, then press 'Run 3D water simulation'."))
+            if _click_sim is None:
+                st.caption(
+                    "Tandai dulu titik sumber (klik peta / input koordinat) di bagian "
+                    "'1. Setup Sumber Longsoran/Debris' di atas — titik yang sama dipakai "
+                    "sebagai lokasi sumber air di sini."
+                )
+            elif _flood_run:
+                _fcx, _fcy = _click_sim
+                if not _bnd_sim.contains(Point(_fcx, _fcy)):
+                    st.error(_t("Titik sumber berada di luar boundary area kajian.", "The source point is outside the study area boundary."))
+                else:
+                    with st.spinner("Menjalankan simulasi shallow-water (diffusive-wave)..."):
+                        (_fh_frames, _flood_overflow_track, _flood_overflow_pts,
+                         _z_flood, _dx_flood, _dy_flood, _cell_area_flood) = _simulate_flood_diffusive(
+                            grid_x=_grid_x, grid_y=_grid_y, grid_z=_grid_z, inside=_inside_sim,
+                            src_xy=(_fcx, _fcy), src_radius=_flood_radius,
+                            src_mode=("level" if _flood_src_mode.startswith("Muka air") else "inflow"),
+                            src_level=_flood_level, src_q=_flood_q, manning_n=_manning_n,
+                            n_frames=_flood_nframes, sec_per_frame=_flood_secpf,
+                        )
+                        st.session_state[f"flood_result_{_sim_sid}"] = {
+                            "h_frames": _fh_frames, "grid_x": _grid_x, "grid_y": _grid_y,
+                            "z_fill": _z_flood, "inside": _inside_sim,
+                            "sec_per_frame": _flood_secpf, "vexag": _flood_vexag,
+                            "cell_area": _cell_area_flood, "overflow_pts": _flood_overflow_pts,
+                            "boundary": _bnd_sim,
+                        }
 
+            _flood_out = st.session_state.get(f"flood_result_{_sim_sid}")
+
+            if _flood_out is not None:
+                st.markdown("###### " + _t("Hasil Animasi 3D — Genangan", "3D Animation Results — Inundation"))
+
+                _ffh = _flood_out["h_frames"]
+                _fgx = _flood_out["grid_x"]
+                _fgy = _flood_out["grid_y"]
+                _fz = _flood_out["z_fill"]
+                _fins = _flood_out["inside"]
+                _fspf = _flood_out["sec_per_frame"]
+                _fvex = _flood_out["vexag"]
+                _f_cell_area = _flood_out.get("cell_area", 1.0)
+                _utm_fgx, _utm_fgy = _grid_lokal_to_utm(_fgx, _fgy)
+
+                _fzmin, _fzmax = float(np.nanmin(_fz)), float(np.nanmax(_fz))
+                _fzrange = max(_fzmax - _fzmin, 1e-6)
+                _fdepth_max = max(float(np.max([hf.max() for hf in _ffh])), 1e-6)
+                _fdepth_thresh = _fdepth_max * 0.02
+
+                _water_colorscale = [
+                    [0.00, "#8b0000"], [0.15, "#c1440e"], [0.32, "#e08a2b"], [0.48, "#e8c93d"],
+                    [0.65, "#a8c93d"], [0.799, "#1b5e28"],
+                    [0.80, "#aee9ff"], [0.87, "#2f9bdb"], [0.94, "#0b4c91"], [1.00, "#021a49"],
+                ]
+
+                def _make_flood_surfacecolor(_h_layer):
+                    _elev_norm = np.clip((_fz - _fzmin) / _fzrange, 0, 1) * 0.799
+                    _flow_norm = np.clip(_h_layer / _fdepth_max, 0, 1)
+                    _disp = np.where(
+                        _h_layer > _fdepth_thresh, 0.80 + _flow_norm * 0.20, _elev_norm,
+                    )
+                    return np.where(_fins, _disp, np.nan)
+
+                _fz_display = _fz * _fvex
+                _fz_display = np.where(_fins, _fz_display, np.nan)
+
+                _sat_z_level_flood = float(np.nanmin(_fz_display)) - 0.05 * (
+                    float(np.nanmax(_fz_display)) - float(np.nanmin(_fz_display)) + 1e-6
+                )
+                _sat_trace_flood = _make_satellite_plane_trace(_sat_sim, _sat_z_level_flood, _n=60)
+                _flood_data = ([_sat_trace_flood] if _sat_trace_flood is not None else []) + [go.Surface(
+                    x=_utm_fgx, y=_utm_fgy, z=_fz_display,
+                    surfacecolor=_make_flood_surfacecolor(_ffh[0]),
+                    colorscale=_water_colorscale, cmin=0, cmax=1, showscale=False, connectgaps=False,
+                    lighting=dict(ambient=0.55, diffuse=0.7, specular=0.15, roughness=0.9),
+                )]
+                _surf_idx_flood = len(_flood_data) - 1
+
+                _fig_flood = go.Figure(
+                    data=_flood_data,
+                    layout=go.Layout(
+                        height=560, margin=dict(l=0, r=0, t=30, b=0),
+                        scene=dict(
+                            xaxis_title="Easting (m)", yaxis_title="Northing (m)", zaxis_title="Elevasi (m)",
+                            aspectmode="data", camera=dict(eye=dict(x=1.2, y=-1.6, z=0.9)),
+                        ),
+                        title="t = 0 s",
+                        updatemenus=[dict(
+                            type="buttons", showactive=False, y=1, x=0.05, xanchor="left", yanchor="top",
+                            buttons=[
+                                dict(label="▶ Play", method="animate",
+                                     args=[None, dict(frame=dict(duration=250, redraw=True),
+                                                       fromcurrent=True, transition=dict(duration=0))]),
+                                dict(label="⏸ Pause", method="animate",
+                                     args=[[None], dict(frame=dict(duration=0, redraw=False), mode="immediate")]),
+                            ],
+                        )],
+                        sliders=[dict(
+                            active=0, x=0.1, y=0, len=0.85,
+                            steps=[
+                                dict(label=f"{int(i * _fspf)}s", method="animate",
+                                     args=[[str(i)], dict(mode="immediate", frame=dict(duration=0, redraw=True))])
+                                for i in range(len(_ffh))
+                            ],
+                        )],
+                    ),
+                    frames=[
+                        go.Frame(
+                            data=[go.Surface(
+                                z=_fz_display, surfacecolor=_make_flood_surfacecolor(_ffh[i]),
+                                colorscale=_water_colorscale, cmin=0, cmax=1, connectgaps=False,
+                            )],
+                            traces=[_surf_idx_flood],
+                            name=str(i), layout=go.Layout(title=f"t = {int(i * _fspf)} s"),
+                        )
+                        for i in range(len(_ffh))
+                    ],
+                )
+                st.plotly_chart(_fig_flood, width="stretch")
+                st.caption(
+                    "Biru muda→biru tua = kedalaman genangan relatif; warna dasar merah→kuning→hijau "
+                    "= elevasi medan asli (rendah→tinggi). Karena fluks dihitung dari gradien muka air "
+                    "(bukan CA), genangan menjalar mengikuti kontur secara halus. Area di luar boundary "
+                    "kajian ditampilkan sbg citra satelit sebagai konteks lokasi."
+                )
+
+                st.markdown("###### " + _t("Peta Genangan Halus (mengikuti kontur) & Titik Limpasan", "Smooth Inundation Map (contour-following) & Overflow Points"))
+                _final_h_flood = _ffh[-1]
+                _fig_contour = go.Figure()
+
+                # Latar citra satelit (koordinat LOKAL) -- dibuat sbg layer Scattergl padat
+                # berwarna hasil sampling piksel citra satelit (via transform lokal->UTM per
+                # titik), supaya area DI LUAR boundary/genangan tetap menampilkan citra asli
+                # sbg konteks, bukan kosong putih. go.Contour butuh grid axis-aligned jadi
+                # tidak bisa langsung dipindah ke sumbu UTM (sumbu lokal miring ~57° thd UTM).
+                if _sat_sim is not None:
+                    _padx = (_fgx.max() - _fgx.min()) * 0.15
+                    _pady = (_fgy.max() - _fgy.min()) * 0.15
+                    _sxl = np.linspace(_fgx.min() - _padx, _fgx.max() + _padx, 110)
+                    _syl = np.linspace(_fgy.min() - _pady, _fgy.max() + _pady, 110)
+                    _SXl, _SYl = np.meshgrid(_sxl, _syl)
+                    _SXu, _SYu = _grid_lokal_to_utm(_SXl, _SYl)
+                    _sat_xmin, _sat_xmax, _sat_ymin, _sat_ymax = _sat_sim["extent"]
+                    _sat_rgb = _sat_sim["rgb"]
+                    _sat_h, _sat_w = _sat_rgb.shape[0], _sat_rgb.shape[1]
+                    _col_i = np.clip(((_SXu - _sat_xmin) / max(_sat_xmax - _sat_xmin, 1e-9) * (_sat_w - 1)).astype(int), 0, _sat_w - 1)
+                    _row_i = np.clip(((_sat_ymax - _SYu) / max(_sat_ymax - _sat_ymin, 1e-9) * (_sat_h - 1)).astype(int), 0, _sat_h - 1)
+                    _sat_colors_2d = _sat_rgb[_row_i, _col_i]
+                    _fig_contour.add_trace(go.Scattergl(
+                        x=_SXl.ravel(), y=_SYl.ravel(), mode="markers",
+                        marker=dict(
+                            size=9, opacity=1.0,
+                            color=[f"rgb({r},{g},{b})" for r, g, b in _sat_colors_2d.reshape(-1, 3)],
+                        ),
+                        name="Citra satelit", showlegend=False, hoverinfo="skip",
+                    ))
+
+                _fig_contour.add_trace(go.Contour(
+                    x=_fgx[:, 0], y=_fgy[0, :], z=np.where(_fins, _final_h_flood, np.nan).T,
+                    colorscale="Blues", showscale=True, colorbar=dict(title="Kedalaman (m)"),
+                    line_smoothing=1.3, contours=dict(coloring="heatmap"),
+                    opacity=0.85, connectgaps=False,
+                    hovertemplate="X=%{x:.2f}, Y=%{y:.2f}<br>Kedalaman=%{z:.2f}m<extra></extra>",
+                ))
+                _fbx, _fby = _boundary_xy_flat(_bnd_sim)
+                _fig_contour.add_trace(go.Scatter(
+                    x=_fbx, y=_fby, mode="lines", line=dict(color="magenta", width=2),
+                    name="Boundary", hoverinfo="skip",
+                ))
+                _flood_pts_list = _flood_out.get("overflow_pts", [])
+                if _flood_pts_list:
+                    _fig_contour.add_trace(go.Scatter(
+                        x=[p["X"] for p in _flood_pts_list], y=[p["Y"] for p in _flood_pts_list],
+                        mode="markers+text",
+                        marker=dict(size=14, color="red", symbol="star",
+                                    line=dict(color="black", width=1)),
+                        text=[str(i + 1) for i in range(len(_flood_pts_list))],
+                        textposition="top center", name="Titik limpasan",
+                        hovertemplate="Titik limpasan #%{text}<br>X=%{x:.2f}, Y=%{y:.2f}<extra></extra>",
+                    ))
+                _fig_contour.update_layout(
+                    height=480, xaxis_title="Easting (m)", yaxis_title="Northing (m)",
+                    yaxis=dict(scaleanchor="x", scaleratio=1),
+                    margin=dict(l=10, r=10, t=10, b=10),
+                )
+                st.plotly_chart(_fig_contour, width="stretch")
+
+                if _flood_pts_list:
+                    st.markdown("**" + _t("Titik-titik limpasan terdeteksi", "Detected overflow points") + "** (" + _t("diurutkan dari volume terlimpas terbesar", "sorted by largest overflow volume") + "):")
+                    st.dataframe(pd.DataFrame(_flood_pts_list), width="stretch", hide_index=True)
+                    st.caption(
+                        "Titik-titik ini adalah sel yang berbatasan langsung dengan area sumber (dam/"
+                        "reservoir) dan tercatat menerima aliran keluar terbesar selama simulasi — "
+                        "kandidat lokasi limpasan/overtopping paling mungkin secara fisik."
+                    )
+                else:
+                    st.caption(
+                        "Belum terdeteksi limpasan keluar dari area sumber pada durasi & parameter "
+                        "simulasi ini — coba naikkan elevasi muka air awal / debit masuk, atau "
+                        "perpanjang durasi simulasi."
+                    )
+
+                _final_depth_flood = _ffh[-1]
+                _fca, _fcb, _fcc = st.columns(3)
+                _metric_card("Kedalaman maks. genangan", f"{_final_depth_flood.max():.2f} m", container=_fca)
+                _metric_card("Total volume genangan",
+                            f"{float(_final_depth_flood[_fins].sum() * _f_cell_area):.0f} m³", container=_fcb)
+                _metric_card("Durasi tersimulasi total", f"{int((len(_ffh) - 1) * _fspf)} s", container=_fcc)
 
 import os
 import pandas as pd
