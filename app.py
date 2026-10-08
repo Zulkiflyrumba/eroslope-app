@@ -1836,6 +1836,181 @@ def _field_package_build(seg_results, active_sid, xs_draw_lines):
     }
 
 
+# ===================== MONITOR HUJAN: kunci proyek (ditambahkan oleh patch) =====================
+import types as _rl_types
+_RAIN_LOCK_SRC = r'''"""Pembuat 'kunci proyek' untuk Monitor Hujan. Dipakai dari aplikasi Erosion Mapping (numpy saja)."""
+from __future__ import annotations
+import json, re
+from datetime import datetime, timezone
+import numpy as np
+
+DEFAULT_ALERT = {"min_rain_potential_mm_6h": 5.0, "min_rain_probability_pct": 60.0, "rain_now_mm_h": 0.3,
+                 "area_class_min": 2, "area_pct_threshold": 35.0, "level_min_share_pct": 5.0, "level_alert_min": 1,
+                 "forecast_safety": 1.0, "cooldown_hours": 6.0, "send_clear": True}
+
+
+def slug(s):
+    s = re.sub(r"[^a-zA-Z0-9]+", "-", str(s or "proyek")).strip("-").lower()
+    return s or "proyek"
+
+
+def zone_quantiles(zone_map, inside=None):
+    z = np.asarray(zone_map, dtype=float)
+    ok = np.isfinite(z)
+    if inside is not None:
+        ok &= np.asarray(inside, dtype=bool)
+    if ok.sum() < 20:
+        return None
+    return [round(float(v), 4) for v in np.percentile(z[ok], np.linspace(0, 100, 101))]
+
+
+def build_lock(project_name, lat, lon, segments, tc_hours=1.0, r24_base_mm=None, beta=0.8, alert=None, boundary_ll=None, project_id=None):
+    """segments: list of dict(id,label,zone_map,inside,area_ha,method).  r24_base_mm = hujan rencana (mm/hari) yang
+    dipakai saat analisis dijalankan (R24 x faktor hujan ekstrem)."""
+    segs = []
+    for s in segments:
+        zq = zone_quantiles(s.get("zone_map"), s.get("inside"))
+        method = str(s.get("method") or "")
+        cont = zq is not None and not (("Hjulstrom" in method) or ("Shields" in method))
+        segs.append({"id": s.get("id"), "label": s.get("label"), "area_ha": round(float(s.get("area_ha") or 0), 3),
+                     "method": method, "surrogate": "continuous" if cont else "discrete", "zone_quantiles": zq if cont else None})
+    return {
+        "schema": 1, "id": project_id or slug(project_name), "name": project_name, "enabled": True,
+        "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "lat": round(float(lat), 5), "lon": round(float(lon), 5),
+        "hydro": {"tc_hours": float(tc_hours), "r24_base_mm": float(r24_base_mm) if r24_base_mm else 150.0, "beta": float(beta),
+                  "r24_base_known": bool(r24_base_mm)},
+        "alert": {**DEFAULT_ALERT, **(alert or {})},
+        "boundary_ll": boundary_ll or [], "segments": segs,
+    }
+
+
+def calibrate_beta(zq, ratio, observed_pct_ge, cls):
+    """Cari beta supaya model sesuai hasil nyata: bila analisis dijalankan ulang dengan hujan = ratio x hujan rencana
+    dan luas pada kelas >= cls teramati observed_pct_ge (%), kembalikan beta terbaik (0.3..2.0)."""
+    import importlib.util, os, sys
+    try:
+        from rain_monitor import class_shares
+    except Exception:
+        spec = importlib.util.spec_from_file_location("rain_monitor", os.path.join(os.path.dirname(__file__), "rain_monitor.py"))
+        m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); class_shares = m.class_shares
+    best, berr = 0.8, 1e9
+    for b in np.linspace(0.3, 2.0, 171):
+        e = abs(class_shares(zq, ratio, float(b))[1][cls] - observed_pct_ge)
+        if e < berr:
+            best, berr = float(b), e
+    return best, berr
+'''
+_RL = _rl_types.ModuleType("rain_lock")
+exec(_RAIN_LOCK_SRC, _RL.__dict__)
+
+
+def _rl_github_put(repo, path, content_bytes, token, branch="main", message="Update proyek monitor hujan", api="https://api.github.com"):
+    """Simpan/ganti file di repo GitHub lewat REST API (Contents). Return (ok, pesan)."""
+    import base64 as _b64, urllib.request as _ur, urllib.error as _ue
+    url = f"{api}/repos/{repo}/contents/{path}"
+    hdr = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
+           "User-Agent": "erosion-mapping-app", "X-GitHub-Api-Version": "2022-11-28"}
+    sha = None
+    try:
+        with _ur.urlopen(_ur.Request(url + f"?ref={branch}", headers=hdr), timeout=25) as r:
+            sha = json.loads(r.read().decode()).get("sha")
+    except _ue.HTTPError as e:
+        if e.code != 404:
+            return False, f"GitHub menolak ({e.code}). Cek token & nama repo."
+    except Exception as e:
+        return False, f"Tidak bisa menghubungi GitHub: {e}"
+    body = {"message": message, "content": _b64.b64encode(content_bytes).decode(), "branch": branch}
+    if sha:
+        body["sha"] = sha
+    try:
+        req = _ur.Request(url, data=json.dumps(body).encode(), headers={**hdr, "Content-Type": "application/json"}, method="PUT")
+        with _ur.urlopen(req, timeout=30) as r:
+            return True, "Tersimpan di repo."
+    except _ue.HTTPError as e:
+        return False, f"GitHub menolak ({e.code}). Token perlu izin 'Contents: read & write'."
+    except Exception as e:
+        return False, f"Gagal menyimpan: {e}"
+
+
+def _rain_lock_ui(seg_results):
+    """Panel 'Kunci proyek ke Monitor Hujan' (di tab Cross Section, dekat ekspor Eromaps)."""
+    with st.expander(_t("🌧️ Kunci proyek ke Monitor Hujan (notifikasi Telegram)", "🌧️ Lock project to Rain Monitor (Telegram alerts)"), expanded=False):
+        st.caption(_t(
+            "Semua parameter proyek dikunci dari hasil analisis ini. Hanya hujan yang dibaca ulang secara realtime oleh Monitor Hujan "
+            "(prakiraan 6 jam + hujan saat ini) untuk memperkirakan berapa persen luas desain yang masuk kelas erosi tinggi.",
+            "All project parameters are locked from this analysis. Only rainfall is re-read live by the Rain Monitor."))
+        if not seg_results:
+            st.info(_t("Jalankan Erosion Mapping dulu.", "Run Erosion Mapping first."))
+            return
+        _c1, _c2 = st.columns(2)
+        _name = _c1.text_input(_t("Nama proyek", "Project name"), value=st.session_state.get("rl_name", "Proyek Erosi"), key="rl_name")
+        _sids = list(seg_results.keys())
+        _r24s = [float(seg_results[s].get("r24_mm_extreme") or 0) for s in _sids]
+        _r24_def = max([x for x in _r24s if x > 0] or [150.0])
+        _tcs = [float(st.session_state.get(f"tc_hours_{s}", 1.0) or 1.0) for s in _sids]
+        _r24 = _c2.number_input(_t("Hujan rencana saat analisis (mm/hari)", "Design rainfall used in analysis (mm/day)"), 10.0, 1500.0, _r24_def, 5.0, key="rl_r24",
+                                help=_t("R24 x faktor hujan ekstrem yang dipakai saat RUN ANALYSIS. Terisi otomatis bila perhitungan hidrolika aktif.",
+                                        "R24 x extreme-rainfall factor used at RUN ANALYSIS. Auto-filled when hydraulics is enabled."))
+        _c3, _c4 = st.columns(2)
+        _tc = _c3.number_input(_t("Waktu konsentrasi tc (jam)", "Time of concentration tc (h)"), 0.1, 24.0, float(_tcs[0]) if _tcs else 1.0, 0.1, key="rl_tc")
+        _beta = _c4.slider(_t("Kepekaan erosi terhadap hujan (β)", "Erosion sensitivity to rain (β)"), 0.4, 1.6, 0.8, 0.05, key="rl_beta",
+                           help=_t("Perkiraan awal 0,8. Makin besar, makin cepat zona memburuk saat hujan naik. Bisa dikalibrasi dari 2 kali run dengan faktor hujan berbeda.",
+                                   "Initial guess 0.8. Higher = zones worsen faster as rain increases."))
+        _a1, _a2, _a3 = st.columns(3)
+        _cls = _a1.selectbox(_t("Kelas yang dihitung terdampak", "Class counted as affected"), [1, 2, 3], index=1,
+                             format_func=lambda i: ["", "Kuning ke atas", "Oranye ke atas", "Merah"][i], key="rl_cls")
+        _pct = _a2.number_input(_t("Notifikasi bila luas ≥ (%)", "Alert when area ≥ (%)"), 1.0, 100.0, 35.0, 1.0, key="rl_pct")
+        _lvl = _a3.selectbox(_t("Notifikasi kenaikan status mulai", "Status-rise alerts from"), [1, 2, 3], index=0,
+                             format_func=lambda i: ["", "Kuning", "Oranye", "Merah"][i], key="rl_lvl")
+        _b1, _b2 = st.columns(2)
+        _mm6 = _b1.number_input(_t("Potensi hujan: ≥ mm dalam 6 jam", "Rain potential: ≥ mm in 6 h"), 0.5, 100.0, 5.0, 0.5, key="rl_mm6")
+        _safe = _b2.number_input(_t("Pengali kehati-hatian prakiraan", "Forecast safety factor"), 0.5, 3.0, 1.0, 0.1, key="rl_safe")
+        if st.button(_t("🔒 Buat kunci proyek", "🔒 Build project lock"), key="rl_build_btn"):
+            try:
+                _segs, _lat, _lon = [], None, None
+                for _sid in _sids:
+                    _r = seg_results[_sid]
+                    _segs.append({"id": str(_sid), "label": _r.get("label"), "zone_map": _r.get("zone_map"), "inside": _r.get("inside"),
+                                  "area_ha": _r.get("boundary_area_ha"), "method": _r.get("analysis_method")})
+                    if _lat is None and _r.get("boundary") is not None and not _r["boundary"].is_empty:
+                        _cx, _cy = _r["boundary"].centroid.x, _r["boundary"].centroid.y
+                        _E, _N = _field_lokal_to_utm(np.array([_cx]), np.array([_cy]))
+                        _la, _lo = _field_utm_to_latlon(_E, _N, _FIELD_COORD_UTM_EPSG)
+                        _lat, _lon = float(np.ravel(_la)[0]), float(np.ravel(_lo)[0])
+                if _lat is None:
+                    raise ValueError("boundary tidak ditemukan")
+                _lock = _RL.build_lock(_name, _lat, _lon, _segs, tc_hours=_tc, r24_base_mm=_r24, beta=_beta,
+                                       alert={"area_class_min": int(_cls), "area_pct_threshold": float(_pct), "level_alert_min": int(_lvl),
+                                              "min_rain_potential_mm_6h": float(_mm6), "forecast_safety": float(_safe)})
+                st.session_state["rain_lock_obj"] = _lock
+            except Exception as _e:
+                st.error(_t(f"Gagal membuat kunci: {_e}", f"Failed to build lock: {_e}"))
+        _lock = st.session_state.get("rain_lock_obj")
+        if _lock:
+            _data = json.dumps(_lock, ensure_ascii=False).encode("utf-8")
+            _nok = sum(1 for s in _lock["segments"] if s["surrogate"] == "continuous")
+            st.success(_t(f"Kunci siap: {_lock['name']} di {_lock['lat']:.4f}, {_lock['lon']:.4f} ({len(_data)/1024:.0f} KB, {_nok}/{len(_lock['segments'])} segmen punya model respons).",
+                          f"Lock ready: {_lock['name']} ({len(_data)/1024:.0f} KB)."))
+            if _nok < len(_lock["segments"]):
+                st.warning(_t("Segmen dengan metode Hjulström/Shields tidak punya model respons kontinu; segmen itu hanya mendapat notifikasi hujan.",
+                              "Hjulström/Shields segments get rain alerts only."))
+            st.download_button(_t("⬇️ Unduh kunci proyek (.json)", "⬇️ Download project lock (.json)"), data=_data,
+                               file_name=f"{_lock['id']}.json", mime="application/json", key="rl_dl")
+            st.caption(_t("Taruh file ini di folder projects/ pada repo monitor, atau kirim langsung di bawah.", "Put this file in projects/ of the monitor repo, or push below."))
+            try:
+                _tok, _repo = st.secrets.get("GITHUB_TOKEN", ""), st.secrets.get("MONITOR_REPO", "")
+            except Exception:
+                _tok, _repo = "", ""
+            if _tok and _repo:
+                if st.button(_t(f"🚀 Kirim ke GitHub ({_repo})", f"🚀 Push to GitHub ({_repo})"), key="rl_push"):
+                    _ok, _msg = _rl_github_put(_repo, f"projects/{_lock['id']}.json", _data, _tok, st.secrets.get("MONITOR_BRANCH", "main"))
+                    (st.success if _ok else st.error)(_msg)
+            else:
+                st.caption(_t("Opsional: isi GITHUB_TOKEN dan MONITOR_REPO di secrets Streamlit untuk tombol kirim otomatis.",
+                              "Optional: set GITHUB_TOKEN and MONITOR_REPO in Streamlit secrets for one-click push."))
+
+
 def _xs_curtain(r, key="erosion", decay=True, thick=None, nx_max=240, ny=260, n_layers=10):
     """Bangun grid 2-D 'tirai' di bawah permukaan. Mengembalikan dict array siap plot."""
     _d = np.asarray(r["distance"], dtype=float)
@@ -8410,6 +8585,7 @@ _tab_labels = [
 ]
 if _is_admin:
     _tab_labels.append("9. " + _t("Monitoring Deviation", "Monitoring Deviation"))
+_tab_labels.append(f"{len(_tab_labels) + 1}. " + _t("Simulasi Dumping", "Dump Simulation"))
 
 _STAGE_GROUPS = [
     ("rgba(79,183,131,0.45)", _t("1) Data Dasar &amp; Desain", "1) Base Data &amp; Design")),
@@ -8425,10 +8601,10 @@ st.markdown(f'<div style="display:flex; flex-wrap:wrap; gap:4px; align-items:cen
            unsafe_allow_html=True)
 
 if _is_admin:
-    tab1, tab8, tab7, tab6, tab9, tab4, tab2, tab5, tab3 = st.tabs(_tab_labels)
+    tab1, tab8, tab7, tab6, tab9, tab4, tab2, tab5, tab3, tabD = st.tabs(_tab_labels)
 else:
     # User surveyor tidak menampilkan tab "Monitoring Deviation" sama sekali.
-    tab1, tab8, tab7, tab6, tab9, tab4, tab2, tab5 = st.tabs(_tab_labels)
+    tab1, tab8, tab7, tab6, tab9, tab4, tab2, tab5, tabD = st.tabs(_tab_labels)
     tab3 = None
 
 # (tab_hub & tab_workflow dipindah ke landing page -- lihat blok "if st.session_state.home_page:")
@@ -21378,6 +21554,3224 @@ def _wsim_show_result(res):
 
 
 # =========================================================
+# ====== MODUL: SIMULASI DUMPING HD KE KOLAM AIR / LUMPUR ==
+# =========================================================
+# Disisipkan oleh apply_dump_patch.py. Mesin (dump_sim), pembangun viewer (dump_scene) dan template
+# viewer three.js ditanam sebagai teks di bawah ini supaya app tetap SATU file.
+_DUMP_SIM_SRC = r'''"""
+Mesin simulasi dumping unit HD (haul truck) ke kolam air / lumpur / lahan terbuka.
+
+Model (2D, grid DEM, hanya numpy):
+  * Material timbunan  : volume curah (bulk) ditambahkan di titik dump selama waktu tumpah, lalu menyebar
+                         mengikuti sudut longsor (angle of repose; lebih landai di dalam air/lumpur)
+                         -> model "sandpile" kekal massa.
+  * Lumpur             : lapisan fluida yield-stress (Bingham) -- hanya mengalir bila kemiringan permukaan
+                         melebihi tau_y/(rho*g*h). Di kolam tertutup ia naik drastis; di lahan terbuka ia
+                         menyebar sampai kemiringannya tak cukup lagi.
+  * Air                : shallow-water local-inertia (Bates dkk. 2010) di atas permukaan lumpur/timbunan.
+  * Pendesakan         : timbunan yang masuk ke bawah muka cairan mengangkat lumpur & air di atasnya;
+                         pori timbunan menyerap sebagian air; material halus (slaking) berubah jadi lumpur.
+  * Batas              : terbuka (cairan yang melewati tepi domain dicatat sebagai 'keluar/meluap').
+Catatan jujur: model ILUSTRATIF/awal, belum dikalibrasi. Sudut longsor bawah air, fraksi slaking, dan
+parameter lumpur adalah nilai indikatif yang harus disesuaikan dengan kondisi lapangan.
+"""
+from __future__ import annotations
+
+import math
+import numpy as np
+
+G = 9.81
+RHO_W = 1000.0
+
+# ------------------------------------------------------------------ pustaka unit (nilai indikatif, bisa diedit)
+UNITS = {
+    "Cat 777 (G/F/07)": dict(payload_t=91.7, cap_m3=60.1, len_m=9.9, wid_m=6.1, hgt_m=4.6, raise_s=15.0, verified=True,
+                             note="Payload 101,1 ton US (91,7 t); bak dual slope 78,6 yd³ ≈ 60,1 m³ (heaped 2:1); X-body 64,1 m³. Sumber: spesifikasi dealer Cat."),
+    "Komatsu HD785-7": dict(payload_t=91.0, cap_m3=55.0, len_m=10.3, wid_m=6.0, hgt_m=4.6, raise_s=15.0, verified=False,
+                            note="Perkiraan, verifikasi dengan brosur unit Anda."),
+    "Cat 773": dict(payload_t=54.0, cap_m3=38.0, len_m=8.7, wid_m=5.0, hgt_m=4.2, raise_s=12.0, verified=False,
+                    note="Perkiraan, verifikasi dengan brosur unit Anda."),
+    "Komatsu HD465-7": dict(payload_t=55.0, cap_m3=36.0, len_m=8.8, wid_m=5.1, hgt_m=4.2, raise_s=12.0, verified=False,
+                            note="Perkiraan, verifikasi dengan brosur unit Anda."),
+    "Cat 785": dict(payload_t=136.0, cap_m3=78.0, len_m=11.3, wid_m=7.0, hgt_m=5.1, raise_s=17.0, verified=False,
+                    note="Perkiraan, verifikasi dengan brosur unit Anda."),
+    "Kustom": dict(payload_t=90.0, cap_m3=60.0, len_m=9.9, wid_m=6.1, hgt_m=4.6, raise_s=15.0, verified=False, note="Isi sendiri."),
+}
+
+# ------------------------------------------------------------------ pustaka material (nilai indikatif, bisa diedit)
+#   rho_bcm : berat isi in-situ (t/m3) ; swell : faktor kembang (fraksi) ; repose : sudut longsor kering (derajat)
+#   porosity: porositas timbunan (air mengisi pori saat terendam) ; slake: fraksi yang hancur jadi lumpur di dalam air
+MATERIALS = {
+    "Overburden campuran (tanah + batuan lunak)": dict(rho_bcm=2.0, swell=0.30, repose=35.0, porosity=0.30, slake=0.20, color="#8a6d4b"),
+    "Batuan keras (rockfill)": dict(rho_bcm=2.5, swell=0.40, repose=38.0, porosity=0.35, slake=0.02, color="#7d7f83"),
+    "Tanah liat (clay)": dict(rho_bcm=1.9, swell=0.30, repose=28.0, porosity=0.15, slake=0.45, color="#9b6a4a"),
+    "Pasir / kerikil": dict(rho_bcm=1.9, swell=0.12, repose=33.0, porosity=0.30, slake=0.05, color="#c2a878"),
+    "Batubara": dict(rho_bcm=1.3, swell=0.30, repose=38.0, porosity=0.40, slake=0.03, color="#2b2b2e"),
+    "Claystone (batulempung)": dict(rho_bcm=2.2, swell=0.35, repose=30.0, porosity=0.20, slake=0.30, color="#a0522d"),
+    "Sandstone (batupasir)": dict(rho_bcm=2.3, swell=0.35, repose=37.0, porosity=0.25, slake=0.05, color="#d9b970"),
+    "Pasir subdrain (bersih)": dict(rho_bcm=1.7, swell=0.12, repose=32.0, porosity=0.35, slake=0.0, color="#f2d675"),
+    "Kustom": dict(rho_bcm=1.9, swell=0.30, repose=33.0, porosity=0.30, slake=0.15, color="#8a6d4b"),
+}
+
+MUD_DEFAULT = dict(rho=1500.0, tau_y=120.0, manning=0.12)   # lumpur kolam: rapat massa kg/m3, yield stress Pa, kekasaran
+
+
+# ------------------------------------------------------------------ perencanaan muatan / validasi volume
+def plan_loads(unit, material, volume_m3, basis="LCM", vol_per_load=None, interval_s=90.0, tip_s=None, first_s=20.0,
+               fill_factor=1.0):
+    """Susun rencana ritase. basis: 'LCM' (volume lepas/di bak) atau 'BCM' (in-situ, dikonversi dgn swell).
+    Volume per ritase dibatasi min(kapasitas bak, payload/berat isi lepas). Return dict (ok, warnings, loads...)."""
+    warn, err = [], []
+    rho_bcm, sw = float(material["rho_bcm"]), float(material["swell"])
+    rho_loose = rho_bcm / (1.0 + sw)
+    v_mass = unit["payload_t"] / rho_loose                       # volume lepas bila bermuatan penuh menurut berat
+    v_cap = float(unit["cap_m3"]) * float(fill_factor)
+    v_max = min(v_mass, v_cap)
+    limit = "kapasitas bak" if v_cap <= v_mass else "payload (berat)"
+    v_total_lcm = float(volume_m3) * ((1.0 + sw) if basis.upper() == "BCM" else 1.0)
+    if v_total_lcm <= 0:
+        err.append("Volume harus lebih dari 0.")
+    vpl = float(vol_per_load) if vol_per_load else v_max
+    if vpl > v_max * 1.0001:
+        warn.append(f"Volume per ritase {vpl:.1f} m³ melebihi muatan maksimum {v_max:.1f} m³ (dibatasi {limit}); dipakai {v_max:.1f} m³.")
+        vpl = v_max
+    if vpl <= 0:
+        err.append("Volume per ritase tidak valid.")
+        vpl = 1.0
+    n = int(math.ceil(v_total_lcm / vpl - 1e-9))
+    vols = [vpl] * (n - 1) + [v_total_lcm - vpl * (n - 1)]
+    tip = float(tip_s) if tip_s else max(14.0, float(unit.get("raise_s", 15.0)) * 1.4)
+    interval = max(float(interval_s), tip + 25.0)
+    if interval > float(interval_s):
+        warn.append(f"Jarak antar dump dinaikkan ke {interval:.0f} s (minimal waktu tumpah + manuver).")
+    loads = []
+    for k, v in enumerate(vols):
+        t0 = first_s + k * interval
+        loads.append(dict(k=k + 1, vol=float(v), t_arrive=t0 - 18.0 if k == 0 else t0 - 16.0, t_tip0=t0, t_tip1=t0 + tip, t_leave=t0 + tip + 10.0,
+                          mass_t=float(v * rho_loose)))
+    return dict(ok=not err, errors=err, warnings=warn, loads=loads, n_loads=n, vol_per_load=vpl, v_max=v_max, limit=limit,
+                rho_loose=rho_loose, v_total_lcm=v_total_lcm, v_total_bcm=v_total_lcm / (1.0 + sw), mass_total_t=v_total_lcm * rho_loose,
+                tip_s=tip, interval_s=interval)
+
+
+# ------------------------------------------------------------------ domain
+def _fill_nan_nearest(a):
+    from scipy import ndimage as ndi
+    m = ~np.isfinite(a)
+    if not m.any():
+        return a
+    idx = ndi.distance_transform_edt(m, return_distances=False, return_indices=True)
+    return a[tuple(idx)]
+
+
+def pond_bbox(xs, ys, z, level, dump_xy, radius_m=30.0):
+    """Kotak pembatas (xmin,xmax,ymin,ymax) cekungan di bawah 'level' yang terhubung ke sekitar titik dump."""
+    from scipy import ndimage as ndi
+    z = _fill_nan_nearest(np.asarray(z, float))
+    lab, nl = ndi.label(z < level)
+    if nl == 0:
+        return None
+    X, Y = np.meshgrid(xs, ys, indexing="ij")
+    near = (np.hypot(X - dump_xy[0], Y - dump_xy[1]) <= radius_m) & (z < level)
+    ids = np.unique(lab[near])
+    ids = ids[ids > 0]
+    if ids.size == 0:
+        return None
+    m = np.isin(lab, ids)
+    return float(X[m].min()), float(X[m].max()), float(Y[m].min()), float(Y[m].max())
+
+
+def prepare_domain(xs, ys, z, dump_xy, half_m=None, n_target=96, level=None, margin_m=25.0, max_half_m=400.0):
+    """Potong & resample DEM (xs[nx], ys[ny], z[nx,ny]) menjadi jendela persegi.
+    Jendela memuat SELURUH kolam (bila 'level' diberikan) + margin, dan titik dump. Return dict(z, X, Y, dx, ...)."""
+    from scipy.ndimage import map_coordinates
+    xs = np.asarray(xs, float)
+    ys = np.asarray(ys, float)
+    z = _fill_nan_nearest(np.asarray(z, float))
+    cx, cy = float(dump_xy[0]), float(dump_xy[1])
+    if half_m:
+        half = float(half_m)
+    else:
+        bb = pond_bbox(xs, ys, z, level, (cx, cy)) if level is not None else None
+        if bb is None:
+            half = 60.0
+        else:
+            cx, cy = 0.5 * (bb[0] + bb[1]), 0.5 * (bb[2] + bb[3])
+            half = 0.5 * max(bb[1] - bb[0], bb[3] - bb[2]) + float(margin_m)
+            # pastikan titik dump ikut
+            half = max(half, abs(dump_xy[0] - cx) + 10.0, abs(dump_xy[1] - cy) + 10.0)
+    half = max(20.0, min(half, float(max_half_m)))
+    n = int(n_target)
+    X = np.linspace(cx - half, cx + half, n)
+    Y = np.linspace(cy - half, cy + half, n)
+    XX, YY = np.meshgrid(X, Y, indexing="ij")
+
+    def idx(coords, q):
+        c = np.asarray(coords, float)
+        i = np.arange(c.size, dtype=float)
+        return np.interp(q, c, i) if c[-1] >= c[0] else np.interp(q, c[::-1], i[::-1])
+
+    zz = map_coordinates(z, [idx(xs, XX), idx(ys, YY)], order=1, mode="nearest")
+    dx = float(X[1] - X[0])
+    return dict(z=zz, X=X, Y=Y, dx=dx, dy=float(Y[1] - Y[0]), nx=n, ny=n, dump_xy=(float(dump_xy[0]), float(dump_xy[1])), half=half, center=(cx, cy))
+
+
+def suggest_dump_point(xs, ys, z, level, search_m=None):
+    """Titik dump default: di tepi kolam (sedikit di atas muka cairan) pada sisi paling landai dari lahan, supaya
+    truk bisa mundur dari darat. Return (x, y) atau None bila tak ada cekungan di bawah 'level'."""
+    from scipy import ndimage as ndi
+    z = _fill_nan_nearest(np.asarray(z, float))
+    wet = z < level
+    lab, nl = ndi.label(wet)
+    if nl == 0:
+        return None
+    sizes = ndi.sum(wet, lab, index=np.arange(1, nl + 1))
+    big = int(np.argmax(sizes)) + 1
+    pond = lab == big
+    ring = ndi.binary_dilation(pond, iterations=3) & ~ndi.binary_dilation(pond, iterations=1)
+    gx, gy = np.gradient(z, abs(xs[1] - xs[0]), abs(ys[1] - ys[0]))
+    slope = np.hypot(gx, gy)
+    cand = np.where(ring)
+    if cand[0].size == 0:
+        return None
+    k = int(np.argmin(slope[cand]))
+    return float(xs[cand[0][k]]), float(ys[cand[1][k]])
+
+
+def init_pond(dom, level_w, level_m, radius_m=None):
+    """Isi awal: lumpur sampai elevasi level_m, air di atasnya sampai level_w, hanya pada cekungan yang terhubung
+    ke titik dump. level_m <= level_w. Gunakan level_m=None utk tanpa lumpur, level_w=None utk tanpa air."""
+    from scipy import ndimage as ndi
+    z = dom["z"]
+    lw = -1e9 if level_w is None else float(level_w)
+    lm = -1e9 if level_m is None else float(level_m)
+    lw = max(lw, lm)
+    wet = z < lw
+    lab, nl = ndi.label(wet)
+    X = dom["X"][:, None]
+    Y = dom["Y"][None, :]
+    R = float(radius_m) if radius_m else max(12.0, 8 * dom["dx"])
+    near = np.hypot(X - dom["dump_xy"][0], Y - dom["dump_xy"][1]) <= R
+    ids = np.unique(lab[near & wet])
+    ids = ids[ids > 0]
+    pond = np.isin(lab, ids) if ids.size else np.zeros_like(wet)
+    hm = np.where(pond, np.maximum(lm - z, 0.0), 0.0)
+    hw = np.where(pond, np.maximum(lw - z - hm, 0.0), 0.0)
+    return hm, hw, pond
+
+
+# ------------------------------------------------------------------ penyelesai lapisan fluida
+def _layer_step(bed, h, qx, qy, dt, dx, dy, n_man, ty_over_rho_g=0.0, hmin=2e-3):
+    """Satu langkah local-inertia untuk satu lapisan (air atau lumpur). Batas terbuka (ghost = tinggi tepi).
+    ty_over_rho_g = tau_y/(rho*g) [m] utk lumpur Bingham (0 untuk air). Return (h_baru, qx, qy, vol_keluar)."""
+    nx, ny = h.shape
+    bp = np.pad(bed, 1, mode="edge")
+    hp = np.pad(h, 1, mode="constant")
+    ep = bp + hp
+    if isinstance(ty_over_rho_g, np.ndarray):
+        tp_ = np.pad(ty_over_rho_g, 1, mode="edge")
+        tyx = 0.5 * (tp_[:-1, 1:-1] + tp_[1:, 1:-1])
+        tyy = 0.5 * (tp_[1:-1, :-1] + tp_[1:-1, 1:])
+        use_ty = True
+    else:
+        tyx = tyy = ty_over_rho_g
+        use_ty = ty_over_rho_g > 0
+    # ---- fluks arah x (muka antar sel i dan i+1), ukuran (nx+1, ny)
+    eL, eR = ep[:-1, 1:-1], ep[1:, 1:-1]
+    bL, bR = bp[:-1, 1:-1], bp[1:, 1:-1]
+    hf = np.maximum(eL, eR) - np.maximum(bL, bR)
+    act = hf > hmin
+    hfs = np.where(act, hf, 1.0)
+    sl = (eR - eL) / dx
+    if use_ty:
+        sc = tyx / hfs
+        se = np.sign(sl) * np.maximum(np.abs(sl) - sc, 0.0)
+        static = np.abs(sl) <= sc
+    else:
+        se, static = sl, None
+    qn = (qx - G * hfs * dt * se) / (1.0 + G * dt * n_man ** 2 * np.abs(qx) / hfs ** (7.0 / 3.0))
+    qn = np.where(act, qn, 0.0)
+    if static is not None:
+        qn = np.where(static, 0.0, qn)
+    cap = 0.9 * hfs * np.sqrt(G * hfs)
+    qx = np.clip(qn, -cap, cap)
+    # ---- fluks arah y
+    eL, eR = ep[1:-1, :-1], ep[1:-1, 1:]
+    bL, bR = bp[1:-1, :-1], bp[1:-1, 1:]
+    hf = np.maximum(eL, eR) - np.maximum(bL, bR)
+    act = hf > hmin
+    hfs = np.where(act, hf, 1.0)
+    sl = (eR - eL) / dy
+    if use_ty:
+        sc = tyy / hfs
+        se = np.sign(sl) * np.maximum(np.abs(sl) - sc, 0.0)
+        static = np.abs(sl) <= sc
+    else:
+        se, static = sl, None
+    qn = (qy - G * hfs * dt * se) / (1.0 + G * dt * n_man ** 2 * np.abs(qy) / hfs ** (7.0 / 3.0))
+    qn = np.where(act, qn, 0.0)
+    if static is not None:
+        qn = np.where(static, 0.0, qn)
+    cap = 0.9 * hfs * np.sqrt(G * hfs)
+    qy = np.clip(qn, -cap, cap)
+    # ---- pembatas volume keluar sel
+    out = dt * (np.maximum(qx[1:, :], 0) + np.maximum(-qx[:-1, :], 0)) / dx + dt * (np.maximum(qy[:, 1:], 0) + np.maximum(-qy[:, :-1], 0)) / dy
+    scale = np.minimum(1.0, h / np.maximum(out, 1e-12))
+    scl_x = np.pad(scale, ((1, 1), (0, 0)), constant_values=1.0)
+    scl_y = np.pad(scale, ((0, 0), (1, 1)), constant_values=1.0)
+    qx = np.where(qx > 0, qx * scl_x[:-1, :], qx * scl_x[1:, :])
+    qy = np.where(qy > 0, qy * scl_y[:, :-1], qy * scl_y[:, 1:])
+    hn = h + dt * ((qx[:-1, :] - qx[1:, :]) / dx + (qy[:, :-1] - qy[:, 1:]) / dy)
+    hn = np.maximum(hn, 0.0)
+    vout = dt * (np.sum(np.maximum(-qx[0, :], 0)) * dy + np.sum(np.maximum(qx[-1, :], 0)) * dy
+                 + np.sum(np.maximum(-qy[:, 0], 0)) * dx + np.sum(np.maximum(qy[:, -1], 0)) * dx)
+    return hn, qx, qy, float(vout)
+
+
+_DIRS = [(1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0), (1, 1, math.sqrt(2)), (1, -1, math.sqrt(2)), (-1, 1, math.sqrt(2)), (-1, -1, math.sqrt(2))]
+
+
+def _shift(a, di, dj, fill):
+    """b[i,j] = a[i+di, j+dj] ; di/dj di tepi diisi 'fill'."""
+    b = np.full_like(a, fill)
+    nx, ny = a.shape
+    si0, si1 = max(0, -di), min(nx, nx - di)
+    sj0, sj1 = max(0, -dj), min(ny, ny - dj)
+    b[si0:si1, sj0:sj1] = a[si0 + di:si1 + di, sj0 + dj:sj1 + dj]
+    return b
+
+
+def _relax_fill(z, f, tan_dry, tan_sub, sub, dx, n_iter=4):
+    """Longsoran sudut repose (sandpile) kekal massa pada permukaan z+f. Return (f_baru, max_excess)."""
+    maxex = 0.0
+    for _ in range(n_iter):
+        B = z + f
+        amts, cnt = [], np.zeros_like(f)
+        for di, dj, dist in _DIRS:
+            Bn = _shift(B, di, dj, np.nan)
+            valid = np.isfinite(Bn)
+            subn = _shift(sub.astype(float), di, dj, 0.0) > 0
+            tphi = np.where(sub | subn, tan_sub, tan_dry)
+            ex = np.where(valid, B - np.where(valid, Bn, 0.0) - tphi * dist * dx, 0.0)
+            ex = np.where(f > 1e-9, np.maximum(ex, 0.0), 0.0)
+            amts.append(ex)
+            cnt += (ex > 0)
+        maxex = max(maxex, max(float(a.max()) for a in amts))
+        if maxex < 1e-4:
+            break
+        tot = np.zeros_like(f)
+        moves = []
+        for (di, dj, dist), ex in zip(_DIRS, amts):
+            amt = 0.5 * ex / np.maximum(cnt, 1.0) * 0.9
+            moves.append(amt)
+            tot += amt
+        lim = np.where(tot > f, f / np.maximum(tot, 1e-12), 1.0)
+        fn = f.copy()
+        for (di, dj, dist), amt in zip(_DIRS, moves):
+            amt = amt * lim
+            fn -= amt
+            # sel (i,j) memindahkan 'amt' ke (i+di, j+dj)
+            recv = np.zeros_like(f)
+            nx, ny = f.shape
+            si0, si1 = max(0, -di), min(nx, nx - di)
+            sj0, sj1 = max(0, -dj), min(ny, ny - dj)
+            recv[si0 + di:si1 + di, sj0 + dj:sj1 + dj] = amt[si0:si1, sj0:sj1]
+            fn += recv
+        f = np.maximum(fn, 0.0)
+    return f, maxex
+
+
+# ------------------------------------------------------------------ simulasi utama
+def simulate(dom, plan, material, level_w=None, level_m=None, mud=None, dump_xy=None, heading=None,
+             n_frames=90, settle_s=240.0, progress=None, dump_sigma_m=None, mud_bulking=1.25, max_steps=400000, seed_radius=None, mud_patch=None, cfl=0.4):
+    """Jalankan simulasi. Return dict(frames, times, events, metrics, ...). Semua satuan SI (m, s)."""
+    mud = {**MUD_DEFAULT, **(mud or {})}
+    z = dom["z"].astype(float)
+    nx, ny, dx, dy = dom["nx"], dom["ny"], dom["dx"], dom["dy"]
+    A = dx * dy
+    X = dom["X"][:, None] * np.ones((1, ny))
+    Y = dom["Y"][None, :] * np.ones((nx, 1))
+    dxy = dump_xy or dom["dump_xy"]
+    hm, hw, pond = init_pond(dom, level_w, level_m, seed_radius)
+    if mud_patch:                                         # lumpur di lahan terbuka: cakram (cx, cy, radius, tebal)
+        cxp, cyp, rp, tp = mud_patch
+        rr = np.hypot(X - cxp, Y - cyp)
+        hm = hm + np.where(rr < rp, tp * np.sqrt(np.clip(1.0 - (rr / rp) ** 2, 0.0, 1.0)) ** 0.6, 0.0)
+    f = np.zeros_like(z)
+    pw = np.zeros_like(z)                                  # air tersimpan di pori timbunan (m kolom)
+    qxm = np.zeros((nx + 1, ny)); qym = np.zeros((nx, ny + 1))
+    qxw = np.zeros((nx + 1, ny)); qyw = np.zeros((nx, ny + 1))
+    sig = float(dump_sigma_m) if dump_sigma_m else max(1.6, 0.9 * dx)
+    w = np.exp(-((X - dxy[0]) ** 2 + (Y - dxy[1]) ** 2) / (2 * sig ** 2))
+    w[np.hypot(X - dxy[0], Y - dxy[1]) > 3.2 * sig] = 0.0
+    if w.sum() <= 0:
+        w[np.unravel_index(np.argmin(np.hypot(X - dxy[0], Y - dxy[1])), w.shape)] = 1.0
+    w /= w.sum()
+    tan_dry = math.tan(math.radians(material["repose"]))
+    tan_sub = math.tan(math.radians(max(14.0, material["repose"] * 0.78)))
+    npor, slake = float(material["porosity"]), float(material["slake"])
+    ty_rg = mud["tau_y"] / (mud["rho"] * G)
+
+    loads = plan["loads"]
+    t_end = loads[-1]["t_leave"] + float(settle_s)
+    frame_dt = t_end / (n_frames - 1)
+    times = [0.0]
+
+    def snapshot():
+        return (np.rint(f * 100).astype(np.uint16), np.rint(hm * 100).astype(np.uint16), np.rint(hw * 100).astype(np.uint16))
+
+    F, HM, HW = [], [], []
+    s0 = snapshot(); F.append(s0[0]); HM.append(s0[1]); HW.append(s0[2])
+    ser = []                                             # deret waktu metrik
+    vol_in = vol_slaked = pore_taken = 0.0
+    out_w = out_m = 0.0
+    water0 = float(hw.sum() * A)
+    mud0 = float(hm.sum() * A)
+
+    def metrics(t):
+        Bf = z + f
+        wetw = hw > 0.05
+        wetm = hm > 0.05
+        lw_ = float(np.median((Bf + hm + hw)[wetw])) if wetw.any() else float("nan")
+        lm_ = float(np.median((Bf + hm)[wetm & (hw > 0.05)])) if (wetm & wetw).any() else (float(np.median((Bf + hm)[wetm])) if wetm.any() else float("nan"))
+        if not wetw.any() and wetm.any():
+            lw_ = lm_
+        return dict(t=float(t), water_level=lw_, mud_level=lm_, fill_vol=float(f.sum() * A), mud_vol=float(hm.sum() * A), water_vol=float(hw.sum() * A),
+                    out_water=out_w, out_mud=out_m, dumped=vol_in)
+
+    ser.append(metrics(0.0))
+    t = 0.0
+    nxt_frame = frame_dt
+    steps = 0
+    li = 0
+    last_dump_end = -1e9
+    kinds_w = None
+    while t < t_end - 1e-9 and steps < max_steps:
+        hmax = max(float(hw.max()), float(hm.max()), 0.05)
+        dt = min(0.5, cfl * min(dx, dy) / math.sqrt(G * hmax))
+        dt = max(dt, 0.02)
+        dt = min(dt, nxt_frame - t + 1e-9) if nxt_frame > t else dt
+        # ---- dumping aktif?
+        ld = None
+        for L in loads:
+            if L["t_tip0"] <= t < L["t_tip1"]:
+                ld = L
+                break
+        if ld is not None:
+            last_dump_end = ld["t_tip1"]
+            dV = ld["vol"] / (ld["t_tip1"] - ld["t_tip0"]) * dt
+            df = dV * w / A
+            liq = (hm + hw) > 0.03
+            # ke bawah muka cairan: bagian slaking jadi lumpur, pori menyerap air
+            sl_part = np.where(liq, slake * df, 0.0)
+            keep = df - sl_part
+            f += keep
+            mud_gain = sl_part * mud_bulking
+            extra_w = np.minimum(hw, (mud_bulking - 1.0) * sl_part)
+            hw -= extra_w
+            hm += mud_gain
+            vol_in += dV
+            vol_slaked += float(sl_part.sum() * A)
+        # ---- longsoran timbunan
+        if t <= last_dump_end + 40.0 and f.max() > 0:
+            f, _ = _relax_fill(z, f, tan_dry, tan_sub, (hm + hw) > 0.03, dx, n_iter=3)
+        # ---- pori timbunan yang terendam terisi air (diambil dari air bebas di sel yang sama)
+        if f.max() > 0 and npor > 0:
+            liq2 = (hm + hw) > 0.03
+            need = np.where(liq2, np.maximum(npor * f - pw, 0.0), 0.0)
+            tk = np.minimum(hw, need)
+            hw -= tk
+            pw += tk
+        # ---- lumpur, lalu air di atasnya
+        Bf = z + f
+        if hm.max() > 0:
+            hm, qxm, qym, vo = _layer_step(Bf, hm, qxm, qym, dt, dx, dy, mud["manning"], ty_rg)
+            out_m += vo
+        if hw.max() > 0:
+            hw, qxw, qyw, vo = _layer_step(Bf + hm, hw, qxw, qyw, dt, dx, dy, 0.03, 0.0)
+            out_w += vo
+        t += dt
+        steps += 1
+        if t >= nxt_frame - 1e-6:
+            s = snapshot(); F.append(s[0]); HM.append(s[1]); HW.append(s[2]); times.append(float(t))
+            ser.append(metrics(t))
+            nxt_frame += frame_dt
+            if progress:
+                progress(min(1.0, t / t_end))
+    if progress:
+        progress(1.0)
+    # ---- ringkasan
+    m0, m1 = ser[0], ser[-1]
+    Bf = z + f
+    mud_area = float(((hm > 0.05).sum()) * A)
+    mud_extent = 0.0
+    if (hm > 0.05).any():
+        mud_extent = float(np.hypot(X - dxy[0], Y - dxy[1])[hm > 0.05].max())
+    total_in = vol_in
+    balance = dict(
+        fill_added=float(f.sum() * A), mud_change=float(hm.sum() * A) - mud0, water_change=float(hw.sum() * A) - water0,
+        out_water=out_w, out_mud=out_m, pore_water=float(pw.sum() * A), dumped=total_in, slaked=vol_slaked)
+    # kekekalan: fill + (slaking dari bulk) = dumped ; mud: mud0 + slaked*bulking - out_m = mud_final ; water: water0 - pore - extra - out_w = final
+    return dict(frames=dict(f=np.stack(F), hm=np.stack(HM), hw=np.stack(HW)), times=times, series=ser, balance=balance,
+                z=z, X=dom["X"], Y=dom["Y"], dx=dx, dy=dy, dump_xy=dxy, steps=steps, t_end=t_end, mud_area_m2=mud_area, mud_extent_m=mud_extent,
+                final=dict(f=f, hm=hm, hw=hw), pond=pond,
+                level_rise_water=(m1["water_level"] - m0["water_level"]) if np.isfinite(m1["water_level"]) and np.isfinite(m0["water_level"]) else None,
+                level_rise_mud=(m1["mud_level"] - m0["mud_level"]) if np.isfinite(m1["mud_level"]) and np.isfinite(m0["mud_level"]) else None,
+                mud_params=mud, heading=heading)
+
+
+# =====================================================================================================
+#  MODE TAHAPAN (staging): kelas stateful multi-material + perencana lift/blok menuju desain final
+# =====================================================================================================
+def _relax_fill_mix(z, f, fms, tan_dry, tan_sub, sub, dx, n_iter=3):
+    """Sama dgn _relax_fill, tetapi komposisi per material (fms: list array volume per sel) ikut terbawa
+    proporsional dengan massa yang longsor. Return (f, fms)."""
+    for _ in range(n_iter):
+        B = z + f
+        amts, cnt = [], np.zeros_like(f)
+        for di, dj, dist in _DIRS:
+            Bn = _shift(B, di, dj, np.nan)
+            valid = np.isfinite(Bn)
+            subn = _shift(sub.astype(float), di, dj, 0.0) > 0
+            tphi = np.where(sub | subn, tan_sub, tan_dry)
+            ex = np.where(valid, B - np.where(valid, Bn, 0.0) - tphi * dist * dx, 0.0)
+            ex = np.where(f > 1e-9, np.maximum(ex, 0.0), 0.0)
+            amts.append(ex)
+            cnt += (ex > 0)
+        if max(float(a.max()) for a in amts) < 1e-4:
+            break
+        tot = np.zeros_like(f)
+        moves = []
+        for (di, dj, dist), ex in zip(_DIRS, amts):
+            amt = 0.5 * ex / np.maximum(cnt, 1.0) * 0.9
+            moves.append(amt)
+            tot += amt
+        lim = np.where(tot > f, f / np.maximum(tot, 1e-12), 1.0)
+        fn = f.copy()
+        fmn = [a.copy() for a in fms]
+        inv = 1.0 / np.maximum(f, 1e-12)
+        nx, ny = f.shape
+        for (di, dj, dist), amt in zip(_DIRS, moves):
+            amt = amt * lim
+            si0, si1 = max(0, -di), min(nx, nx - di)
+            sj0, sj1 = max(0, -dj), min(ny, ny - dj)
+            fn -= amt
+            recv = np.zeros_like(f)
+            recv[si0 + di:si1 + di, sj0 + dj:sj1 + dj] = amt[si0:si1, sj0:sj1]
+            fn += recv
+            if fms:
+                fr = amt * inv
+                for k in range(len(fms)):
+                    mv = fms[k] * fr
+                    fmn[k] -= mv
+                    rk = np.zeros_like(f)
+                    rk[si0 + di:si1 + di, sj0 + dj:sj1 + dj] = mv[si0:si1, sj0:sj1]
+                    fmn[k] += rk
+        f = np.maximum(fn, 0.0)
+        fms = [np.maximum(a, 0.0) for a in fmn]
+    return f, fms
+
+
+def _needs_relax(z, f, tan_dry, tan_sub, sub, dx):
+    """Uji cepat (4 arah sumbu): adakah kemiringan timbunan melebihi sudut longsor? Hindari relax penuh bila sudah stabil."""
+    B = z + f
+    act = f > 1e-9
+    sf = sub.astype(bool)
+    for ax in (0, 1):
+        a = [slice(None)] * 2; b = [slice(None)] * 2
+        a[ax] = slice(0, -1); b[ax] = slice(1, None)
+        a, b = tuple(a), tuple(b)
+        d = np.abs(B[a] - B[b])
+        tp = np.where(sf[a] | sf[b], tan_sub, tan_dry) * dx
+        m = (act[a] | act[b]) & ((act[a] & (B[a] > B[b])) | (act[b] & (B[b] > B[a])))
+        if np.any(m & (d - tp > 5e-4)):
+            return True
+    return False
+
+
+class DumpSim:
+    """Simulator stateful: dump bertahap (event) dengan material campuran. Semua volume 'f-unit' (m3 per m2 sel = tebal)."""
+
+    def __init__(self, dom, mats, level_w=None, level_m=None, mud=None, mud_patch=None, mud_bulking=1.25, cfl=0.4,
+                 seed_radius=None, frame_dt=30.0, max_steps=4000000, armor_m=2.5):
+        self.dom = dom
+        self.mats = [dict(m) for m in mats]
+        self.K = len(self.mats)
+        self.mud = {**MUD_DEFAULT, **(mud or {})}
+        self.z = dom["z"].astype(float)
+        self.nx, self.ny, self.dx, self.dy = dom["nx"], dom["ny"], dom["dx"], dom["dy"]
+        self.A = self.dx * self.dy
+        self.X = dom["X"][:, None] * np.ones((1, self.ny))
+        self.Y = dom["Y"][None, :] * np.ones((self.nx, 1))
+        self.hm, self.hw, self.pond = init_pond(dom, level_w, level_m, seed_radius)
+        if mud_patch:
+            cxp, cyp, rp, tp = mud_patch
+            rr = np.hypot(self.X - cxp, self.Y - cyp)
+            self.hm = self.hm + np.where(rr < rp, tp * np.sqrt(np.clip(1.0 - (rr / rp) ** 2, 0.0, 1.0)) ** 0.6, 0.0)
+        z0 = np.zeros_like(self.z)
+        self.f = z0.copy()
+        self.fm = [z0.copy() for _ in range(self.K)]
+        self.pw = z0.copy()
+        self.qxm = np.zeros((self.nx + 1, self.ny)); self.qym = np.zeros((self.nx, self.ny + 1))
+        self.qxw = np.zeros((self.nx + 1, self.ny)); self.qyw = np.zeros((self.nx, self.ny + 1))
+        self.cfl, self.bulk, self.max_steps = cfl, mud_bulking, max_steps
+        self.armor = max(float(armor_m), 0.1)
+        self.pump = 0.0
+        self.pumped = 0.0
+        self.ty_rg = self.mud["tau_y"] / (self.mud["rho"] * G)
+        self.ty_cur = self.ty_rg
+        self.sub = None
+        self.EC, self.DS = [], []
+        self.t = 0.0
+        self.steps = 0
+        self.vol_in = self.vol_slaked = self.out_w = self.out_m = 0.0
+        self.water0 = float(self.hw.sum() * self.A)
+        self.mud0 = float(self.hm.sum() * self.A)
+        self.last_dump_end = -1e9
+        self._rc = 0
+        self.frame_dt = float(frame_dt)
+        self.next_frame = self.frame_dt
+        self.F, self.HM, self.HW, self.COMP, self.times, self.series, self.events = [], [], [], [], [], [], []
+        self.progress = None
+        self._tan = (math.tan(math.radians(33.0)), math.tan(math.radians(26.0)))
+        self._record(0.0)
+
+    # ---------------------------------------------------------------- pencatatan
+    def _metrics(self):
+        Bf = self.z + self.f
+        wetw = self.hw > 0.05
+        wetm = self.hm > 0.05
+        lw_ = float(np.median((Bf + self.hm + self.hw)[wetw])) if wetw.any() else float("nan")
+        both = wetm & wetw
+        lm_ = float(np.median((Bf + self.hm)[both])) if both.any() else (float(np.median((Bf + self.hm)[wetm])) if wetm.any() else float("nan"))
+        if not wetw.any() and wetm.any():
+            lw_ = lm_
+        return dict(t=float(self.t), water_level=lw_, mud_level=lm_, fill_vol=float(self.f.sum() * self.A), mud_vol=float(self.hm.sum() * self.A),
+                    water_vol=float(self.hw.sum() * self.A), out_water=self.out_w, out_mud=self.out_m, dumped=self.vol_in, pumped=self.pumped,
+                    **self._sub_metrics())
+
+    def _record(self, t):
+        self.F.append(np.rint(self.f * 100).astype(np.uint16))
+        self.HM.append(np.rint(self.hm * 100).astype(np.uint16))
+        self.HW.append(np.rint(self.hw * 100).astype(np.uint16))
+        if self.K > 1:
+            inv = 1.0 / np.maximum(self.f, 1e-9)
+            self.COMP.append(np.stack([np.rint(np.clip(self.fm[k] * inv, 0, 1) * 255).astype(np.uint8) for k in range(1, self.K)]))
+        if self.sub is not None:
+            self._update_drains()
+            self.EC.append(np.rint(np.where(self.hm > 0.05, 1.0 - self.ec, 0.0) * 255).astype(np.uint8))
+            self.DS.append(self.dstate.astype(np.uint8))
+        self.times.append(float(t))
+        self.series.append(self._metrics())
+
+    # ---------------------------------------------------------------- inti waktu
+    def _weights(self, xy):
+        sig = max(1.6, 0.9 * self.dx)
+        w = np.exp(-((self.X - xy[0]) ** 2 + (self.Y - xy[1]) ** 2) / (2 * sig ** 2))
+        w[np.hypot(self.X - xy[0], self.Y - xy[1]) > 3.2 * sig] = 0.0
+        if w.sum() <= 0:
+            w[np.unravel_index(np.argmin(np.hypot(self.X - xy[0], self.Y - xy[1])), w.shape)] = 1.0
+        return w / w.sum()
+
+    def _set_repose(self, vols):
+        tot = [float(self.fm[k].sum()) + float(vols[k]) for k in range(self.K)]
+        s = sum(tot)
+        if s <= 0:
+            return
+        rep = sum(tot[k] * self.mats[k]["repose"] for k in range(self.K)) / s
+        self._tan = (math.tan(math.radians(rep)), math.tan(math.radians(max(14.0, rep * 0.78))))
+
+    def advance(self, dur, dump=None):
+        """Majukan waktu 'dur' detik. dump = dict(t0, t1, vols[K], w) -> tumpah vols selama [t0,t1)."""
+        t_end = self.t + dur
+        tan_dry, tan_sub = self._tan
+        while self.t < t_end - 1e-9 and self.steps < self.max_steps:
+            hmax = max(float(self.hw.max()), float(self.hm.max()), 0.05)
+            dt = min(0.5, self.cfl * min(self.dx, self.dy) / math.sqrt(G * hmax))
+            dt = max(dt, 0.02)
+            dt = min(dt, t_end - self.t + 1e-9)
+            if self.next_frame > self.t:
+                dt = min(dt, self.next_frame - self.t + 1e-9)
+            t = self.t
+            if dump is not None and dump["t0"] <= t < dump["t1"]:
+                self.last_dump_end = dump["t1"]
+                liq = (self.hm + self.hw) > 0.03
+                fr = dt / (dump["t1"] - dump["t0"])
+                for k in range(self.K):
+                    dV = dump["vols"][k] * fr
+                    if dV <= 0:
+                        continue
+                    df = dV * dump["w"] / self.A
+                    sl_part = np.where(liq, self.mats[k]["slake"] * np.exp(-self.f / self.armor) * df, 0.0)   # lapisan yang sudah tertutup timbunan lebih sedikit terpapar air
+                    keep = df - sl_part
+                    self.f += keep
+                    self.fm[k] += keep
+                    extra_w = np.minimum(self.hw, (self.bulk - 1.0) * sl_part)
+                    self.hw -= extra_w
+                    self.hm += sl_part * self.bulk
+                    self.vol_in += dV
+                    self.vol_slaked += float(sl_part.sum() * self.A)
+            self._rc += 1
+            dumping = dump is not None and dump["t0"] <= t < dump["t1"]
+            if t <= self.last_dump_end + 40.0 and self.f.max() > 0 and (self._rc % (2 if dumping else 3) == 0) and \
+                    _needs_relax(self.z, self.f, tan_dry, tan_sub, (self.hm + self.hw) > 0.03, self.dx):
+                if self.K > 1:
+                    self.f, self.fm = _relax_fill_mix(self.z, self.f, self.fm, tan_dry, tan_sub, (self.hm + self.hw) > 0.03, self.dx, 3)
+                else:
+                    self.f, _ = _relax_fill(self.z, self.f, tan_dry, tan_sub, (self.hm + self.hw) > 0.03, self.dx, 3)
+                    self.fm[0] = self.f.copy()
+            if self.f.max() > 0:
+                por = sum(self.fm[k] * self.mats[k]["porosity"] for k in range(self.K))
+                liq2 = (self.hm + self.hw) > 0.03
+                need = np.where(liq2, np.maximum(por - self.pw, 0.0), 0.0)
+                tk = np.minimum(self.hw, need)
+                self.hw -= tk
+                self.pw += tk
+            Bf = self.z + self.f
+            if self.hm.max() > 0:
+                self.hm, self.qxm, self.qym, vo = _layer_step(Bf, self.hm, self.qxm, self.qym, dt, self.dx, self.dy, self.mud["manning"], self.ty_cur)
+                self.out_m += vo
+            if self.hw.max() > 0:
+                self.hw, self.qxw, self.qyw, vo = _layer_step(Bf + self.hm, self.hw, self.qxw, self.qyw, dt, self.dx, self.dy, 0.03, 0.0)
+                self.out_w += vo
+            if self.pump > 0 and self.hw.max() > 0.02:
+                totw = float(self.hw.sum() * self.A)
+                take = min(self.pump * dt, 0.6 * totw)
+                self.hw *= (1.0 - take / max(totw, 1e-9))
+                self.pumped += take
+            self.t += dt
+            self.steps += 1
+            if self.t >= self.next_frame - 1e-6:
+                self._record(self.t)
+                self.next_frame += self.frame_dt
+                if self.progress:
+                    self.progress(self.t)
+
+    def event(self, vols, xy, tip_s, gap_s, meta=None, w=None, real_h=0.0, pump_m3h=0.0):
+        """Satu kejadian dump (1 atau beberapa ritase digabung): vols per material (f-unit), titik xy, lalu jeda gap_s."""
+        self._set_repose(vols)
+        self._tan_sync()
+        lead = 16.0 if not self.events else 4.0     # truk pertama perlu waktu mundur ke titik dump
+        t0 = self.t + lead
+        ev = dict(k=len(self.events) + 1, t_tip0=t0, t_tip1=t0 + tip_s, t_arrive=t0 - 16.0, t_leave=t0 + tip_s + 10.0, xy=(float(xy[0]), float(xy[1])),
+                  vols=[float(v) for v in vols])
+        if meta:
+            ev.update(meta)
+        self.events.append(ev)
+        self.pump = pump_m3h * real_h / max(lead + tip_s + gap_s, 1.0)      # m3 per detik-simulasi (waktu simulasi dimampatkan)
+        self.advance(lead + tip_s + gap_s, dump=dict(t0=t0, t1=t0 + tip_s, vols=vols, w=(w if w is not None else self._weights(xy))))
+        self.pump = 0.0
+        return ev
+
+    def _tan_sync(self):
+        pass
+
+    # ---------------------------------------------------------------- subdrain: status jalur & pengeringan lumpur
+    def configure_sub(self, sub, sand_idx, outlet_xy, outlet_z):
+        """sub: dict(width, thick, ch, r_max, tau_gain, k_sand, grad_i, mode ('gravity'|'pump'), tol)."""
+        self.sub = dict(sub)
+        self.sand_idx = int(sand_idx)
+        self.outlet_xy = (float(outlet_xy[0]), float(outlet_xy[1]))
+        self.outlet_z = float(outlet_z)
+        self.ec = np.ones_like(self.z)                       # fraksi kelebihan air pori yg tersisa (1 = belum terkonsolidasi)
+        self.dstate = np.zeros(self.z.shape, np.uint8)       # 0 tidak ada, 1 pasir terkurung, 2 pasir efektif
+        self.drained = 0.0
+        self.cap_days = 0.0
+        self.cons_days = 0.0
+        self.sand_vol = 0.0
+        self.q_peak_demand = 0.0
+        self.q_cap = 0.0
+        io = int(np.argmin(np.abs(self.dom["X"] - self.outlet_xy[0])))
+        jo = int(np.argmin(np.abs(self.dom["Y"] - self.outlet_xy[1])))
+        self.out_ij = (io, jo)
+
+    def _sand_mask(self):
+        return self.fm[self.sand_idx] >= max(0.25 * self.sub["thick"], 0.12)
+
+    def _update_drains(self):
+        from scipy import ndimage as ndi
+        sand = self._sand_mask()
+        top = self.z + self.f
+        if self.sub["mode"] == "pump":
+            elig = sand
+        else:
+            elig = sand & (top >= self.outlet_z - self.sub.get("tol", 0.1))
+        st8 = np.ones((3, 3), bool)
+        lab, n = ndi.label(elig, structure=st8)
+        eff = np.zeros_like(sand)
+        if n > 0:
+            io, jo = self.out_ij
+            r = 2
+            sl = lab[max(io - r, 0):io + r + 1, max(jo - r, 0):jo + r + 1]
+            ids = np.unique(sl[sl > 0])
+            if ids.size:
+                eff = np.isin(lab, ids)
+        self.eff = eff
+        self.dstate = np.where(eff, 2, np.where(sand, 1, 0)).astype(np.uint8)
+        return eff
+
+    def _sub_metrics(self):
+        if self.sub is None:
+            return {}
+        wgt = np.where(self.pond, self.hm, 0.0)
+        u = float((wgt * (1.0 - self.ec)).sum() / wgt.sum()) if wgt.sum() > 1e-6 else 0.0
+        mud_out = float(np.where(self.pond, 0.0, self.hm).sum() * self.A)
+        return dict(uavg=u, mud_out_pond=mud_out, drained=self.drained, sand_vol=float(self.fm[self.sand_idx].sum() * self.A),
+                    trapped_m2=float(((self.dstate == 1)).sum() * self.A), eff_m2=float(((self.dstate == 2)).sum() * self.A))
+
+    def consolidate(self, dt_days):
+        """Pengeringan (konsolidasi) lumpur oleh drain pasir efektif selama dt_days: difusi 2D, e=0 di sel drain.
+        Volume air yg keluar dibatasi kapasitas Darcy jalur pasir di outlet. Kuat geser lumpur naik seiring konsolidasi."""
+        if self.sub is None or dt_days <= 0:
+            return 0.0
+        sb = self.sub
+        eff = self._update_drains()
+        mud = self.hm > 0.05
+        if not eff.any() or not mud.any():
+            self.cons_days += dt_days
+            return 0.0
+        ch, rmax = float(sb["ch"]), float(sb["r_max"])
+        dx2 = self.dx * self.dy
+        e = np.where(mud, self.ec, 1.0)
+        # neighbor drain: sel lumpur yg berbatasan / di atas pasir efektif
+        e[eff] = 0.0
+        tot_dh = 0.0
+        remain = float(dt_days)
+        hm0 = self.hm.copy()
+        dt_s = 0.2 * dx2 / max(ch, 1e-6)
+        sandm = eff
+        while remain > 1e-9:
+            d = min(remain, dt_s)
+            ep = np.pad(e, 1, mode="edge")
+            lap = ep[:-2, 1:-1] + ep[2:, 1:-1] + ep[1:-1, :-2] + ep[1:-1, 2:] - 4.0 * e
+            en = e + ch * d / dx2 * lap
+            en = np.where(mud | sandm, np.clip(en, 0.0, 1.0), e)
+            en[sandm] = 0.0
+            e = en
+            remain -= d
+        e_old = np.where(mud, self.ec, 1.0)
+        e_new = np.where(mud, np.minimum(e, e_old), 1.0)
+        # tebal lumpur setelah konsolidasi: h_i (tak terkonsolidasi) * (1 - rmax*(1-e))
+        h_i = self.hm / np.maximum(1.0 - rmax * (1.0 - e_old), 0.2)
+        hm_new = np.where(mud, h_i * (1.0 - rmax * (1.0 - e_new)), self.hm)
+        dh = np.maximum(self.hm - hm_new, 0.0)
+        vol = float(dh.sum() * self.A)
+        # kapasitas Darcy jalur pasir di outlet: Q = k * (W * t) * i
+        io, jo = self.out_ij
+        t_out = float(max(self.fm[self.sand_idx][max(io - 2, 0):io + 3, max(jo - 2, 0):jo + 3].max(), sb["thick"]))
+        qcap = float(sb["k_sand"]) * 86400.0 * float(sb["width"]) * t_out * float(sb["grad_i"])      # m3/hari
+        qcap += float(sb.get("pipe_m3d", 0.0))
+        self.q_cap = qcap
+        demand = vol / max(dt_days, 1e-9)
+        self.q_peak_demand = max(self.q_peak_demand, demand)
+        if demand > qcap and vol > 0:
+            fac = qcap * dt_days / vol
+            self.cap_days += dt_days
+            e_new = e_old - fac * (e_old - e_new)
+            hm_new = np.where(mud, h_i * (1.0 - rmax * (1.0 - e_new)), self.hm)
+            dh = np.maximum(self.hm - hm_new, 0.0)
+            vol = float(dh.sum() * self.A)
+        self.hm = np.where(mud, hm_new, self.hm)
+        self.ec = np.where(mud, e_new, self.ec)
+        self.drained += vol
+        self.cons_days += dt_days
+        # kuat geser lumpur naik seiring konsolidasi
+        ty0 = self.mud["tau_y"] / (self.mud["rho"] * G)
+        self.ty_cur = ty0 * (1.0 + float(sb["tau_gain"]) * (1.0 - self.ec))
+        return vol
+
+    def settle(self, dur):
+        self.advance(dur)
+
+    def finish_frames(self):
+        if self.times[-1] < self.t - 1e-6:
+            self._record(self.t)
+
+
+def plan_fleet(unit, mats, fleet, compacted=True, fill_factor=1.0):
+    """fleet: list dict(mat=idx, units=n, cycle_min=c). Hitung muatan per ritase tiap material, laju ritase & porsi."""
+    out = []
+    for fl in fleet:
+        m = mats[int(fl["mat"])]
+        rho_loose = m["rho_bcm"] / (1.0 + m["swell"])
+        v_loose = min(unit["payload_t"] / rho_loose, unit["cap_m3"] * fill_factor)
+        bcm = v_loose / (1.0 + m["swell"])
+        rate = float(fl["units"]) * 60.0 / max(float(fl["cycle_min"]), 1.0)          # ritase / jam
+        out.append(dict(mat=int(fl["mat"]), units=int(fl["units"]), cycle_min=float(fl["cycle_min"]), v_loose=v_loose, bcm=bcm,
+                        fvol=(bcm if compacted else v_loose), rate=rate, mass_t=v_loose * rho_loose,
+                        limit="kapasitas bak" if unit["cap_m3"] * fill_factor <= unit["payload_t"] / rho_loose else "payload (berat)"))
+    tr = sum(o["rate"] for o in out)
+    for o in out:
+        o["share"] = o["rate"] / tr if tr > 0 else 0.0
+    return out, tr
+
+
+def default_access(dom, zd, mask):
+    """Titik masuk haul road default: sel di tepi footprint timbunan dengan elevasi tanah awal tertinggi."""
+    from scipy import ndimage as ndi
+    ring = ndi.binary_dilation(mask, iterations=4) & ~mask
+    if not ring.any():
+        ring = ~mask
+    zz = np.where(ring, dom["z"], -1e9)
+    i, j = np.unravel_index(int(np.argmax(zz)), zz.shape)
+    return float(dom["X"][i]), float(dom["Y"][j])
+
+
+def design_domain(xs, ys, z, zd_fn, n_target=96, margin_m=25.0, max_half_m=600.0, thr=0.10):
+    """Domain persegi yang memuat seluruh footprint timbunan (zd - z0 > thr) + margin. zd_fn(X,Y) -> permukaan desain (NaN di luar)."""
+    from scipy.ndimage import map_coordinates
+    xs = np.asarray(xs, float); ys = np.asarray(ys, float)
+    z = _fill_nan_nearest(np.asarray(z, float))
+    sx, sy = max(1, int(len(xs) // 300)), max(1, int(len(ys) // 300))
+    Xc, Yc = np.meshgrid(xs[::sx], ys[::sy], indexing="ij")
+    zdc = zd_fn(Xc, Yc)
+    diff = np.where(np.isfinite(zdc), zdc - z[::sx, ::sy], 0.0)
+    m = diff > thr
+    if not m.any():
+        return None
+    x0, x1, y0, y1 = Xc[m].min(), Xc[m].max(), Yc[m].min(), Yc[m].max()
+    cx, cy = 0.5 * (x0 + x1), 0.5 * (y0 + y1)
+    half = min(float(max_half_m), 0.5 * max(x1 - x0, y1 - y0) + float(margin_m))
+    half = max(half, 30.0)
+    dom = prepare_domain(xs, ys, z, (cx, cy), half_m=half, n_target=n_target)
+    dom["zd"] = zd_fn(dom["X"][:, None] * np.ones((1, dom["ny"])), dom["Y"][None, :] * np.ones((dom["nx"], 1)))
+    return dom
+
+
+def run_staged(dom, mats, mat_names, fleet, unit, level_w=None, level_m=None, mud=None, access_xy=None, lift_h=4.0, blocks_per_lift=4,
+               max_events=36, hours_per_day=20.0, compacted=True, mud_patch=None, tip_s=None, gap_s=22.0, settle_block_s=45.0,
+               settle_final_s=180.0, pump_m3h=0.0, min_thick=0.10, progress=None, cfl=0.4, mud_bulking=1.25, frame_target=120, fill_factor=1.0, armor_m=2.5,
+               sub=None):
+    """Bangun timbunan bertahap menuju desain final dom['zd'] dengan armada campuran (+ subdrain pasir bila 'sub' diberikan).
+    sub = dict(sand_idx, sand_fleet=dict(units,cycle_min), width, thick, spacing, pattern, polylines|None, outlet_xy|None, outlet_z|None,
+               mode('gravity'|'pump'), ch, r_max, tau_gain, k_sand, grad_i, tol, post_days, n_sand_blocks)"""
+    zd = dom["zd"]
+    z0 = dom["z"]
+    A = dom["dx"] * dom["dy"]
+    D = np.where(np.isfinite(zd), np.maximum(zd - z0, 0.0), 0.0)
+    mask = D > min_thick
+    D = np.where(mask, D, 0.0)
+    Vtot = float(D.sum() * A)
+    pf, tot_rate = plan_fleet(unit, mats, fleet, compacted, fill_factor)
+    if not pf or tot_rate <= 0:
+        raise ValueError("Armada tidak valid (unit/cycle time).")
+    if Vtot <= 0:
+        raise ValueError("Desain final tidak berada di atas kontur awal (tidak ada volume timbunan).")
+    bbar = sum(o["share"] * o["fvol"] for o in pf)
+    N_est = Vtot / bbar
+    g = max(1, int(math.ceil(N_est / max_events)))
+    tip0 = float(tip_s) if tip_s else max(14.0, float(unit.get("raise_s", 15.0)) * 1.4)
+    tip_ev = tip0 * min(1.0 + 0.12 * (g - 1), 2.2)
+    n_ev_est = N_est / g
+    blocks_est = max(1, blocks_per_lift) * max(1, int(math.ceil((float(np.nanmax(np.where(mask, zd, np.nan))) - float(z0[mask].min())) / lift_h)))
+    n_sand_est = 0
+    if sub:
+        n_sand_est = blocks_est * int(sub.get("n_sand_blocks", 4)) * 0.6
+    t_est = (n_ev_est + n_sand_est) * (tip_ev + 4.0 + gap_s) + blocks_est * settle_block_s + settle_final_s + (60.0 if sub else 0.0)
+    sim = DumpSim(dom, mats, level_w, level_m, mud, mud_patch, mud_bulking, cfl, seed_radius=dom["half"] * 3.0, frame_dt=max(10.0, t_est / frame_target), armor_m=armor_m)
+    sim.progress = (lambda t: progress(min(0.99, t / max(t_est, 1.0)))) if progress else None
+    X = dom["X"][:, None] * np.ones((1, dom["ny"]))
+    Y = dom["Y"][None, :] * np.ones((dom["nx"], 1))
+    acc = tuple(access_xy) if access_xy else default_access(dom, zd, mask)
+    dist = np.hypot(X - acc[0], Y - acc[1])
+    z_lo = float(z0[mask].min())
+    z_hi = float(zd[mask].max())
+    n_lifts = max(1, int(math.ceil((z_hi - z_lo) / max(lift_h, 0.5) - 1e-9)))
+    lifts = [min(z_hi, z_lo + (i + 1) * lift_h) for i in range(n_lifts)]
+    loads_done = 0
+    sand_loads = 0
+    clk = 0.0                                    # jam kerja kumulatif
+    hpd = max(float(hours_per_day), 1.0)
+    cnt = [0] * len(pf)
+    stages, warns = [], []
+    stage_no = 0
+    clock_knots = []
+    sub_info = None
+    if sub:
+        pond0 = sim.pond
+        if pond0 is None or not pond0.any():
+            raise ValueError("Subdrain butuh kolam berlumpur/berair awal (isi elevasi muka air/lumpur).")
+        pp = pour_point(dom, pond0)
+        auto_out = not sub.get("outlet_xy")
+        outlet = tuple(sub["outlet_xy"]) if not auto_out else (pp["xy"] if pp else None)
+        if outlet is None:
+            raise ValueError("Titik overflow tidak ditemukan.")
+        oi = int(np.argmin(np.abs(dom["X"] - outlet[0]))); oj = int(np.argmin(np.abs(dom["Y"] - outlet[1])))
+        outlet_z = sub.get("outlet_z")
+        if outlet_z is None:
+            outlet_z = float(pp["z"]) if (auto_out and pp) else float(z0[oi, oj])
+        width, thick = float(sub["width"]), float(sub["thick"])
+        if sub.get("polylines"):
+            lines = [list(p) for p in sub["polylines"]]
+            layout_kind = "manual (DXF)"
+        else:
+            lay = auto_subdrain_layout(dom, pond0, outlet, spacing=float(sub.get("spacing", 8.0)), width=width, pattern=sub.get("pattern", "herringbone"),
+                                       via=(pp["path"] if (auto_out and pp) else None))
+            lines = lay["polylines"]
+            layout_kind = "otomatis (" + str(sub.get("pattern", "herringbone")) + ")"
+        mask_s = rasterize_lines(dom, lines, width)
+        ndist = network_distance(dom, mask_s, outlet)
+        sub_use = dict(width=width, thick=thick, ch=float(sub["ch"]), r_max=float(sub.get("r_max", 0.4)), tau_gain=float(sub.get("tau_gain", 6.0)),
+                       k_sand=float(sub.get("k_sand", 1e-3)), grad_i=float(sub.get("grad_i", 0.02)), mode=sub.get("mode", "gravity"), tol=float(sub.get("tol", 0.1)), pipe_m3d=float(sub.get("pipe_m3d", 0.0)))
+        sim.configure_sub(sub_use, sub["sand_idx"], outlet, outlet_z)
+        sfl = sub["sand_fleet"]
+        pfs, rate_s = plan_fleet(unit, mats, [dict(mat=sub["sand_idx"], units=sfl["units"], cycle_min=sfl["cycle_min"])], compacted, fill_factor)
+        fvol_s = pfs[0]["fvol"]
+        if rate_s <= 0:
+            raise ValueError("Armada pasir tidak valid.")
+        sand_total_vol = float(mask_s.sum() * A * thick)
+        g_s = max(1, int(math.ceil(sand_total_vol / fvol_s / max(10, max_events // 2))))
+
+    def next_mat():
+        n = sum(cnt) + 1
+        k = int(np.argmax([pf[i]["share"] * n - cnt[i] for i in range(len(pf))]))
+        cnt[k] += 1
+        return k
+
+    def consolidate_for(dh_hours):
+        if sub and dh_hours > 0:
+            sim.consolidate(dh_hours / hpd)
+
+    def place_sand(li, ceil_z):
+        nonlocal clk, loads_done, sand_loads, stage_no
+        room = np.where(mask, zd - (z0 + sim.f), -1.0)
+        cand = mask_s & mask & (room >= 0.9 * thick) & np.isfinite(ndist)
+        if int(cand.sum()) * A * thick < 0.5 * fvol_s:
+            return
+        idx = np.argsort(np.where(cand, ndist, np.inf), axis=None)[:int(cand.sum())]
+        nb = max(1, int(sub.get("n_sand_blocks", 4)))
+        per = int(math.ceil(len(idx) / nb))
+        for bi in range(nb):
+            sel = idx[bi * per:(bi + 1) * per]
+            if len(sel) == 0:
+                continue
+            wblk = np.zeros_like(z0)
+            wblk.flat[sel] = thick
+            vol = float(wblk.sum() * A)
+            wblk = wblk / wblk.sum()
+            n_loads = max(1, int(round(vol / fvol_s)))
+            i0, j0 = np.unravel_index(int(sel[0]), z0.shape)
+            cell = np.array([dom["X"][i0], dom["Y"][j0]])
+            v = np.array(outlet) - cell
+            nv = float(np.hypot(*v))
+            u = v / nv if nv > 1e-6 else np.array([1.0, 0.0])
+            xy = cell + u * 1.5 * dom["dx"]
+            xy = (float(np.clip(xy[0], dom["X"][0], dom["X"][-1])), float(np.clip(xy[1], dom["Y"][0], dom["Y"][-1])))
+            stage_no += 1
+            c0 = clk
+            st = dict(stage=stage_no, lift=li + 1, n_lifts=len(lifts), block=bi + 1, lift_z=float(ceil_z), xy=xy, n_loads=n_loads, kind="sand",
+                      t_sim0=sim.t, clock0_h=clk, vol_target=vol, ev_from=len(sim.events) + 1)
+            left = n_loads
+            while left > 0:
+                ng = min(g_s, left)
+                vols = [0.0] * len(mats)
+                vols[sub["sand_idx"]] = fvol_s * ng
+                sim.event(vols, xy, tip_ev if ng > 1 else tip0, gap_s, w=wblk, real_h=ng / rate_s, pump_m3h=pump_m3h,
+                          meta=dict(n_loads=ng, lift=li + 1, block=bi + 1, loads_before=loads_done, clock_h=clk, clock_end_h=clk + ng / rate_s,
+                                    mat_main=sub["sand_idx"], mats=[sub["sand_idx"]], n_by_mat=[0] * len(pf), kind="sand"))
+                clk += ng / rate_s
+                loads_done += ng
+                sand_loads += ng
+                left -= ng
+            sim.settle(0.6 * settle_block_s)
+            consolidate_for(clk - c0)
+            st.update(t_sim1=sim.t, ev_to=len(sim.events), clock1_h=clk, fill_after=float(sim.f.sum() * A), rem_lift_vol=0.0)
+            stages.append(st)
+
+    for li, ceil_z in enumerate(lifts):
+        T = np.where(mask, np.maximum(z0, np.minimum(zd, ceil_z)), z0)
+        if sub:
+            place_sand(li, ceil_z)
+        Dl = np.where(mask, np.maximum(T - (z0 + sim.f), 0.0), 0.0)
+        lv0 = float(Dl.sum() * A)
+        if lv0 < 0.5 * bbar:
+            continue
+        stalls = 0
+        for bi in range(int(blocks_per_lift) * 3 + 3):
+            Dl = np.where(mask, np.maximum(T - (z0 + sim.f), 0.0), 0.0)
+            rem = float(Dl.sum() * A)
+            if rem < max(0.03 * lv0, bbar) or sim.vol_in > 1.7 * (Vtot + (sand_total_vol if sub else 0.0)):
+                break
+            cand = Dl > min_thick
+            if not cand.any():
+                break
+            dd = np.where(cand, dist, np.inf)
+            order = np.argsort(dd, axis=None)
+            n_c = int(cand.sum())
+            order = order[:n_c]
+            cv = np.cumsum(Dl.flat[order]) * A
+            btarget = min(rem, max(lv0 / max(blocks_per_lift, 1), 6.0 * bbar))
+            kcut = int(np.searchsorted(cv, btarget)) + 1
+            sel = order[:kcut]
+            i0, j0 = np.unravel_index(int(sel[0]), Dl.shape)
+            cell = np.array([dom["X"][i0], dom["Y"][j0]])
+            v = np.array(acc) - cell
+            nv = float(np.hypot(*v))
+            u = v / nv if nv > 1e-6 else np.array([1.0, 0.0])
+            xy = cell + u * 1.5 * dom["dx"]
+            xy = (float(np.clip(xy[0], dom["X"][0], dom["X"][-1])), float(np.clip(xy[1], dom["Y"][0], dom["Y"][-1])))
+            n_loads = max(1, int(round(float(cv[min(kcut - 1, len(cv) - 1)]) / bbar)))
+            wblk = np.zeros_like(Dl)
+            wblk.flat[sel] = Dl.flat[sel]
+            wblk = wblk / wblk.sum()
+            stage_no += 1
+            c0 = clk
+            st = dict(stage=stage_no, lift=li + 1, n_lifts=len(lifts), block=bi + 1, lift_z=float(ceil_z), xy=xy, n_loads=n_loads, kind="fill",
+                      t_sim0=sim.t, clock0_h=clk, vol_target=float(cv[min(kcut - 1, len(cv) - 1)]), ev_from=len(sim.events) + 1)
+            left = n_loads
+            while left > 0:
+                ng = min(g, left)
+                vols = [0.0] * len(mats)
+                nm = [0] * len(pf)
+                for _ in range(ng):
+                    k = next_mat()
+                    vols[pf[k]["mat"]] += pf[k]["fvol"]
+                    nm[k] += 1
+                main = int(np.argmax(nm))
+                sim.event(vols, xy, tip_ev if ng > 1 else tip0, gap_s, w=wblk, real_h=ng / tot_rate, pump_m3h=pump_m3h,
+                          meta=dict(n_loads=ng, lift=li + 1, block=bi + 1, loads_before=loads_done, clock_h=clk,
+                                    clock_end_h=clk + ng / tot_rate, mat_main=pf[main]["mat"], mats=[pf[i]["mat"] for i in range(len(pf)) if nm[i] > 0],
+                                    n_by_mat=[int(x) for x in nm], kind="fill"))
+                clk += ng / tot_rate
+                loads_done += ng
+                left -= ng
+            sim.settle(settle_block_s)
+            consolidate_for(clk - c0)
+            st.update(t_sim1=sim.t, ev_to=len(sim.events), clock1_h=clk, fill_after=float(sim.f.sum() * A))
+            Dn = np.where(mask, np.maximum(T - (z0 + sim.f), 0.0), 0.0)
+            rem2 = float(Dn.sum() * A)
+            st["rem_lift_vol"] = rem2
+            stages.append(st)
+            if rem - rem2 < 0.03 * rem:
+                stalls += 1
+                if stalls >= 2:
+                    warns.append(f"Lift {li + 1}: progres mandek (material menyebar/hilang ke kolam) -- lanjut ke lift berikutnya.")
+                    break
+            else:
+                stalls = 0
+    sim.settle(settle_final_s)
+    clock_knots = [[e["t_tip0"], e["clock_h"]] for e in sim.events]
+    clk_build = clk
+    t_build_end = sim.t
+    post_days = float(sub.get("post_days", 0.0)) if sub else 0.0
+    if sub and post_days > 0:
+        n_post = 12
+        clock_knots.append([sim.t, clk])
+        for _ in range(n_post):
+            sim.consolidate(post_days / n_post)
+            sim.advance(60.0 / n_post)
+            clk += post_days / n_post * hpd
+            clock_knots.append([sim.t, clk])
+    sim.finish_frames()
+    clock_knots.append([sim.t, clk])
+    covered = float(np.minimum(sim.f, D).sum() * A)
+    over = float(np.maximum(sim.f - D, 0.0).sum() * A)
+    res = dict(frames=dict(f=np.stack(sim.F), hm=np.stack(sim.HM), hw=np.stack(sim.HW)), times=sim.times, series=sim.series,
+               z=z0, X=dom["X"], Y=dom["Y"], dx=dom["dx"], dy=dom["dy"], dump_xy=stages[0]["xy"] if stages else acc, steps=sim.steps, t_end=sim.t,
+               final=dict(f=sim.f, hm=sim.hm, hw=sim.hw, fm=sim.fm), pond=sim.pond, mud_params=sim.mud, events=sim.events, stages=stages,
+               comp=(np.stack(sim.COMP) if sim.COMP else None), design=np.where(mask, zd, np.nan), access=acc, warnings=warns,
+               Vtot=Vtot, coverage=covered / Vtot, overfill=over, loads_total=loads_done, op_hours=clk_build, op_days=clk_build / hpd,
+               hours_per_day=hpd, fleet=pf, tot_rate=tot_rate, group=g, mat_names=list(mat_names), lifts=lifts, compacted=compacted, clock_knots=clock_knots,
+               t_build_end=t_build_end)
+    ser = sim.series
+    m0, m1 = ser[0], ser[-1]
+    res["level_rise_water"] = (m1["water_level"] - m0["water_level"]) if np.isfinite(m1["water_level"]) and np.isfinite(m0["water_level"]) else None
+    res["level_rise_mud"] = (m1["mud_level"] - m0["mud_level"]) if np.isfinite(m1["mud_level"]) and np.isfinite(m0["mud_level"]) else None
+    wet = sim.hm > 0.05
+    res["mud_area_m2"] = float(wet.sum() * A)
+    res["mud_extent_m"] = float(np.hypot(X - res["dump_xy"][0], Y - res["dump_xy"][1])[wet].max()) if wet.any() else 0.0
+    res["balance"] = dict(fill_added=float(sim.f.sum() * A), mud_change=float(sim.hm.sum() * A) - sim.mud0, water_change=float(sim.hw.sum() * A) - sim.water0,
+                          out_water=sim.out_w, out_mud=sim.out_m, pore_water=float(sim.pw.sum() * A), dumped=sim.vol_in, slaked=sim.vol_slaked, pumped=sim.pumped)
+    if sub:
+        route = descend_route(z0 + sim.f, dom, outlet, sim.pond)
+        u = [s_.get("uavg", 0.0) for s_ in ser]
+        t90 = next((k for k, v in enumerate(u) if v >= 0.9), None)
+        t90_h = float(np.interp(ser[t90]["t"], [k[0] for k in clock_knots], [k[1] for k in clock_knots])) if t90 is not None else None
+        mud_end = sim.hm > 0.05
+        sand_in_place = float(sim.fm[sub["sand_idx"]].sum() * A)
+        res["EC"] = np.stack(sim.EC)
+        res["DS"] = np.stack(sim.DS)
+        res["sub"] = dict(polylines=lines, layout_kind=layout_kind, width=width, thick=thick, outlet=outlet, outlet_z=float(outlet_z), mode=sub_use["mode"],
+                          mask_area_m2=float(mask_s.sum() * A), sand_placed_m3=float(sim.vol_in - sum(sum(e["vols"]) for e in sim.events if e.get("kind") != "sand")),
+                          sand_in_place_m3=sand_in_place, sand_loads=sand_loads, sand_rate=rate_s, sand_fleet=sfl, route=route,
+                          drained_m3=float(sim.drained), uavg_final=float(u[-1]) if u else 0.0, days_u90=(t90_h / hpd if t90_h is not None else None),
+                          cap_days=float(sim.cap_days), cons_days=float(sim.cons_days), q_cap_m3d=float(sim.q_cap), q_peak_m3d=float(sim.q_peak_demand),
+                          trapped_m2=float((sim.dstate == 1).sum() * A), eff_m2=float((sim.dstate == 2).sum() * A),
+                          tau_gain_mean=float(np.mean(1.0 + sub_use["tau_gain"] * (1.0 - sim.ec[mud_end]))) if mud_end.any() else 1.0,
+                          mud_vol_end=float(sim.hm.sum() * A), mud_vol_start=float(sim.mud0), post_days=post_days, params=sub_use,
+                          sand_per_drained=(float(sim.vol_in) and None))
+        sp = res["sub"]
+        sp["sand_per_drained"] = (sp["sand_placed_m3"] / sp["drained_m3"]) if sp["drained_m3"] > 1 else None
+    if progress:
+        progress(1.0)
+    return res
+
+
+# ------------------------------------------------------------------ subdrain: layout, raster, rute air, perbandingan
+def parse_polylines_dxf(data, densify_m=1.0):
+    """Baca garis rencana subdrain dari DXF: LINE, LWPOLYLINE, POLYLINE -> list polyline [(x,y),...] (Z diabaikan)."""
+    import os, tempfile
+    import ezdxf
+    with tempfile.NamedTemporaryFile(suffix=".dxf", delete=False) as tf:
+        tf.write(data)
+        tmp = tf.name
+    try:
+        doc = ezdxf.readfile(tmp)
+    finally:
+        try:
+            os.unlink(tmp)
+        except Exception:
+            pass
+    out = []
+    for e in doc.modelspace():
+        t = e.dxftype()
+        try:
+            if t == "LINE":
+                out.append([tuple(e.dxf.start)[:2], tuple(e.dxf.end)[:2]])
+            elif t == "LWPOLYLINE":
+                P = [(p[0], p[1]) for p in e.get_points("xy")]
+                if e.closed and len(P) > 2:
+                    P.append(P[0])
+                if len(P) >= 2:
+                    out.append(P)
+            elif t == "POLYLINE":
+                P = [tuple(v.dxf.location)[:2] for v in e.vertices]
+                if len(P) >= 2:
+                    out.append(P)
+        except Exception:
+            continue
+    if not out:
+        raise ValueError("Tidak ada garis (LINE/POLYLINE) pada DXF subdrain.")
+    return out
+
+
+def pour_point(dom, pond):
+    """Titik limpas alami (pour point): puncak pematang terendah yang harus dilewati air kolam untuk keluar dari domain.
+    Return dict(xy, z, path[(x,y)...]) -- path dari tepi kolam ke titik limpas."""
+    import heapq
+    z = dom["z"]
+    nx, ny = z.shape
+    INF = float("inf")
+    cost = np.full((nx, ny), INF)
+    par = {}
+    pq = []
+    for i, j in zip(*np.nonzero(pond)):
+        cost[i, j] = -INF
+        heapq.heappush(pq, (-INF, int(i), int(j)))
+    end = None
+    while pq:
+        c, i, j = heapq.heappop(pq)
+        if c > cost[i, j]:
+            continue
+        if (i in (0, nx - 1) or j in (0, ny - 1)) and not pond[i, j]:
+            end = (i, j)
+            break
+        for di, dj, _d in _DIRS:
+            a, b = i + di, j + dj
+            if a < 0 or b < 0 or a >= nx or b >= ny:
+                continue
+            nc = max(c, float(z[a, b]))
+            if nc < cost[a, b]:
+                cost[a, b] = nc
+                par[(a, b)] = (i, j)
+                heapq.heappush(pq, (nc, a, b))
+    if end is None:
+        return None
+    zsp = float(cost[end])
+    chain = [end]
+    while chain[-1] in par:
+        chain.append(par[chain[-1]])
+    chain = chain[::-1]                                        # tepi kolam -> tepi domain
+    k = next((q for q, (a, b) in enumerate(chain) if float(z[a, b]) >= zsp - 1e-9 and not pond[a, b]), len(chain) - 1)
+    pa, pb = chain[k]
+    X, Y = dom["X"], dom["Y"]
+    return dict(xy=(float(X[pa]), float(Y[pb])), z=zsp, path=[(float(X[a]), float(Y[b])) for a, b in chain[:k + 1]],
+                out_path=[(float(X[a]), float(Y[b])) for a, b in chain[k:]])
+
+
+def natural_outlet(dom, pond):
+    pp = pour_point(dom, pond)
+    return pp["xy"] if pp else None
+
+
+def auto_subdrain_layout(dom, pond, outlet_xy, spacing=8.0, width=4.0, pattern="herringbone", angle_deg=60.0, via=None):
+    """Layout otomatis: tulang punggung (collector) dari titik terjauh kolam ke outlet + cabang tulang-ikan/sisir tiap 'spacing' m."""
+    from scipy import ndimage as ndi
+    from skimage.graph import MCP_Geometric
+    dx = dom["dx"]
+    X, Y = dom["X"], dom["Y"]
+    io = int(np.argmin(np.abs(X - outlet_xy[0]))); jo = int(np.argmin(np.abs(Y - outlet_xy[1])))
+    region = ndi.binary_dilation(pond, iterations=3)
+    region[max(io - 3, 0):io + 4, max(jo - 3, 0):jo + 4] |= True
+    for (vx, vy) in (via or []):
+        vi = int(np.argmin(np.abs(X - vx))); vj = int(np.argmin(np.abs(Y - vy)))
+        region[max(vi - 1, 0):vi + 2, max(vj - 1, 0):vj + 2] = True
+    cost = np.where(region, 1.0, np.inf)
+    mcp = MCP_Geometric(cost)
+    cum, _ = mcp.find_costs([(io, jo)])
+    cm = np.where(pond & np.isfinite(cum), cum, -1.0)
+    if cm.max() <= 0:
+        raise ValueError("Kolam tidak terhubung ke titik outlet.")
+    fi, fj = np.unravel_index(int(np.argmax(cm)), cm.shape)
+    path = mcp.traceback((int(fi), int(fj)))                  # dari outlet ke titik terjauh
+    sp = [(float(X[i]), float(Y[j])) for i, j in path]
+    sp = sp[::-1]                                             # terjauh -> outlet
+    lines = [sp]
+    dtp = ndi.distance_transform_edt(pond) * dx
+    if pattern != "spine" and len(sp) > 4:
+        pts = np.array(sp)
+        seg = np.hypot(*np.diff(pts, axis=0).T)
+        cs = np.concatenate([[0.0], np.cumsum(seg)])
+        L = cs[-1]
+        s0 = 0.5 * spacing
+        ang = math.radians(90.0 if pattern == "comb" else angle_deg)
+        k = 0
+        while s0 < L - 0.5 * spacing:
+            i = int(np.searchsorted(cs, s0))
+            a = pts[max(i - 3, 0)]
+            b = pts[min(i + 3, len(pts) - 1)]
+            t_out = (b - a) / max(float(np.hypot(*(b - a))), 1e-9)          # arah ke outlet
+            for sgn in (1.0, -1.0):
+                th = sgn * ang
+                c, sn = math.cos(th), math.sin(th)
+                d = np.array([t_out[0] * c - t_out[1] * sn, t_out[0] * sn + t_out[1] * c])
+                # cabang membuka menjauhi outlet (herringbone): putar ke arah berlawanan t_out
+                d = -d if pattern != "comb" else d
+                p = pts[i].copy()
+                br = [tuple(p)]
+                for _ in range(400):
+                    p = p + d * dx
+                    ii = int(np.argmin(np.abs(X - p[0]))); jj = int(np.argmin(np.abs(Y - p[1])))
+                    if ii <= 0 or jj <= 0 or ii >= dom["nx"] - 1 or jj >= dom["ny"] - 1 or not pond[ii, jj] or dtp[ii, jj] < 0.5 * width + 0.5 * dx:
+                        break
+                    br.append(tuple(p))
+                if len(br) >= 3:
+                    lines.append(br)
+            s0 += spacing
+            k += 1
+    return dict(polylines=lines, outlet=(float(X[io]), float(Y[jo])), far=(float(X[fi]), float(Y[fj])), spine=sp)
+
+
+def rasterize_lines(dom, polylines, width):
+    """Topeng sel jalur pasir (jarak ke garis <= width/2) + jarak jaringan dari outlet (utk urutan pembangunan) bila diminta."""
+    from scipy import ndimage as ndi
+    X, Y, dx = dom["X"], dom["Y"], dom["dx"]
+    ras = np.zeros((dom["nx"], dom["ny"]), bool)
+    for pl in polylines:
+        P = np.asarray(pl, float)
+        for a, b in zip(P[:-1], P[1:]):
+            n = max(2, int(math.ceil(float(np.hypot(*(b - a))) / (0.5 * dx))) + 1)
+            xs = np.linspace(a[0], b[0], n); ys = np.linspace(a[1], b[1], n)
+            ii = np.clip(np.rint((xs - X[0]) / dx).astype(int), 0, dom["nx"] - 1)
+            jj = np.clip(np.rint((ys - Y[0]) / dom["dy"]).astype(int), 0, dom["ny"] - 1)
+            ras[ii, jj] = True
+    dist = ndi.distance_transform_edt(~ras) * dx
+    return dist <= max(0.5 * width, 0.5 * dx) + 1e-9
+
+
+def network_distance(dom, mask, outlet_xy):
+    """Jarak sepanjang jaringan dari outlet (m), utk mengurutkan pembangunan dari outlet keluar."""
+    from skimage.graph import MCP_Geometric
+    X, Y = dom["X"], dom["Y"]
+    io = int(np.argmin(np.abs(X - outlet_xy[0]))); jo = int(np.argmin(np.abs(Y - outlet_xy[1])))
+    m = mask.copy(); m[io, jo] = True
+    cum, _ = MCP_Geometric(np.where(m, 1.0, np.inf)).find_costs([(io, jo)])
+    return np.where(np.isfinite(cum), cum * dom["dx"], np.inf)
+
+
+def descend_route(z, dom, start_xy, pond=None, max_steps=None):
+    """Alur buangan outlet -> tepi domain yang melewati pematang serendah mungkin (minimax elevasi, lalu terpendek); kolam tak dilalui.
+    Return dict(path, end_kind ('edge'|'closed'), end_xy, peak_z, note)."""
+    import heapq
+    nx, ny = z.shape
+    X, Y = dom["X"], dom["Y"]
+    i0 = int(np.argmin(np.abs(X - start_xy[0]))); j0 = int(np.argmin(np.abs(Y - start_xy[1])))
+    blocked = np.zeros((nx, ny), bool) if pond is None else pond.copy()
+    blocked[i0, j0] = False
+    best = {(i0, j0): (float(z[i0, j0]), 0.0)}
+    par = {}
+    pq = [(float(z[i0, j0]), 0.0, i0, j0)]
+    end = None
+    while pq:
+        c, d, i, j = heapq.heappop(pq)
+        if best.get((i, j), (1e18, 0))[0] < c - 1e-12 or ((i, j) in best and best[(i, j)] != (c, d) and best[(i, j)] < (c, d)):
+            continue
+        if (i in (0, nx - 1) or j in (0, ny - 1)) and (i, j) != (i0, j0):
+            end = (i, j)
+            break
+        for di, dj, dist in _DIRS:
+            a, b = i + di, j + dj
+            if a < 0 or b < 0 or a >= nx or b >= ny or blocked[a, b]:
+                continue
+            nc = max(c, float(z[a, b]))
+            nd = d + dist * dom["dx"]
+            if (a, b) not in best or (nc, nd) < best[(a, b)]:
+                best[(a, b)] = (nc, nd)
+                par[(a, b)] = (i, j)
+                heapq.heappush(pq, (nc, nd, a, b))
+    if end is None:
+        return dict(path=[(float(X[i0]), float(Y[j0]))], end_kind="closed", end_xy=(float(X[i0]), float(Y[j0])), peak_z=float(z[i0, j0]),
+                    note="Tidak ada jalur ke tepi area dari outlet tanpa melewati kolam -- air tertahan; perlu saluran/pompa.")
+    chain = [end]
+    while chain[-1] in par:
+        chain.append(par[chain[-1]])
+    chain = chain[::-1]
+    path = [(float(X[a]), float(Y[b])) for a, b in chain]
+    peak = best[end][0]
+    ex, ey = path[-1]
+    note = "Air tertiriskan keluar melalui jalur dengan pematang tertinggi %.2f m ke tepi area simulasi." % peak
+    if peak > float(z[i0, j0]) + 0.3:
+        note += " Pematang di depan outlet lebih tinggi dari outlet -- air akan tertahan kecuali ada saluran/pompa."
+    return dict(path=path, end_kind="edge", end_xy=(ex, ey), peak_z=float(peak), note=note)
+
+
+def compare_layouts(dom, pond, outlet_xy, width, thick, ch, target_days=None, via=None, spacings=(4.0, 6.0, 8.0, 12.0, 16.0, 24.0), patterns=("herringbone", "comb", "spine"),
+                    n_layers=1, u_goal=0.9, max_days=3000.0):
+    """Evaluasi cepat (statis): tiap pola/jarak cabang -> panjang jalur, volume pasir, hari menuju U rata-rata = u_goal.
+    Asumsi jalur sudah selesai & efektif (tanpa kendala elevasi) -- untuk memilih jarak cabang yang efisien."""
+    dx = dom["dx"]
+    A = dx * dom["dy"]
+    out = []
+    for pat in patterns:
+        for sp in (spacings if pat != "spine" else (spacings[0],)):
+            try:
+                lay = auto_subdrain_layout(dom, pond, outlet_xy, spacing=sp, width=width, pattern=pat, via=via)
+            except Exception:
+                continue
+            m = rasterize_lines(dom, lay["polylines"], width)
+            e = np.where(pond & ~m, 1.0, 0.0)
+            mud = pond & ~m
+            if not mud.any():
+                continue
+            dt = 0.2 * dx * dx / max(ch, 1e-6)
+            t = 0.0
+            days = None
+            for _ in range(int(max_days / dt) + 1):
+                ep = np.pad(e, 1, mode="edge")
+                lap = ep[:-2, 1:-1] + ep[2:, 1:-1] + ep[1:-1, :-2] + ep[1:-1, 2:] - 4.0 * e
+                e = np.where(mud, np.clip(e + ch * dt / (dx * dx) * lap, 0.0, 1.0), 0.0)
+                t += dt
+                if 1.0 - float(e[mud].mean()) >= u_goal:
+                    days = t
+                    break
+            length = sum(float(np.sum(np.hypot(*np.diff(np.asarray(p), axis=0).T))) for p in lay["polylines"])
+            vol = float(m.sum() * A * thick * n_layers)
+            out.append(dict(pattern=pat, spacing=float(sp), length_m=length, sand_m3=vol, days=days, area_pct=100.0 * float(m.sum() / max(pond.sum(), 1)),
+                            sand_per_mud=vol / max(float(mud.sum() * A), 1.0)))
+    ok = [o for o in out if o["days"] is not None and (target_days is None or o["days"] <= target_days)]
+    best = min(ok, key=lambda o: o["sand_m3"]) if ok else (min([o for o in out if o["days"] is not None], key=lambda o: o["days"]) if any(o["days"] is not None for o in out) else None)
+    return out, best
+
+
+# ------------------------------------------------------------------ berkas desain final (DXF / CSV)
+def parse_design_file(name, data, densify_m=2.0):
+    """Baca permukaan desain: DXF (POINT, 3DFACE, LINE, LWPOLYLINE berelevasi, POLYLINE 3D) atau teks X Y Z. Return (pts[n,3], info)."""
+    import io, os, tempfile
+    nm = (name or "").lower()
+    pts = []
+    info = dict(kind=None, n_entities=0)
+    if nm.endswith(".dxf"):
+        import ezdxf
+        with tempfile.NamedTemporaryFile(suffix=".dxf", delete=False) as tf:
+            tf.write(data)
+            tmp = tf.name
+        try:
+            doc = ezdxf.readfile(tmp)
+        finally:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
+        info["kind"] = "dxf"
+
+        def seg_pts(a, b):
+            a = np.asarray(a[:3], float); b = np.asarray(b[:3], float)
+            L = float(np.hypot(*(b[:2] - a[:2])))
+            n = max(1, int(math.ceil(L / densify_m)))
+            return [a + (b - a) * (i / n) for i in range(n + 1)]
+        for e in doc.modelspace():
+            t = e.dxftype()
+            try:
+                if t == "POINT":
+                    pts.append(tuple(e.dxf.location)[:3])
+                elif t == "3DFACE":
+                    for k in range(4):
+                        pts.append(tuple(e.dxf.get(f"vtx{k}"))[:3])
+                elif t == "LINE":
+                    pts.extend(seg_pts(e.dxf.start, e.dxf.end))
+                elif t == "LWPOLYLINE":
+                    el = float(e.dxf.elevation) if e.dxf.hasattr("elevation") else 0.0
+                    P = [(p[0], p[1], el) for p in e.get_points("xy")]
+                    for a, b in zip(P[:-1], P[1:]):
+                        pts.extend(seg_pts(a, b))
+                    if e.closed and len(P) > 2:
+                        pts.extend(seg_pts(P[-1], P[0]))
+                elif t == "POLYLINE":
+                    P = [tuple(v.dxf.location)[:3] for v in e.vertices]
+                    for a, b in zip(P[:-1], P[1:]):
+                        pts.extend(seg_pts(a, b))
+                elif t == "MESH":
+                    pts.extend([tuple(v)[:3] for v in e.vertices])
+                else:
+                    continue
+                info["n_entities"] += 1
+            except Exception:
+                continue
+    else:
+        txt = data.decode("utf-8", "ignore").replace(";", " ").replace(",", " ").replace("\t", " ")
+        rows = []
+        for ln in txt.splitlines():
+            p = ln.split()
+            if len(p) >= 3:
+                try:
+                    rows.append((float(p[0]), float(p[1]), float(p[2])))
+                except ValueError:
+                    continue
+        pts = rows
+        info["kind"] = "xyz"
+        info["n_entities"] = len(rows)
+    P = np.asarray(pts, float).reshape(-1, 3)
+    P = P[np.all(np.isfinite(P), axis=1)]
+    if P.shape[0] < 3:
+        raise ValueError("Tidak ada titik elevasi (X,Y,Z) yang terbaca dari berkas desain.")
+    if float(np.ptp(P[:, 2])) < 1e-6:
+        raise ValueError("Semua elevasi di berkas desain sama (Z konstan) -- DXF harus berisi garis kontur/titik/3DFACE ber-elevasi.")
+    info.update(n_pts=int(P.shape[0]), bbox=(float(P[:, 0].min()), float(P[:, 0].max()), float(P[:, 1].min()), float(P[:, 1].max())),
+                zmin=float(P[:, 2].min()), zmax=float(P[:, 2].max()))
+    return P, info
+
+
+def make_design_fn(P, max_pts=80000):
+    """TIN linear dari titik desain -> fungsi f(X,Y) (NaN di luar cakupan titik)."""
+    from scipy.interpolate import LinearNDInterpolator
+    P = np.asarray(P, float)
+    key = np.round(P[:, :2], 3)
+    _, ui = np.unique(key, axis=0, return_index=True)
+    P = P[np.sort(ui)]
+    if P.shape[0] > max_pts:
+        rng = np.random.default_rng(0)
+        P = P[rng.choice(P.shape[0], max_pts, replace=False)]
+    f = LinearNDInterpolator(P[:, :2], P[:, 2], fill_value=np.nan)
+
+    def fn(X, Y):
+        X = np.asarray(X, float); Y = np.asarray(Y, float)
+        return f(np.stack([X.ravel(), Y.ravel()], axis=1)).reshape(X.shape)
+    return fn
+
+
+# ------------------------------------------------------------------ potongan melintang (cross section) 2D + DXF
+def section_sample(res, p0, p1, n=None):
+    """Ambil profil sepanjang garis p0->p1 (koordinat lokal) untuk semua frame: tanah asli, timbunan, pasir, lumpur, air."""
+    from scipy.ndimage import map_coordinates
+    X, Y = np.asarray(res["X"], float), np.asarray(res["Y"], float)
+    dx, dy = float(X[1] - X[0]), float(Y[1] - Y[0])
+    L = float(np.hypot(p1[0] - p0[0], p1[1] - p0[1]))
+    if L < 1e-6:
+        raise ValueError("Titik awal dan akhir potongan sama.")
+    n = int(n or max(40, min(600, int(L / (0.5 * min(abs(dx), abs(dy)))) + 1)))
+    d = np.linspace(0.0, L, n)
+    xs = p0[0] + (p1[0] - p0[0]) * d / L
+    ys = p0[1] + (p1[1] - p0[1]) * d / L
+    ii = (xs - X[0]) / dx
+    jj = (ys - Y[0]) / dy
+    inside = (ii >= 0) & (ii <= len(X) - 1) & (jj >= 0) & (jj <= len(Y) - 1)
+    co = [np.clip(ii, 0, len(X) - 1), np.clip(jj, 0, len(Y) - 1)]
+    smp = lambda a: map_coordinates(np.asarray(a, float), co, order=1, mode="nearest")
+    z0 = smp(res["z"])
+    zd = None
+    if res.get("design") is not None:
+        dd = np.asarray(res["design"], float)
+        dd = np.where(np.isfinite(dd), dd, np.asarray(res["z"], float))
+        zd = smp(dd)
+    fr = res["frames"]
+    nf = len(fr["f"])
+    f = np.stack([smp(fr["f"][k] / 100.0) for k in range(nf)])
+    hm = np.stack([smp(fr["hm"][k] / 100.0) for k in range(nf)])
+    hw = np.stack([smp(fr["hw"][k] / 100.0) for k in range(nf)])
+    sand = None
+    if res.get("sub") is not None and res.get("comp") is not None:
+        si = len(res["mat_names"]) - 1
+        if si >= 1:
+            sand = np.stack([smp(res["comp"][k][si - 1] / 255.0) for k in range(nf)])
+    return dict(d=d, x=xs, y=ys, z0=z0, zd=zd, f=f, hm=hm, hw=hw, sand=sand, inside=inside, times=list(res["times"]), length=L)
+
+
+def section_layers(sec, k):
+    """Batas lapisan pada frame k: dict nama -> (bawah, atas)."""
+    z0, f, hm, hw = sec["z0"], sec["f"][k], sec["hm"][k], sec["hw"][k]
+    out = {}
+    if sec["sand"] is not None:
+        s = np.clip(sec["sand"][k], 0, 1)
+        out["timbunan"] = (z0, z0 + f * (1 - s))
+        out["pasir"] = (z0 + f * (1 - s), z0 + f)
+    else:
+        out["timbunan"] = (z0, z0 + f)
+    out["lumpur"] = (z0 + f, z0 + f + hm)
+    out["air"] = (z0 + f + hm, z0 + f + hm + hw)
+    return out
+
+
+def _runs(d, lo, hi, eps=0.02):
+    ok = (hi - lo) > eps
+    runs, i, n = [], 0, len(d)
+    while i < n:
+        if ok[i]:
+            j = i
+            while j + 1 < n and ok[j + 1]:
+                j += 1
+            if j > i:
+                runs.append((i, j))
+            i = j + 1
+        else:
+            i += 1
+    return runs
+
+
+def section_dxf(sec, k, title="Potongan melintang", ve=1.0, include_initial=True):
+    """DXF 2D: X = jarak sepanjang potongan (m), Y = elevasi (m x ve). Layer: TANAH_ASLI, TIMBUNAN, PASIR_SUBDRAIN, LUMPUR, AIR, DESAIN_FINAL, AWAL_*."""
+    import io
+    import ezdxf
+    doc = ezdxf.new("R2010")
+    doc.units = 6
+    msp = doc.modelspace()
+    spec = {"TANAH_ASLI": 8, "TIMBUNAN": 30, "PASIR_SUBDRAIN": 50, "LUMPUR": 32, "AIR": 5, "DESAIN_FINAL": 3, "AWAL_LUMPUR": 32, "AWAL_AIR": 5, "TEKS": 7, "GRID": 9}
+    for nm, c in spec.items():
+        doc.layers.add(nm, color=c)
+    d = sec["d"]
+    names = {"timbunan": "TIMBUNAN", "pasir": "PASIR_SUBDRAIN", "lumpur": "LUMPUR", "air": "AIR"}
+    Y = lambda a: np.asarray(a, float) * ve
+
+    def poly(layer, xs, ys, closed=False, **kw):
+        msp.add_lwpolyline(list(zip(map(float, xs), map(float, ys))), close=closed, dxfattribs=dict(layer=layer, **kw))
+
+    poly("TANAH_ASLI", d, Y(sec["z0"]))
+    if sec["zd"] is not None:
+        poly("DESAIN_FINAL", d, Y(sec["zd"]), linetype="CONTINUOUS")
+    lay = section_layers(sec, k)
+    for nm, (lo, hi) in lay.items():
+        for i, j in _runs(d, lo, hi):
+            top = list(zip(d[i:j + 1], Y(hi[i:j + 1])))
+            bot = list(zip(d[i:j + 1][::-1], Y(lo[i:j + 1])[::-1]))
+            pts = [(float(a), float(b)) for a, b in top + bot]
+            msp.add_lwpolyline(pts, close=True, dxfattribs=dict(layer=names[nm]))
+            h = msp.add_hatch(color=spec[names[nm]], dxfattribs=dict(layer=names[nm]))
+            h.set_solid_fill(color=spec[names[nm]])
+            h.paths.add_polyline_path(pts, is_closed=True)
+    if include_initial:
+        lay0 = section_layers(sec, 0)
+        for nm, lname in (("lumpur", "AWAL_LUMPUR"), ("air", "AWAL_AIR")):
+            lo, hi = lay0[nm]
+            for i, j in _runs(d, lo, hi):
+                poly(lname, d[i:j + 1], Y(hi[i:j + 1]), linetype="DASHED")
+    zmin = float(np.nanmin(sec["z0"])) - 1.0
+    z_lo = np.floor(zmin) * ve
+    poly("GRID", [0, float(d[-1])], [z_lo, z_lo])
+    step = 10.0 if d[-1] > 40 else 5.0
+    for t in np.arange(0, d[-1] + 1e-6, step):
+        msp.add_line((float(t), z_lo), (float(t), z_lo - 0.6 * ve), dxfattribs=dict(layer="GRID"))
+        msp.add_text(f"{t:.0f}", height=0.5 * ve, dxfattribs=dict(layer="TEKS", insert=(float(t), z_lo - 1.4 * ve), halign=1, valign=0, align_point=(float(t), z_lo - 1.4 * ve)))
+    zt = float(np.nanmax(Y(lay["air"][1]))) + 2.0 * ve
+    msp.add_text(title, height=0.9 * ve, dxfattribs=dict(layer="TEKS", insert=(0.0, zt)))
+    sio = io.StringIO()
+    doc.write(sio)
+    return sio.getvalue().encode("utf-8")
+'''
+
+_DUMP_SCENE_SRC = r'''"""Pembangun viewer HTML (three.js) untuk hasil dump_sim.simulate()."""
+from __future__ import annotations
+import base64, gzip, json, math, os
+import numpy as np
+
+THREE_CDN = ["https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js",
+             "https://unpkg.com/three@0.128.0/build/three.min.js",
+             "https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"]
+
+LABELS_ID = dict(
+    loading="Memuat simulasi…", err_three="Pustaka 3D (three.js) gagal dimuat dari CDN. Cek internet atau letakkan three.min.js (r128) di folder vendor/ di samping aplikasi.",
+    err_gz="Browser ini tidak mendukung dekompresi data (DecompressionStream). Gunakan Chrome/Edge/Safari terbaru.", err_gen="Viewer gagal dijalankan.",
+    reset="Atur ulang kamera", top="Tampak atas", iso="Tampak miring", side="Tampak samping", full="Layar penuh", shot="Simpan gambar",
+    loop="Ulangi", layers="Lapisan", lg_w="Δ muka air", lg_m="Δ muka lumpur", l_water="Air", l_mud="Lumpur", l_fill="Timbunan", l_truck="Truk & tumpahan",
+    l_marker="Titik dump", l_wire="Kerangka (wireframe)", vexag="Eksagerasi vertikal", load="Ritase", waiting="Menunggu unit pertama", finished="Selesai",
+    st_back="mundur ke titik dump", st_tip="menumpahkan material", st_go="meninggalkan lokasi", s_wl="Muka air", s_ml="Muka lumpur", s_in="Volume masuk",
+    s_out="Meluap keluar area", l_design="Desain final (kerangka)", s_day="Jadwal", l_plan="Rencana jalur subdrain", l_route="Jalur buangan air", l_status="Status jalur pasir (hijau efektif / merah terkurung)", s_sand="Pasir terpasang", s_drain="Air tertiriskan", s_u="Konsolidasi lumpur (U)", s_eff="Jalur efektif / terkurung", sandlbl="pasir", s_pump="Air dipompa keluar", s_lift="Lift / blok", s_prog="Progres timbunan", day="Hari", hour="jam kerja",
+    block="blok", of_design="dari desain", grouped="ritase digabung",  s_w="air", s_m="lumpur", w_mud="LUMPUR MELUAP keluar dari area simulasi", w_water="AIR MELUAP keluar dari area simulasi")
+
+
+def _b64(a):
+    return base64.b64encode(np.ascontiguousarray(a).tobytes()).decode("ascii")
+
+
+def compute_approach(dom, pond, dump_xy):
+    """Arah dari kolam menuju titik dump (vektor satuan, timur/utara) = arah datang & berdirinya truk."""
+    X = dom["X"][:, None] * np.ones((1, dom["ny"]))
+    Y = dom["Y"][None, :] * np.ones((dom["nx"], 1))
+    if pond is not None and pond.sum() > 0:
+        cx, cy = float(X[pond].mean()), float(Y[pond].mean())
+        v = np.array([dump_xy[0] - cx, dump_xy[1] - cy])
+    else:
+        gx, gy = np.gradient(dom["z"], dom["dx"], dom["dy"])
+        i = int(np.argmin(abs(dom["X"] - dump_xy[0]))); j = int(np.argmin(abs(dom["Y"] - dump_xy[1])))
+        v = np.array([gx[i, j], gy[i, j]])            # menanjak = tempat truk datang
+    n = np.hypot(*v)
+    return (float(v[0] / n), float(v[1] / n)) if n > 1e-9 else (1.0, 0.0)
+
+
+def build_scene_html(res, plan, dom, unit_name, unit, material_name, material, title="Simulasi Dumping 3D", subtitle="",
+                     vexag=2.0, imagery=None, three_inline=None, labels=None, template_path=None, affine=None, template_html=None, mat_list=None):
+    nx, ny = dom["nx"], dom["ny"]
+    cx, cy = dom["center"]
+    # transformasi lokal -> tampilan (mis. DXF lokal -> UTM). affine = (M 2x2, t 2) ; identitas bila None
+    M = np.eye(2) if affine is None else np.asarray(affine[0], float)
+    tt = np.zeros(2) if affine is None else np.asarray(affine[1], float)
+    XL, YL = np.meshgrid(dom["X"], dom["Y"], indexing="ij")
+    DE = M[0, 0] * XL + M[0, 1] * YL + tt[0]
+    DN = M[1, 0] * XL + M[1, 1] * YL + tt[1]
+    E0 = float(M[0, 0] * cx + M[0, 1] * cy + tt[0])
+    N0 = float(M[1, 0] * cx + M[1, 1] * cy + tt[1])
+    XX, YY = DE - E0, DN - N0
+    X = XX[:, 0]
+    Y = YY[0, :]
+    z = dom["z"]
+    fr = res["frames"]
+    arr = np.stack([fr["f"], fr["hm"], fr["hw"]], axis=1).astype("<u2")      # [nf, 3, nx, ny]
+    gz = gzip.compress(arr.reshape(-1).tobytes(), compresslevel=6)
+    staged = res.get("events") is not None
+    if staged:
+        ap_l = (1.0, 0.0)
+    else:
+        ap_l = compute_approach(dom, res.get("pond"), res["dump_xy"])
+    ap_v = M @ np.array(ap_l); ap = (float(ap_v[0] / np.hypot(*ap_v)), float(ap_v[1] / np.hypot(*ap_v)))
+    dpx = float(M[0, 0] * res["dump_xy"][0] + M[0, 1] * res["dump_xy"][1] + tt[0] - E0)
+    dpy = float(M[1, 0] * res["dump_xy"][0] + M[1, 1] * res["dump_xy"][1] + tt[1] - N0)
+    ser = [dict(t=s["t"], fill=round(s["fill_vol"], 1), uavg=round(s.get("uavg", 0.0), 4), drained=round(s.get("drained", 0.0), 1), sand=round(s.get("sand_vol", 0.0), 1),
+                trapped=round(s.get("trapped_m2", 0.0), 1), effm2=round(s.get("eff_m2", 0.0), 1), wl=(None if not np.isfinite(s["water_level"]) else round(s["water_level"], 3)),
+                ml=(None if not np.isfinite(s["mud_level"]) else round(s["mud_level"], 3)),
+                dumped=round(s["dumped"], 2), outw=round(s["out_water"], 2), outm=round(s["out_mud"], 2), pumped=round(s.get("pumped", 0.0), 1)) for s in res["series"]]
+    # null -> NaN di JS dilewatkan sebagai null; isi dengan nilai sebelumnya supaya grafik tidak patah
+    last = {"wl": None, "ml": None}
+    for s in ser:
+        for k in ("wl", "ml"):
+            if s[k] is None:
+                s[k] = last[k] if last[k] is not None else 0.0
+            last[k] = s[k]
+    pond = res.get("pond")
+    dxp, dyp = dpx, dpy
+    if pond is not None and pond.sum() > 0:
+        pxm, pym = float(XX[pond].mean()), float(YY[pond].mean())
+        ext = float(max(XX[pond].max() - XX[pond].min(), YY[pond].max() - YY[pond].min()))
+    else:
+        pxm, pym, ext = dxp, dyp, 40.0
+    focus = dict(x=0.5 * (dxp + pxm), z=-0.5 * (dyp + pym), r=float(max(55.0, 1.55 * ext + 20.0)))
+    loads_js, extra = None, {}
+    if staged:
+        def disp(xy):
+            return float(M[0, 0] * xy[0] + M[0, 1] * xy[1] + tt[0] - E0), float(M[1, 0] * xy[0] + M[1, 1] * xy[1] + tt[1] - N0)
+        acc = res.get("access") or res["dump_xy"]
+        cols = [m.get("color", "#8a6d4b") for m in (mat_list or [material])]
+        loads_js = []
+        for e in res["events"]:
+            ex, ey = disp(e["xy"])
+            vv = M @ np.array([acc[0] - e["xy"][0], acc[1] - e["xy"][1]])
+            nn = float(np.hypot(*vv)) or 1.0
+            loads_js.append(dict(k=e["k"], vol=round(sum(e["vols"]), 2), t_arrive=round(e["t_arrive"], 2), t_tip0=round(e["t_tip0"], 2), t_tip1=round(e["t_tip1"], 2),
+                                 t_leave=round(e["t_leave"], 2), dump=dict(x=ex, z=-ey), ap=dict(x=float(vv[0] / nn), z=-float(vv[1] / nn)),
+                                 color=cols[min(e.get("mat_main", 0), len(cols) - 1)], n_loads=int(e.get("n_loads", 1)), loads_before=int(e.get("loads_before", 0))))
+        kn = res.get("clock_knots") or ([[e["t_tip0"], e["clock_h"]] for e in res["events"]] + [[res["t_end"], res["op_hours"]]])
+        kn = [[round(a, 1), round(b, 4)] for a, b in kn]
+        stg = []
+        for st in res["stages"]:
+            stg.append(dict(kind=st.get("kind", "fill"), t0=round(st["t_sim0"], 1), t1=round(st["t_sim1"], 1), lift=st["lift"], n_lifts=st["n_lifts"], block=st["block"], lift_z=round(st["lift_z"], 2), n_loads=st["n_loads"]))
+        zdv = res["design"] - 0.0
+        extra["staged"] = dict(Vtot=float(res["Vtot"]), hpd=float(res["hours_per_day"]), colors=cols, clock=kn, stages=stg, n_loads=int(res["loads_total"]))
+        extra["design"] = dict(pz=_b64(np.where(np.isfinite(zdv), zdv, np.nan).astype("<f4")))
+        if res.get("sub") is not None:
+            sb = res["sub"]
+            def dpl(P):
+                out = []
+                for p in P:
+                    q = disp(p)
+                    out.append([round(q[0], 2), round(-q[1], 2)])
+                return out
+            nfr = len(res["times"])
+            def _padf(a):
+                a = np.asarray(a)
+                if len(a) < nfr:
+                    a = np.concatenate([a, np.repeat(a[-1:], nfr - len(a), axis=0)], axis=0)
+                return a[:nfr]
+            res = dict(res, EC=_padf(res["EC"]), DS=_padf(res["DS"]))
+            extra["sub"] = dict(lines=[dpl(p) for p in sb["polylines"]], route=dpl(sb["route"]["path"]), outlet=dict(x=disp(sb["outlet"])[0], z=-disp(sb["outlet"])[1]),
+                                width=sb["width"], mode=sb["mode"])
+            extra["ec"] = dict(gz=base64.b64encode(gzip.compress(np.ascontiguousarray(res["EC"]).astype(np.uint8).reshape(-1).tobytes(), compresslevel=6)).decode("ascii"))
+            extra["ds"] = dict(gz=base64.b64encode(gzip.compress(np.ascontiguousarray(res["DS"]).astype(np.uint8).reshape(-1).tobytes(), compresslevel=6)).decode("ascii"))
+        if res.get("comp") is not None:
+            extra["comp"] = dict(gz=base64.b64encode(gzip.compress(np.ascontiguousarray(res["comp"]).astype(np.uint8).reshape(-1).tobytes(), compresslevel=6)).decode("ascii"))
+        dxf, dyf = disp(res["dump_xy"])
+        m_ = np.isfinite(res["design"]) & (res["design"] > z + 0.05)
+        if m_.any():
+            fx0, fx1, fy0, fy1 = XX[m_].min(), XX[m_].max(), YY[m_].min(), YY[m_].max()
+            ext_f = float(max(fx1 - fx0, fy1 - fy0))
+            focus = dict(x=0.5 * (fx0 + fx1), z=-0.5 * (fy0 + fy1), r=float(max(55.0, 1.5 * ext_f + 20.0)))
+    else:
+        loads_js = [{k: (round(v, 2) if isinstance(v, float) else v) for k, v in L.items()} for L in plan["loads"]]
+    payload = dict(cam=focus,
+        labels={**LABELS_ID, **(labels or {})}, three_cdn=THREE_CDN,
+        grid=dict(nx=nx, ny=ny, px=_b64(XX.astype("<f4")), py=_b64(YY.astype("<f4")), pz=_b64(z.astype("<f4")),
+                  zmin=float(z.min()), zmax=float(z.max()), xspan=float(XX.max() - XX.min()), yspan=float(YY.max() - YY.min()), ox=E0, oy=N0,
+                  lx0=float(dom['X'][0]), ly0=float(dom['Y'][0]), dxl=float(dom['dx']), dyl=float(dom['dy']),
+                  M=[float(M[0, 0]), float(M[0, 1]), float(M[1, 0]), float(M[1, 1])], t=[float(tt[0] - E0), float(tt[1] - N0)]),
+        frames=dict(nf=int(arr.shape[0]), times=[round(t, 2) for t in res["times"]], gz=base64.b64encode(gz).decode("ascii")),
+        series=ser, loads=loads_js,
+        truck=dict(len=unit["len_m"], wid=unit["wid_m"], hgt=unit["hgt_m"], raise_s=unit.get("raise_s", 15.0), name=unit_name),
+        dump=dict(x=dpx, z=-dpy), approach=dict(x=ap[0], z=-ap[1]),
+        material=dict(name=material_name, color=material.get("color", "#8a6d4b")),
+        imagery=({"uri": imagery["uri"], "extent": [float(v) for v in imagery["extent"]]} if imagery else None),
+        meta=dict(title=title, subtitle=subtitle, vexag=float(vexag)), **extra)
+    js = json.dumps(payload, separators=(",", ":")).replace("</", "<\\/")
+    if template_html is None:
+        tp = template_path or os.path.join(os.path.dirname(os.path.abspath(__file__)), "dump_viewer_template.html")
+        template_html = open(tp, encoding="utf-8").read()
+    html = template_html.replace("/*__PAYLOAD__*/null", js)
+    html = html.replace("/*__THREE_INLINE__*/", (three_inline or "").replace("</script", "<\\/script"))
+    return html, dict(html_mb=len(html) / 1e6, frames=int(arr.shape[0]))
+'''
+
+_DUMP_VIEWER_TEMPLATE = r'''<!doctype html>
+<html lang="id"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Simulasi Dumping 3D</title>
+<style>
+:root{--bg:#0c1118;--panel:rgba(16,22,31,.86);--fg:#eaf0f6;--mut:#9fb1c4;--acc:#f2b61c;--water:#3aa6dc;--mud:#b07a45;--bad:#ff6a5c;--line:rgba(255,255,255,.14)}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:12.5px/1.35 system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;overflow:hidden}
+#wrap{position:relative;width:100%;height:100%;background:radial-gradient(ellipse at 50% 20%,#2a3a4d 0%,#0c1118 72%)}
+canvas#gl{display:block;width:100%;height:100%;outline:none;touch-action:none;cursor:grab}
+canvas#gl:active{cursor:grabbing}
+.panel{position:absolute;background:var(--panel);border:1px solid var(--line);border-radius:10px;-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+#hud{left:10px;top:10px;padding:8px 12px;width:min(330px,calc(100% - 20px))}
+#hud .ttl{font-weight:650;font-size:13.5px}
+#hud .sub{color:var(--mut);font-size:11.5px;margin-top:1px}
+#hud .tm{margin-top:5px}
+#hud .tm span{display:block;margin-top:1px}
+#hud .tm b{font-variant-numeric:tabular-nums;font-size:19px;color:#ffe08a;white-space:nowrap}
+#hud .tm span{color:var(--mut)}
+#hud .st{margin-top:6px;display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-variant-numeric:tabular-nums}
+#hud .st .k{color:var(--mut)} #hud .st .v{text-align:right}
+#hud .v.up{color:#ffd166} #hud .v.bad{color:var(--bad);font-weight:700}
+#hud canvas{display:block;width:100%;height:62px;margin-top:7px;border-top:1px solid var(--line);padding-top:4px}
+#hud .lg{display:flex;gap:12px;color:var(--mut);font-size:11px;margin-top:2px}
+#hud .lg i{display:inline-block;width:14px;height:3px;vertical-align:middle;margin-right:4px;border-radius:2px}
+#warn{left:10px;top:auto;bottom:62px;padding:7px 12px;display:none;border-color:rgba(255,106,92,.6);color:#ffd0ca;background:rgba(80,20,16,.88);font-weight:600}
+#side{right:10px;top:10px;width:212px;max-height:calc(100% - 84px);overflow:auto;padding:6px 10px 8px}
+#side summary{cursor:pointer;font-weight:600;padding:3px 0;outline:none}
+#side label.row{display:flex;align-items:center;gap:7px;margin:3px 0;cursor:pointer;user-select:none}
+#side .sl{margin:6px 0 2px} #side .sl span{display:flex;justify-content:space-between;color:var(--mut);font-size:11.5px}
+#side input[type=range]{width:100%;margin:1px 0}
+.tb{position:absolute;right:232px;top:10px;display:flex;gap:5px}
+button{background:rgba(255,255,255,.08);color:var(--fg);border:1px solid var(--line);border-radius:7px;padding:4px 9px;cursor:pointer;font:inherit}
+button:hover{background:rgba(242,182,28,.3)}
+#bar{left:10px;right:10px;bottom:10px;padding:7px 10px;display:flex;gap:9px;align-items:center}
+#bar #play{min-width:34px;font-size:14px}
+#bar input[type=range]{flex:1;min-width:80px}
+#bar select{background:rgba(255,255,255,.08);color:var(--fg);border:1px solid var(--line);border-radius:7px;padding:3px 4px;font:inherit}
+#bar select option{color:#000}
+#bar .lp{display:flex;align-items:center;gap:4px;color:var(--mut);user-select:none}
+#err{position:absolute;inset:0;display:none;align-items:center;justify-content:center;text-align:center;padding:24px;background:rgba(8,12,18,.94);z-index:9;font-size:14px;line-height:1.5}
+#loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(8,12,18,.9);z-index:8;font-size:14px;color:var(--mut)}
+@media (max-width:700px){#side{width:170px}.tb{right:190px}#hud{width:min(300px,calc(100% - 20px))}}
+@media (prefers-reduced-motion:reduce){*{scroll-behavior:auto}}
+</style></head>
+<body>
+<div id="wrap">
+  <canvas id="gl" tabindex="0"></canvas>
+  <div id="hud" class="panel">
+    <div class="ttl" id="hudT"></div><div class="sub" id="hudS"></div>
+    <div class="tm"><b id="hudTm">0:00</b><span id="hudLoad"></span></div>
+    <div class="st" id="hudSt"></div>
+    <canvas id="chart" width="600" height="124"></canvas>
+    <div class="lg"><span><i style="background:var(--water)"></i><span id="lgW"></span></span><span><i style="background:var(--mud)"></i><span id="lgM"></span></span></div>
+  </div>
+  <div id="warn" class="panel"></div>
+  <div class="tb"><button id="bReset"></button><button id="bTop"></button><button id="bIso"></button><button id="bSide"></button><button id="bFull"></button><button id="bShot"></button></div>
+  <div id="side" class="panel"><details open><summary id="sLayers"></summary><div id="layers"></div></details></div>
+  <div id="bar" class="panel">
+    <button id="play">▶</button>
+    <input type="range" id="tl" min="0" max="1000" value="0">
+    <select id="spd"><option value="0.5">0.5×</option><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option></select>
+    <label class="lp"><input type="checkbox" id="loop" checked><span id="loopT"></span></label>
+  </div>
+  <div id="loading"></div>
+  <div id="err"><div id="errT"></div></div>
+</div>
+<script>/*__THREE_INLINE__*/</script>
+<script>window.__DUMP__ = /*__PAYLOAD__*/null;</script>
+<script>
+(function(){
+"use strict";
+var P = window.__DUMP__, L = P.labels;
+function $(id){return document.getElementById(id);}
+function showErr(m){var e=$('err');e.style.display='flex';$('errT').innerHTML=m;$('loading').style.display='none';}
+$('loading').textContent = L.loading;
+function loadThree(cb){
+  if (window.THREE) return cb();
+  var urls = P.three_cdn || [], i = 0;
+  (function next(){
+    if (i >= urls.length){ showErr(L.err_three); return; }
+    var s = document.createElement('script'); s.src = urls[i++];
+    s.onload = function(){ if (window.THREE) cb(); else next(); }; s.onerror = next; document.head.appendChild(s);
+  })();
+}
+function b64u8(s){ var bin=atob(s), n=bin.length, u=new Uint8Array(n); for (var i=0;i<n;i++) u[i]=bin.charCodeAt(i); return u; }
+function gunzip(u8){
+  if (typeof DecompressionStream === 'undefined') return Promise.reject(new Error('no DecompressionStream'));
+  var ds = new DecompressionStream('gzip');
+  return new Response(new Blob([u8]).stream().pipeThrough(ds)).arrayBuffer();
+}
+function fmtT(s){ s=Math.max(0,s); var m=Math.floor(s/60), r=Math.floor(s%60); return m+':'+(r<10?'0':'')+r; }
+function f1(v,d){ return (isFinite(v)?v:0).toFixed(d===undefined?2:d); }
+
+function start(frameBuf, compBuf, ecBuf, dsBuf){
+try {
+var T = THREE, G = P.grid, nx = G.nx, ny = G.ny, N = nx*ny, FR = P.frames, NF = FR.nf;
+var px = new Float32Array(b64u8(G.px).buffer), py = new Float32Array(b64u8(G.py).buffer), pz = new Float32Array(b64u8(G.pz).buffer);
+var fr = new Uint16Array(frameBuf);                       // [NF][3][N] dalam cm : f, hm, hw
+var times = FR.times, Tend = times[times.length-1];
+var zmin = G.zmin, zrange = Math.max(G.zmax-G.zmin, 1), span = Math.max(G.xspan, G.yspan), meta = P.meta;
+
+var canvas = $('gl');
+var renderer = new T.WebGLRenderer({canvas:canvas, antialias:true, alpha:false, preserveDrawingBuffer:true});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio||1, 2)); renderer.setClearColor(0x0c1118, 1);
+var scene = new T.Scene(); scene.fog = new T.Fog(0x0c1118, span*2.2, span*9);
+var cam = new T.PerspectiveCamera(42, 1, Math.max(span*0.002, 0.15), span*30);
+scene.add(new T.HemisphereLight(0xdfeaff, 0x3b3126, 0.62));
+var sun = new T.DirectionalLight(0xfff1d6, 0.8); sun.position.set(-span*0.6, span*0.9, span*0.4); scene.add(sun);
+var world = new T.Group(); scene.add(world);
+
+// ------------------------------------------------ geometri bersama
+var pos0 = new Float32Array(N*3), uvs = new Float32Array(N*2), ext = P.imagery ? P.imagery.extent : null;
+for (var v=0; v<N; v++){
+  pos0[3*v] = px[v]; pos0[3*v+1] = pz[v]-zmin; pos0[3*v+2] = -py[v];
+  if (ext){ uvs[2*v] = (px[v]+G.ox-ext[0])/Math.max(ext[1]-ext[0],1e-6); uvs[2*v+1] = (py[v]+G.oy-ext[2])/Math.max(ext[3]-ext[2],1e-6); }
+}
+var idx = new Uint32Array((nx-1)*(ny-1)*6), q = 0;
+for (var i=0;i<nx-1;i++) for (var j=0;j<ny-1;j++){ var a=i*ny+j,b=(i+1)*ny+j,c=i*ny+j+1,d=(i+1)*ny+j+1; idx[q++]=a; idx[q++]=b; idx[q++]=c; idx[q++]=b; idx[q++]=d; idx[q++]=c; }
+function mkGeo(withUV){
+  var g = new T.BufferGeometry(); g.setAttribute('position', new T.BufferAttribute(new Float32Array(pos0),3));
+  if (withUV) g.setAttribute('uv', new T.BufferAttribute(uvs,2));
+  g.setIndex(new T.BufferAttribute(idx,1)); return g;
+}
+// ------------------------------------------------ medan (warna hipsometrik atau citra)
+var tgeo = mkGeo(true), col = new Float32Array(N*3);
+for (var v2=0; v2<N; v2++){
+  var h = Math.min(Math.max((pz[v2]-zmin)/zrange,0),1), nz = 0.5+0.5*Math.sin(px[v2]*0.9)*Math.cos(py[v2]*1.1)+0.25*Math.sin(px[v2]*0.23+py[v2]*0.31);
+  var sh = 0.82+0.18*nz;
+  col[3*v2]=(0.30+0.26*h)*sh; col[3*v2+1]=(0.25+0.21*h)*sh; col[3*v2+2]=(0.18+0.15*h)*sh;
+}
+tgeo.setAttribute('color', new T.BufferAttribute(col,3)); tgeo.computeVertexNormals();
+var terrMat;
+if (P.imagery){
+  var img = new Image();
+  img.onload = function(){ var t = new T.Texture(img); t.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy()); t.minFilter = T.LinearMipmapLinearFilter; t.needsUpdate = true; terrMat.map = t; terrMat.vertexColors = false; terrMat.color.set(0xffffff); terrMat.needsUpdate = true; dirty = true; };
+  img.src = P.imagery.uri;
+}
+terrMat = new T.MeshLambertMaterial({vertexColors:true, side:T.DoubleSide});
+var terrain = new T.Mesh(tgeo, terrMat); world.add(terrain);
+// ------------------------------------------------ timbunan, lumpur, air
+var fgeo = mkGeo(false), mgeo = mkGeo(false), wgeo = mkGeo(false);
+var matCol = new T.Color(P.material.color);
+var STG = P.staged || null, KM = STG ? STG.colors.length : 1, mcols = STG ? STG.colors.map(function(c){ return new T.Color(c); }) : [matCol];
+var fcol = new Float32Array(N*3);
+if (compBuf){ fgeo.setAttribute('color', new T.BufferAttribute(fcol,3)); }
+var fillMesh = new T.Mesh(fgeo, new T.MeshLambertMaterial({color:compBuf?0xffffff:matCol, vertexColors:!!compBuf, side:T.DoubleSide, flatShading:false}));
+var mcolA = new Float32Array(N*3); for (var mq=0; mq<N; mq++){ mcolA[3*mq]=0.365; mcolA[3*mq+1]=0.247; mcolA[3*mq+2]=0.141; }
+mgeo.setAttribute('color', new T.BufferAttribute(mcolA,3));
+var mudMesh = new T.Mesh(mgeo, new T.MeshPhongMaterial({color:0xffffff, vertexColors:true, specular:0x1c1610, shininess:10, side:T.DoubleSide, transparent:true, opacity:0.96}));
+var watMesh = new T.Mesh(wgeo, new T.MeshPhongMaterial({color:0x2f93c8, specular:0xbfe9ff, shininess:90, side:T.DoubleSide, transparent:true, opacity:0.6, depthWrite:false}));
+mudMesh.renderOrder = 2; watMesh.renderOrder = 3;
+world.add(fillMesh); world.add(mudMesh); world.add(watMesh);
+
+// ------------------------------------------------ titik dump + truk + partikel (di luar 'world' agar tidak ikut skala vertikal)
+var vex = meta.vexag, dp = P.dump, ap = P.approach, TR = P.truck, LD = P.loads;
+var Mx = G.M, det = Mx[0]*Mx[3]-Mx[1]*Mx[2];
+function toIdx(x, z){ // (x, z) scene -> indeks grid pecahan (lewat invers transformasi lokal->tampilan)
+  var ex = x - G.t[0], nn = -z - G.t[1];
+  var lx = (Mx[3]*ex - Mx[1]*nn)/det, ly = (-Mx[2]*ex + Mx[0]*nn)/det;
+  return [(lx - G.lx0)/G.dxl, (ly - G.ly0)/G.dyl];
+}
+function terrainY(x, z){ // tinggi medan (belum eksagerasi) di (x, z) scene, bilinear
+  var gi = toIdx(x, z), gx = gi[0], gy = gi[1];
+  gx = Math.min(Math.max(gx,0),nx-1.001); gy = Math.min(Math.max(gy,0),ny-1.001);
+  var i0=Math.floor(gx), j0=Math.floor(gy), fx=gx-i0, fy=gy-j0;
+  function Z(i,j){ return pz[i*ny+j]-zmin; }
+  return (Z(i0,j0)*(1-fx)+Z(i0+1,j0)*fx)*(1-fy)+(Z(i0,j0+1)*(1-fx)+Z(i0+1,j0+1)*fx)*fy;
+}
+var Lg=TR.len, Wg=TR.wid, Hg=TR.hgt;
+var truck = new T.Group(), bedG = new T.Group(), loadMesh;
+(function(){
+  var yel = new T.MeshLambertMaterial({color:0xf2b61c}), drk = new T.MeshLambertMaterial({color:0x2b2f34}), blk = new T.MeshLambertMaterial({color:0x111214}), glass = new T.MeshLambertMaterial({color:0x2c4a63});
+  function box(w,h,d,m,x,y,z){ var b=new T.Mesh(new T.BoxGeometry(w,h,d),m); b.position.set(x,y,z); return b; }
+  truck.add(box(Lg*0.9, Hg*0.16, Wg*0.62, drk, Lg*0.47, Hg*0.30, 0));
+  var r=Hg*0.2, wy=r;
+  [[Lg*0.26,-1],[Lg*0.26,1],[Lg*0.34,-1],[Lg*0.34,1],[Lg*0.80,-1],[Lg*0.80,1]].forEach(function(p){
+    var w = new T.Mesh(new T.CylinderGeometry(r, r, Wg*0.13, 16), blk); w.rotation.x = Math.PI/2; w.position.set(p[0], wy, p[1]*Wg*0.40); truck.add(w); });
+  truck.add(box(Lg*0.2, Hg*0.30, Wg*0.30, yel, Lg*0.86, Hg*0.5, -Wg*0.2));
+  truck.add(box(Lg*0.05, Hg*0.12, Wg*0.26, glass, Lg*0.965, Hg*0.58, -Wg*0.2));
+  truck.add(box(Lg*0.46, Hg*0.04, Wg*0.84, yel, Lg*0.68, Hg*0.9, 0));
+  truck.add(box(Lg*0.18, Hg*0.1, Wg*0.5, drk, Lg*0.97, Hg*0.28, 0));
+  bedG.position.set(Lg*0.03, Hg*0.38, 0);
+  var bl=Lg*0.84, bw=Wg*0.86, bh=Hg*0.36, mt=0.18;
+  bedG.add(box(bl, mt, bw, yel, bl/2, 0, 0));
+  bedG.add(box(bl, bh, mt, yel, bl/2, bh/2, bw/2)); bedG.add(box(bl, bh, mt, yel, bl/2, bh/2, -bw/2));
+  bedG.add(box(mt, bh*1.25, bw, yel, bl, bh*0.62, 0));
+  loadMesh = new T.Mesh(new T.BoxGeometry(bl*0.94, bh*0.9, bw*0.92), new T.MeshLambertMaterial({color:matCol})); loadMesh.position.set(bl*0.5, bh*0.5, 0); bedG.add(loadMesh);
+  truck.add(bedG);
+})();
+scene.add(truck);
+var dozer = new T.Group(), dzPile;
+(function(){
+  var yel = new T.MeshLambertMaterial({color:0xe8a317}), drk = new T.MeshLambertMaterial({color:0x2b2f34}), blk = new T.MeshLambertMaterial({color:0x15171a}), steel = new T.MeshLambertMaterial({color:0x6b7178});
+  function box(w,h,d,m,x,y,z){ var b=new T.Mesh(new T.BoxGeometry(w,h,d),m); b.position.set(x,y,z); return b; }
+  var DL = 5.4, DW = 3.4, DH = 3.2;
+  dozer.add(box(DL, 0.9, DW*0.62, yel, 0, 1.35, 0));
+  [-1,1].forEach(function(s){ dozer.add(box(DL*1.12, 1.15, 0.85, blk, 0, 0.58, s*DW*0.42)); });
+  dozer.add(box(DL*0.34, 1.35, DW*0.5, yel, -DL*0.2, 2.35, 0));
+  dozer.add(box(DL*0.06, 0.55, DW*0.4, new T.MeshLambertMaterial({color:0x2c4a63}), -DL*0.04, 2.55, 0));
+  dozer.add(box(DL*0.3, 0.8, DW*0.4, drk, DL*0.28, 1.6, 0));
+  var bl = box(0.35, 1.5, DW*1.08, steel, DL*0.62, 0.9, 0); dozer.add(bl);
+  [-1,1].forEach(function(s){ dozer.add(box(1.1, 0.25, 0.25, steel, DL*0.52, 0.8, s*DW*0.4)); });
+  dzPile = new T.Mesh(new T.BoxGeometry(1.6, 1.0, DW*0.95), new T.MeshLambertMaterial({color:matCol}));
+  dzPile.position.set(DL*0.62+0.95, 0.55, 0); dozer.add(dzPile);
+})();
+dozer.visible = false; scene.add(dozer);
+var marker = new T.Group(), cur = {f:new Float32Array(N), hm:new Float32Array(N), hw:new Float32Array(N)};
+(function(){
+  var cone = new T.Mesh(new T.ConeGeometry(span*0.006, span*0.02, 16), new T.MeshBasicMaterial({color:0xff7a1a})); cone.rotation.x = Math.PI; cone.position.y = span*0.012; marker.add(cone);
+  var rg = new T.Mesh(new T.RingGeometry(1.0, 1.25, 40), new T.MeshBasicMaterial({color:0xff7a1a, side:T.DoubleSide, transparent:true, opacity:0.8, depthWrite:false})); rg.rotation.x = -Math.PI/2; rg.position.y = 0.15; marker.add(rg);
+})();
+scene.add(marker);
+var designMesh = null;
+if (STG && P.design){
+  var pdz = new Float32Array(b64u8(P.design.pz).buffer), dpos = new Float32Array(pos0);
+  for (var dv=0; dv<N; dv++){ var dz_ = pdz[dv]; dpos[3*dv+1] = (isFinite(dz_) && dz_-zmin > pos0[3*dv+1]+0.02) ? dz_-zmin+0.03 : pos0[3*dv+1]-0.6; }
+  var dg = new T.BufferGeometry(); dg.setAttribute('position', new T.BufferAttribute(dpos,3)); dg.setIndex(new T.BufferAttribute(idx,1));
+  designMesh = new T.Mesh(dg, new T.MeshBasicMaterial({color:0x35d39a, wireframe:true, transparent:true, opacity:0.32, depthWrite:false}));
+  world.add(designMesh);
+}
+var dsMesh = null, dsGeo = null, planLines = null, routeLine = null, outletMk = null;
+if (P.sub){
+  if (dsBuf){
+    dsGeo = new T.BufferGeometry(); dsGeo.setAttribute('position', new T.BufferAttribute(new Float32Array(pos0),3)); dsGeo.setAttribute('color', new T.BufferAttribute(new Float32Array(N*3),3)); dsGeo.setIndex(new T.BufferAttribute(idx,1));
+    dsMesh = new T.Mesh(dsGeo, new T.MeshBasicMaterial({vertexColors:true, transparent:true, opacity:0.78, side:T.DoubleSide, depthWrite:false, polygonOffset:true, polygonOffsetFactor:-2, polygonOffsetUnits:-2}));
+    dsMesh.renderOrder = 5; world.add(dsMesh);
+  }
+  function mkLine(pts, col, lift){ var a = []; pts.forEach(function(p){ a.push(p[0], terrainY(p[0],p[1]) + lift, p[1]); });
+    var g = new T.BufferGeometry(); g.setAttribute('position', new T.BufferAttribute(new Float32Array(a),3)); return new T.Line(g, new T.LineBasicMaterial({color:col, depthTest:false, transparent:true, opacity:0.95})); }
+  planLines = new T.Group(); P.sub.lines.forEach(function(pl){ var l = mkLine(pl, 0xffd23f, 0.35); l.renderOrder = 6; planLines.add(l); }); world.add(planLines);
+  routeLine = mkLine(P.sub.route, 0x2ec4ff, 0.5); routeLine.renderOrder = 6; world.add(routeLine);
+  outletMk = new T.Mesh(new T.ConeGeometry(span*0.005, span*0.018, 14), new T.MeshBasicMaterial({color:0x2ec4ff})); outletMk.rotation.x = Math.PI; world.add(outletMk);
+  outletMk.position.set(P.sub.outlet.x, terrainY(P.sub.outlet.x, P.sub.outlet.z) + span*0.014, P.sub.outlet.z);
+}
+var NP = 420, parts = new T.InstancedMesh(new T.SphereGeometry(0.5, 7, 6), new T.MeshLambertMaterial({color:matCol}), NP); parts.frustumCulled = false; scene.add(parts);
+var pb = [], seed = 12345; function rnd(){ seed = (seed*1664525+1013904223)>>>0; return seed/4294967296; }
+for (var pi=0; pi<NP; pi++){ pb.push({u:rnd(), v:rnd()-0.5, s:0.6+rnd()*0.9, w:rnd()-0.5}); }
+var ripples = []; for (var ri=0; ri<3; ri++){ var rm = new T.Mesh(new T.RingGeometry(0.85,1.0,48), new T.MeshBasicMaterial({color:0xffffff, side:T.DoubleSide, transparent:true, opacity:0, depthWrite:false})); rm.rotation.x=-Math.PI/2; rm.renderOrder=4; scene.add(rm); ripples.push(rm); }
+
+// ------------------------------------------------ keadaan pada waktu t
+var tNow = 0, dirty = true;
+function frameAt(t){ var lo=0, hi=NF-1; if (t<=times[0]) return [0,0,0]; if (t>=times[hi]) return [hi,hi,0]; while (hi-lo>1){ var m=(lo+hi)>>1; if (times[m]<=t) lo=m; else hi=m; } return [lo,hi,(t-times[lo])/(times[hi]-times[lo])]; }
+function serAt(t, key){ var s=P.series, fa=frameAt(t); return s[fa[0]][key]*(1-fa[2]) + s[fa[1]][key]*fa[2]; }
+function updateFields(t){
+  var fa = frameAt(t), A = fa[0]*3*N, B = fa[1]*3*N, k = fa[2];
+  for (var v=0; v<N; v++){
+    cur.f[v]  = (fr[A+v]*(1-k)     + fr[B+v]*k)*0.01;
+    cur.hm[v] = (fr[A+N+v]*(1-k)   + fr[B+N+v]*k)*0.01;
+    cur.hw[v] = (fr[A+2*N+v]*(1-k) + fr[B+2*N+v]*k)*0.01;
+  }
+  var pf = fgeo.attributes.position.array, pm = mgeo.attributes.position.array, pw = wgeo.attributes.position.array;
+  for (var u=0; u<N; u++){
+    var zt = pos0[3*u+1], f = cur.f[u], hm = cur.hm[u], hw = cur.hw[u];
+    var ft = zt + f, mt = ft + hm, wt = mt + hw;
+    pf[3*u+1] = f > 0.03 ? ft : zt - 0.06;
+    pm[3*u+1] = hm > 0.03 ? mt : ft - 0.07;
+    pw[3*u+1] = hw > 0.03 ? wt : (hm > 0.03 ? mt : ft) - 0.09;
+  }
+  if (compBuf){
+    var CA = fa[0]*(KM-1)*N, CB = fa[1]*(KM-1)*N;
+    for (var q2=0; q2<N; q2++){
+      var w1 = (compBuf[CA+q2]*(1-k) + compBuf[CB+q2]*k)/255, w2 = KM>2 ? (compBuf[CA+N+q2]*(1-k) + compBuf[CB+N+q2]*k)/255 : 0, w0 = Math.max(0, 1-w1-w2);
+      fcol[3*q2]   = mcols[0].r*w0 + mcols[1].r*w1 + (KM>2 ? mcols[2].r*w2 : 0);
+      fcol[3*q2+1] = mcols[0].g*w0 + mcols[1].g*w1 + (KM>2 ? mcols[2].g*w2 : 0);
+      fcol[3*q2+2] = mcols[0].b*w0 + mcols[1].b*w1 + (KM>2 ? mcols[2].b*w2 : 0);
+    }
+    fgeo.attributes.color.needsUpdate = true;
+  }
+  if (ecBuf){
+    var EA = fa[0]*N, EB = fa[1]*N;
+    for (var e2=0; e2<N; e2++){ var uu = (ecBuf[EA+e2]*(1-k) + ecBuf[EB+e2]*k)/255;
+      mcolA[3*e2] = 0.365 + 0.30*uu; mcolA[3*e2+1] = 0.247 + 0.31*uu; mcolA[3*e2+2] = 0.141 + 0.30*uu; }
+    mgeo.attributes.color.needsUpdate = true;
+  }
+  if (dsBuf && dsMesh){
+    var DA = fa[0]*N, DB = fa[1]*N, dp_ = dsGeo.attributes.position.array, dc_ = dsGeo.attributes.color.array;
+    for (var d2=0; d2<N; d2++){ var st_ = dsBuf[(k<0.5?DA:DB)+d2];
+      if (st_ > 0){ dp_[3*d2+1] = pos0[3*d2+1] + cur.f[d2] + cur.hm[d2] + cur.hw[d2] + 0.07; if (st_ === 2){ dc_[3*d2]=0.24; dc_[3*d2+1]=0.86; dc_[3*d2+2]=0.52; } else { dc_[3*d2]=1.0; dc_[3*d2+1]=0.32; dc_[3*d2+2]=0.32; } }
+      else { dp_[3*d2+1] = pos0[3*d2+1] - 0.8; }
+    }
+    dsGeo.attributes.position.needsUpdate = true; dsGeo.attributes.color.needsUpdate = true;
+  }
+  fgeo.attributes.position.needsUpdate = mgeo.attributes.position.needsUpdate = wgeo.attributes.position.needsUpdate = true;
+  fgeo.computeVertexNormals(); mgeo.computeVertexNormals(); wgeo.computeVertexNormals();
+}
+function surfAtDump(){ // elevasi permukaan teratas di titik dump (unit scene, belum eksagerasi)
+  var gi = toIdx(dp.x, dp.z), i = Math.min(Math.max(Math.round(gi[0]),0),nx-1), j = Math.min(Math.max(Math.round(gi[1]),0),ny-1), v = i*ny+j;
+  return {top: pos0[3*v+1] + cur.f[v] + cur.hm[v] + cur.hw[v], liquid: cur.hm[v]+cur.hw[v] > 0.05, bed: pos0[3*v+1] + cur.f[v]};
+}
+var ease = function(x){ x = Math.min(Math.max(x,0),1); return x*x*(3-2*x); };
+function fillAt(x, z){ var gi = toIdx(x, z), gx = Math.min(Math.max(gi[0],0),nx-1.001), gy = Math.min(Math.max(gi[1],0),ny-1.001), i0=Math.floor(gx), j0=Math.floor(gy), fx=gx-i0, fy=gy-j0;
+  function F(i,j){ return cur.f[i*ny+j]; } return (F(i0,j0)*(1-fx)+F(i0+1,j0)*fx)*(1-fy)+(F(i0,j0+1)*(1-fx)+F(i0+1,j0+1)*fx)*fy; }
+function padHeight(){ return terrainY(dp.x + ap.x*4.0, dp.z + ap.z*4.0) + (STG ? fillAt(dp.x + ap.x*4.0, dp.z + ap.z*4.0) : 0); }
+var padY = padHeight();       // permukaan jalan/pad tempat truk berdiri
+function liqDepth(x, z){ var gi = toIdx(x, z), i = Math.min(Math.max(Math.round(gi[0]),0),nx-1), j = Math.min(Math.max(Math.round(gi[1]),0),ny-1), v = i*ny+j; return cur.hm[v] + cur.hw[v]; }
+function scanOut(ld, maxD){ // jarak (m) dari titik dump ke luar sepanjang jalur masuk sampai kedalaman cairan < maxD
+  for (var s = 0; s <= 70; s += 0.5){ if (liqDepth(dp.x + ap.x*s, dp.z + ap.z*s) < maxD) return s; }
+  return 70;
+}
+var tmpM = new T.Matrix4(), tmpQ = new T.Quaternion(), tmpS = new T.Vector3(), tmpP = new T.Vector3(), tmpE = new T.Euler();
+function updateTruck(t){
+  var ld = null, state = '', ph = 0;
+  for (var i=0;i<P.loads.length;i++){ var l = P.loads[i]; if (t >= l.t_arrive && t <= l.t_leave + 0.01){ ld = l; break; } }
+  if (ld && ld.dump){ dp = ld.dump; ap = ld.ap; marker.position.set(dp.x, (terrainY(dp.x,dp.z)+fillAt(dp.x,dp.z))*vex, dp.z); }
+  if (ld && ld.color){ loadMesh.material.color.set(ld.color); parts.material.color.set(ld.color); }
+  if (ld && STG) padY = padHeight();
+  var heading = Math.atan2(-ap.z, ap.x);                    // sumbu +x truk (maju) mengarah menjauhi kolam = arah 'approach'
+  if (!ld && LD.length && LD[0].dump){ var ne = LD[LD.length-1]; for (var q=0;q<LD.length;q++){ if (LD[q].t_leave >= t){ ne = LD[q]; break; } } dp = ne.dump; ap = ne.ap; marker.position.set(dp.x, (terrainY(dp.x,dp.z)+fillAt(dp.x,dp.z))*vex, dp.z); }
+  if (!ld){ truck.visible = false; dozer.visible = false; parts.count = 0; ripples.forEach(function(r){ r.visible=false; }); return {k:0,state:''}; }
+  truck.visible = true;
+  if (ld._so === undefined){ ld._so = Math.max(0, scanOut(ld, 0.30) - 0.5); ld._sd = scanOut(ld, 0.9); }
+  var so = ld._so;
+  var back = 1, off = 0, bedAng = 0, rem = 1, tipT = ld.t_tip1 - ld.t_tip0, final = 1.4 + so;
+  var dist = Lg*0.5 + 0.5 + final;                          // jarak pivot belakang dari titik dump saat berhenti (searah approach)
+  var far = dist + 38;
+  if (t < ld.t_tip0 - 2){ var u = ease((t - ld.t_arrive)/Math.max(ld.t_tip0 - 2 - ld.t_arrive, 1)); off = far + (final - far)*u; state = L.st_back; }
+  else if (t <= ld.t_tip1 + 2){ off = final; state = L.st_tip + (ld.n_loads>1 ? ' ('+ld.n_loads+' '+L.grouped+')' : '');
+    var up = (t - ld.t_tip0)/Math.max(TR.raise_s, 1); var dn = (ld.t_tip1 + 2 - t)/3;
+    bedAng = ease(Math.min(up, dn, 1)) * 0.95; rem = 1 - Math.min(Math.max((t - ld.t_tip0 - 1)/(tipT - 1), 0), 1); }
+  else { var u2 = ease((t - ld.t_tip1 - 2)/Math.max(ld.t_leave - ld.t_tip1 - 2, 1)); off = final + (far - final)*u2; state = L.st_go; }
+  var x = dp.x + ap.x*off, z = dp.z + ap.z*off;
+  var ty = padY;
+  if (so > 0.8 || STG){ ty = terrainY(x, z) + fillAt(x, z); if (so <= 0.8) ty = Math.max(ty, padY - 0.3); }
+  truck.position.set(x, ty*vex + 0.12, z); truck.rotation.set(0, heading, 0);
+  updateDozer(t, ld, so, tipT);
+  bedG.rotation.z = bedAng; loadMesh.scale.set(1, Math.max(rem, 0.02), 1); loadMesh.position.y = (Hg*0.36*0.9*Math.max(rem,0.02))/2 + 0.1; loadMesh.visible = rem > 0.03;
+  // partikel jatuhan
+  var sf = surfAtDump(), lipH = ty*vex + 0.12 + Hg*0.38 + 0.2, g = 9.81, n = 0;
+  var lx = dp.x + ap.x*final, lz = dp.z + ap.z*final, vo = 3.2;
+  if (t >= ld.t_tip0 && t <= ld.t_tip1 + 6){
+    for (var p=0; p<NP; p++){
+      var b = pb[p], tb = ld.t_tip0 + 1 + (0.15 + 0.85*b.u)*(tipT - 1), tau = t - tb; if (tau < 0) continue;
+      var vx = -ap.x*(vo*b.s), vz = -ap.z*(vo*b.s), sx = -ap.z*b.v*Wg*0.8, sz = ap.x*b.v*Wg*0.8;
+      var yy = lipH - 0.5*g*tau*tau, ys = (so > 0.8) ? ((terrainY(lx + vx*tau, lz + vz*tau) + fillAt(lx + vx*tau, lz + vz*tau))*vex) : sf.top*vex;
+      if (yy < ys) continue;
+      tmpP.set(lx + vx*tau + sx, yy, lz + vz*tau + sz); tmpS.set(1,1,1); tmpQ.identity(); tmpM.compose(tmpP, tmpQ, tmpS); parts.setMatrixAt(n++, tmpM);
+    }
+  }
+  parts.count = n; parts.instanceMatrix.needsUpdate = true;
+  // riak di permukaan cairan
+  ripples.forEach(function(r, k){
+    var active = sf.liquid && t >= ld.t_tip0 + 1 && t <= ld.t_tip1 + 5;
+    if (!active){ r.visible = false; return; }
+    var ph2 = ((t*0.8 + k/3) % 1), rad = 0.8 + ph2*Math.min(Wg*1.1, 7);
+    r.visible = true; r.position.set(dp.x - ap.x*1.2, sf.top*vex + 0.08, dp.z - ap.z*1.2); r.scale.set(rad, rad, rad); r.material.opacity = 0.55*(1-ph2);
+  });
+  return {k:ld.k, state:state};
+}
+
+function updateDozer(t, ld, so, tipT){
+  var use = !!STG || so > 3.0;
+  if (!use){ dozer.visible = false; return; }
+  var sMin = Math.max(ld._sd - 0.5, 0), sPush = Math.max(sMin, so - 8.0), sStart = so + 2.0, park = so + 12.0;
+  if (so < 1.0){ sPush = Math.max(sMin, 1.0); sStart = 7.0; park = 15.0; }
+  var latP = 9.0, latW = Wg*0.55 + 3.0;
+  var t0 = ld.t_tip1 + 1.0, w = Math.max(ld.t_leave - t0, 2.0), u = Math.min(Math.max((t - t0)/w, 0), 1);
+  var s, lat, push = 0;
+  if (u < 0.12){ var a = ease(u/0.12); s = park + (sStart - park)*a; lat = latP + (latW - latP)*a; }
+  else if (u < 0.5){ var b = ease((u-0.12)/0.38); s = sStart + (sPush - sStart)*b; lat = latW; push = 1; }
+  else if (u < 0.88){ var c = ease((u-0.5)/0.38); s = sPush + (sStart - sPush)*c; lat = latW; push = 0.25*(1-c); }
+  else { var d = ease((u-0.88)/0.12); s = sStart + (park - sStart)*d; lat = latW + (latP - latW)*d; }
+  if (t < t0 - 3){ s = park; lat = latP; }
+  var x = dp.x + ap.x*s - ap.z*lat*0 + (-ap.z)*lat, z = dp.z + ap.z*s + ap.x*lat;
+  var gy = terrainY(x, z) + fillAt(x, z);
+  dozer.position.set(x, gy*vex + 0.1, z);
+  dozer.rotation.set(0, Math.atan2(-ap.z, ap.x) + Math.PI, 0);
+  dzPile.visible = push > 0.02; dzPile.scale.set(Math.max(push, 0.05), Math.max(push, 0.05), 1);
+  if (ld.color) dzPile.material.color.set(ld.color);
+  dozer.visible = true;
+}
+
+// ------------------------------------------------ kamera
+var cxm = 0, czm = 0, cs = {tx:P.cam.x, ty:zrange*0.1*vex, tz:P.cam.z, r:Math.min(P.cam.r, span*1.4), az:Math.atan2(ap.x, ap.z)+0.7, pol:1.0};
+var cs0 = {tx:cs.tx, ty:cs.ty, tz:cs.tz, r:cs.r, az:cs.az, pol:cs.pol};
+function applyCam(){ var sp=Math.sin(cs.pol); cam.position.set(cs.tx+cs.r*sp*Math.sin(cs.az), cs.ty+cs.r*Math.cos(cs.pol), cs.tz+cs.r*sp*Math.cos(cs.az)); cam.lookAt(cs.tx, cs.ty, cs.tz); }
+var pts = {}, lastMid = null, lastDist = 0;
+canvas.addEventListener('contextmenu', function(e){e.preventDefault();});
+canvas.addEventListener('pointerdown', function(e){ canvas.setPointerCapture(e.pointerId); pts[e.pointerId]={x:e.clientX,y:e.clientY,b:e.buttons,s:e.shiftKey}; lastMid=null; lastDist=0; });
+function endPtr(e){ delete pts[e.pointerId]; lastMid=null; lastDist=0; }
+canvas.addEventListener('pointerup', endPtr); canvas.addEventListener('pointercancel', endPtr);
+canvas.addEventListener('pointermove', function(e){
+  var p = pts[e.pointerId]; if (!p) return; var ids = Object.keys(pts), dx = e.clientX-p.x, dy = e.clientY-p.y; p.x=e.clientX; p.y=e.clientY;
+  if (ids.length >= 2){ var a=pts[ids[0]], b=pts[ids[1]], mid={x:(a.x+b.x)/2,y:(a.y+b.y)/2}, dist=Math.hypot(a.x-b.x,a.y-b.y); if (lastMid){ pan(mid.x-lastMid.x, mid.y-lastMid.y); if (lastDist>0) zoom(lastDist/dist); } lastMid=mid; lastDist=dist; }
+  else if ((p.b&2)||(p.b&4)||p.s){ pan(dx,dy); }
+  else { cs.az -= dx*0.006; cs.pol = Math.min(Math.max(cs.pol-dy*0.006, 0.04), Math.PI/2-0.015); }
+  dirty = true;
+});
+function pan(dx,dy){ var k=cs.r*0.0017, rx=Math.cos(cs.az), rz=-Math.sin(cs.az), fx=-Math.sin(cs.az), fz=-Math.cos(cs.az); cs.tx-=rx*dx*k; cs.tz-=rz*dx*k; cs.tx+=fx*dy*k; cs.tz+=fz*dy*k; }
+function zoom(f){ cs.r = Math.min(Math.max(cs.r*f, span*0.03), span*6); }
+canvas.addEventListener('wheel', function(e){ e.preventDefault(); zoom(Math.exp(e.deltaY*0.0012)); dirty=true; }, {passive:false});
+function setCam(o){ for (var k in o) cs[k]=o[k]; dirty=true; }
+$('bReset').onclick = function(){ setCam(cs0); };
+$('bTop').onclick = function(){ setCam({pol:0.04, az:0, r:span*1.25, tx:cs0.tx, tz:cs0.tz}); };
+$('bIso').onclick = function(){ setCam({pol:1.0, az:cs0.az, r:cs0.r, tx:cs0.tx, tz:cs0.tz}); };
+$('bSide').onclick = function(){ setCam({pol:1.38, az:Math.atan2(-ap.z, ap.x)+Math.PI/2*0+1.2, r:span*0.7, tx:cs0.tx, tz:cs0.tz}); };
+$('bFull').onclick = function(){ var w=$('wrap'); try { if (document.fullscreenElement) document.exitFullscreen(); else (w.requestFullscreen||w.webkitRequestFullscreen).call(w); } catch(e){} };
+$('bShot').onclick = function(){ renderer.render(scene, cam); var a=document.createElement('a'); a.href=canvas.toDataURL('image/png'); a.download='simulasi_dumping_3d.png'; document.body.appendChild(a); a.click(); document.body.removeChild(a); };
+
+// ------------------------------------------------ UI
+$('hudT').textContent = meta.title; $('hudS').textContent = meta.subtitle;
+$('bReset').textContent='⟲'; $('bTop').textContent='⬒'; $('bIso').textContent='◩'; $('bSide').textContent='▭'; $('bFull').textContent='⛶'; $('bShot').textContent='📷';
+$('bReset').title=L.reset; $('bTop').title=L.top; $('bIso').title=L.iso; $('bSide').title=L.side; $('bFull').title=L.full; $('bShot').title=L.shot;
+$('loopT').textContent = L.loop; $('sLayers').textContent = L.layers; $('lgW').textContent = L.lg_w; $('lgM').textContent = L.lg_m;
+var lay = $('layers');
+function addCheck(label, checked, fn){ var l=document.createElement('label'); l.className='row'; var c=document.createElement('input'); c.type='checkbox'; c.checked=checked; c.onchange=function(){ fn(c.checked); dirty=true; }; l.appendChild(c); l.appendChild(document.createTextNode(label)); lay.appendChild(l); }
+addCheck(L.l_water, true, function(v){ watMesh.visible=v; }); addCheck(L.l_mud, true, function(v){ mudMesh.visible=v; });
+addCheck(L.l_fill, true, function(v){ fillMesh.visible=v; }); addCheck(L.l_truck, true, function(v){ truck.userData.off=!v; if(!v){truck.visible=false; dozer.visible=false; parts.count=0;} });
+if (P.sub){ addCheck(L.l_plan, true, function(v){ planLines.visible=v; }); addCheck(L.l_route, true, function(v){ routeLine.visible=v; outletMk.visible=v; });
+  if (dsMesh) addCheck(L.l_status, true, function(v){ dsMesh.visible=v; }); }
+if (designMesh) addCheck(L.l_design, true, function(v){ designMesh.visible=v; });
+addCheck(L.l_marker, true, function(v){ marker.visible=v; }); addCheck(L.l_wire, false, function(v){ [terrMat, fillMesh.material, mudMesh.material, watMesh.material].forEach(function(m){ m.wireframe=v; }); });
+var sd = document.createElement('div'); sd.className='sl'; sd.innerHTML = '<span><b>'+L.vexag+'</b><i id="vxv"></i></span><input type="range" id="vx" min="1" max="6" step="0.5">'; lay.appendChild(sd);
+$('vx').value = vex; $('vxv').textContent = vex.toFixed(1)+'×';
+function setVex(v){ vex=v; world.scale.y=v; marker.position.set(dp.x, (terrainY(dp.x,dp.z))*v, dp.z); cs.ty=zrange*0.1*v; padY = padHeight(); $('vxv').textContent=v.toFixed(1)+'×'; dirty=true; }
+$('vx').oninput = function(){ setVex(parseFloat(this.value)); };
+setVex(vex);
+
+var hudSt = $('hudSt'), chart = $('chart'), cx = chart.getContext('2d');
+var w0 = P.series[0].wl, m0 = P.series[0].ml;
+function drawChart(t){
+  var W = chart.width, H = chart.height; cx.clearRect(0,0,W,H);
+  var sw = P.series.map(function(s){return isFinite(s.wl)?s.wl-w0:0;}), sm = P.series.map(function(s){return isFinite(s.ml)?s.ml-m0:0;});
+  var mx = Math.max(0.05, Math.max.apply(null,sw), Math.max.apply(null,sm)); var X = function(tt){return 6+(W-12)*tt/Tend;}, Y = function(v){return H-8-(H-18)*v/mx;};
+  cx.strokeStyle='rgba(255,255,255,.12)'; cx.beginPath(); cx.moveTo(6,Y(0)); cx.lineTo(W-6,Y(0)); cx.stroke();
+  function line(arr, c){ cx.strokeStyle=c; cx.lineWidth=2.4; cx.beginPath(); arr.forEach(function(v,i){ var xx=X(times[i]), yy=Y(Math.max(v,0)); i?cx.lineTo(xx,yy):cx.moveTo(xx,yy); }); cx.stroke(); }
+  line(sm, '#b07a45'); line(sw, '#3aa6dc');
+  P.loads.forEach(function(l){ cx.fillStyle='rgba(242,182,28,.5)'; cx.fillRect(X(l.t_tip0)-1, H-6, 3, 5); });
+  if (STG){ STG.stages.forEach(function(s){ cx.strokeStyle='rgba(53,211,154,.45)'; cx.lineWidth=1; cx.beginPath(); cx.moveTo(X(s.t0),4); cx.lineTo(X(s.t0),H-8); cx.stroke(); }); }
+  cx.strokeStyle='#ffe08a'; cx.lineWidth=1.4; cx.beginPath(); cx.moveTo(X(t),2); cx.lineTo(X(t),H-2); cx.stroke();
+  cx.fillStyle='#9fb1c4'; cx.font='20px system-ui'; cx.fillText('+'+mx.toFixed(2)+' m', 8, 18);
+}
+var warnEl = $('warn');
+function clockAt(t){ var kn = STG.clock, lo=0, hi=kn.length-1; if (t<=kn[0][0]) return kn[0][1]; if (t>=kn[hi][0]) return kn[hi][1]; while (hi-lo>1){ var m=(lo+hi)>>1; if (kn[m][0]<=t) lo=m; else hi=m; } return kn[lo][1]+(kn[hi][1]-kn[lo][1])*(t-kn[lo][0])/Math.max(kn[hi][0]-kn[lo][0],1e-6); }
+function stageAt(t){ var st = STG.stages, r = st[0]; for (var i=0;i<st.length;i++){ if (st[i].t0 <= t) r = st[i]; else break; } return r; }
+function updateHud(t, tr){
+  $('hudTm').textContent = fmtT(t) + ' / ' + fmtT(Tend);
+  $('hudLoad').textContent = tr.k ? (L.load + ' ' + (STG ? (P.loads[tr.k-1].loads_before+1)+'–'+(P.loads[tr.k-1].loads_before+P.loads[tr.k-1].n_loads)+' / '+STG.n_loads : tr.k + '/' + P.loads.length) + ' · ' + tr.state) : (t < P.loads[0].t_arrive ? L.waiting : (t > P.loads[P.loads.length-1].t_leave ? L.finished : ''));
+  var wl = serAt(t,'wl'), ml = serAt(t,'ml'), dumped = serAt(t,'dumped'), ow = serAt(t,'outw'), om = serAt(t,'outm');
+  var rows = [];
+  if (isFinite(wl) && isFinite(w0)) rows.push([L.s_wl, f1(wl,2)+' m', (wl-w0>0.005?'up':''), '(+'+f1(Math.max(wl-w0,0),2)+')']);
+  if (isFinite(ml) && isFinite(m0)) rows.push([L.s_ml, f1(ml,2)+' m', (ml-m0>0.005?'up':''), '(+'+f1(Math.max(ml-m0,0),2)+')']);
+  rows.push([L.s_in, f1(dumped,0)+' m³', '', '']);
+  if (STG){
+    var cl = clockAt(t), day = Math.floor(cl/STG.hpd)+1, hh = cl-(day-1)*STG.hpd, stg = stageAt(t), fv = serAt(t,'fill');
+    rows.unshift([L.s_day, L.day+' '+day+' · '+f1(hh,1)+' / '+f1(STG.hpd,0)+' '+L.hour, '', '']);
+    if (stg) rows.splice(1,0,[L.s_lift, stg.lift+'/'+stg.n_lifts+' · '+L.block+' '+stg.block+(stg.kind==='sand'?' · '+L.sandlbl:'')+' (≤ '+f1(stg.lift_z,1)+' m)', '', '']);
+    if (P.sub){ var sd_ = serAt(t,'sand'), dr_ = serAt(t,'drained'), uu_ = serAt(t,'uavg'), ef_ = serAt(t,'effm2'), tr_ = serAt(t,'trapped');
+      rows.push([L.s_sand, f1(sd_,0)+' m³', '', '']); rows.push([L.s_drain, f1(dr_,0)+' m³', dr_>1?'up':'', '']); rows.push([L.s_u, f1(100*uu_,0)+' %', '', ''] );
+      rows.push([L.s_eff, f1(ef_,0)+' / '+f1(tr_,0)+' m²', tr_>1?'bad':'', '']); }
+    var pmp = serAt(t,'pumped'); if (pmp > 1) rows.push([L.s_pump, f1(pmp,0)+' m³', '', '']);
+    rows.push([L.s_prog, f1(100*Math.min(fv/STG.Vtot,1.5),0)+' % '+L.of_design, '', '']);
+  }
+  rows.push([L.s_out, (ow>0.5||om>0.5) ? (L.s_w+' '+f1(ow,0)+' / '+L.s_m+' '+f1(om,0)+' m³') : '–', (ow>0.5||om>0.5)?'bad':'', '']);
+  hudSt.innerHTML = rows.map(function(r){ return '<span class="k">'+r[0]+'</span><span class="v '+r[2]+'">'+r[1]+' '+r[3]+'</span>'; }).join('');
+  var msg = ''; if (om > 0.5) msg = L.w_mud; else if (ow > 0.5) msg = L.w_water;
+  if (msg){ warnEl.style.display='block'; warnEl.textContent = msg; } else warnEl.style.display='none';
+  drawChart(t);
+}
+
+var playing = false, tl = $('tl'), last = performance.now();
+function setT(t){ tNow = Math.min(Math.max(t,0), Tend); tl.value = Math.round(1000*tNow/Tend); dirty = true; }
+$('play').onclick = function(){ playing = !playing; $('play').textContent = playing ? '⏸' : '▶'; if (playing && tNow >= Tend-0.01) setT(0); last = performance.now(); };
+tl.oninput = function(){ playing=false; $('play').textContent='▶'; setT(Tend*parseFloat(tl.value)/1000); };
+$('spd').value = '2';
+var baseRate = Tend/(STG ? 90 : 50);                                   // 1× = seluruh simulasi diputar dalam ±50 dtk
+function resize(){ var w=$('wrap').clientWidth, h=$('wrap').clientHeight; renderer.setSize(w,h,false); cam.aspect=w/h; cam.updateProjectionMatrix(); dirty=true; }
+window.addEventListener('resize', resize); resize();
+var shownT = -1, trInfo = {k:0,state:''};
+function loop(now){
+  var dt = Math.min((now-last)/1000, 0.1); last = now;
+  if (playing){ var nt = tNow + dt*baseRate*parseFloat($('spd').value);
+    if (nt >= Tend){ if ($('loop').checked){ nt = 0; } else { nt = Tend; playing=false; $('play').textContent='▶'; } } setT(nt); }
+  if (dirty){
+    if (tNow !== shownT){ updateFields(tNow); trInfo = truck.userData.off ? {k:0,state:''} : updateTruck(tNow); updateHud(tNow, trInfo); shownT = tNow; }
+    applyCam(); renderer.render(scene, cam); dirty = false;
+  }
+  requestAnimationFrame(loop);
+}
+$('loading').style.display = 'none';
+setT(0); shownT = -1; requestAnimationFrame(loop);
+window.__dumpViewer = {setT:setT, play:function(){ $('play').click(); }, cam:cs, dirty:function(){dirty=true;}, Tend:Tend};
+} catch(e){ showErr(L.err_gen + '<br><code>' + (e && e.message ? e.message : e) + '</code>'); console.error(e); }
+}
+
+loadThree(function(){
+  var pc = P.comp ? gunzip(b64u8(P.comp.gz)).then(function(b){ return new Uint8Array(b); }) : Promise.resolve(null);
+  var pe = P.ec ? gunzip(b64u8(P.ec.gz)).then(function(b){ return new Uint8Array(b); }) : Promise.resolve(null);
+  var pd = P.ds ? gunzip(b64u8(P.ds.gz)).then(function(b){ return new Uint8Array(b); }) : Promise.resolve(null);
+  Promise.all([gunzip(b64u8(P.frames.gz)), pc, pe, pd]).then(function(r){ start(r[0], r[1], r[2], r[3]); }).catch(function(e){ showErr(L.err_gz + '<br><code>'+e.message+'</code>'); });
+});
+})();
+</script>
+</body></html>
+'''
+
+
+def _dump_load_modules():
+    """Muat mesin + pembangun viewer dari teks tertanam (di-cache di sys.modules per isi kode)."""
+    import sys as _sys, types as _types, hashlib as _hl
+    tag = _hl.md5((_DUMP_SIM_SRC + _DUMP_SCENE_SRC).encode("utf-8")).hexdigest()[:10]
+    n1, n2 = f"_eroslope_dump_sim_{tag}", f"_eroslope_dump_scene_{tag}"
+    if n1 not in _sys.modules or n2 not in _sys.modules:
+        m1 = _types.ModuleType(n1)
+        m1.__dict__["__file__"] = "<dump_sim>"
+        _sys.modules[n1] = m1
+        exec(compile(_DUMP_SIM_SRC, "<dump_sim>", "exec"), m1.__dict__)
+        m2 = _types.ModuleType(n2)
+        m2.__dict__["__file__"] = "<dump_scene>"
+        _sys.modules[n2] = m2
+        exec(compile(_DUMP_SCENE_SRC, "<dump_scene>", "exec"), m2.__dict__)
+    return _sys.modules[n1], _sys.modules[n2]
+
+
+def _dump_decimate(xs, ys, z, max_n=420):
+    sx = max(1, int(np.ceil(len(xs) / float(max_n))))
+    sy = max(1, int(np.ceil(len(ys) / float(max_n))))
+    return xs[::sx], ys[::sy], z[::sx, ::sy]
+
+
+def _dump_affine():
+    """Lokal (DXF) -> UTM, sama dgn _field_lokal_to_utm: E = DE + a*e - b*n ; N = DN + b*e + a*n."""
+    a, b = float(_FIELD_COORD_ALPHA), float(_FIELD_COORD_BETA)
+    return (np.array([[a, -b], [b, a]], dtype=float), np.array([float(_FIELD_COORD_DE), float(_FIELD_COORD_DN)], dtype=float))
+
+
+def _dump_preview_fig(xs, ys, z, lw, lm, dump_xy, win=None, patch=None):
+    """Peta kontur sederhana + area basah awal (muka air / lumpur) + titik dump + jendela simulasi."""
+    dxs, dys, dz = _dump_decimate(xs, ys, np.where(np.isfinite(z), z, np.nan), 260)
+    fig = go.Figure()
+    fig.add_trace(go.Contour(x=dxs, y=dys, z=dz.T, colorscale="Earth", ncontours=22, showscale=True,
+                             colorbar=dict(title="m", thickness=10, len=0.8), contours=dict(showlines=False),
+                             hovertemplate="X %{x:.1f}<br>Y %{y:.1f}<br>Z %{z:.2f} m<extra></extra>", name="DEM"))
+    zz = np.where(np.isfinite(dz), dz, 1e9)
+    if lw is not None:
+        fig.add_trace(go.Contour(x=dxs, y=dys, z=(zz < lw).astype(float).T, contours=dict(start=0.5, end=0.5, size=1, coloring="lines"),
+                                 line=dict(color="#2f9bdb", width=3), showscale=False, hoverinfo="skip", name=_t("Muka air", "Water level")))
+    if lm is not None:
+        fig.add_trace(go.Contour(x=dxs, y=dys, z=(zz < lm).astype(float).T, contours=dict(start=0.5, end=0.5, size=1, coloring="lines"),
+                                 line=dict(color="#7a4a1d", width=3, dash="dot"), showscale=False, hoverinfo="skip", name=_t("Muka lumpur", "Mud level")))
+    if win is not None:
+        cx, cy, hf = win
+        fig.add_trace(go.Scatter(x=[cx - hf, cx + hf, cx + hf, cx - hf, cx - hf], y=[cy - hf, cy - hf, cy + hf, cy + hf, cy - hf], mode="lines",
+                                 line=dict(color="#222", width=1.5, dash="dash"), name=_t("Jendela simulasi", "Simulation window"), hoverinfo="skip"))
+    if patch is not None:
+        th = np.linspace(0, 2 * np.pi, 60)
+        fig.add_trace(go.Scatter(x=patch[0] + patch[2] * np.cos(th), y=patch[1] + patch[2] * np.sin(th), mode="lines",
+                                 line=dict(color="#7a4a1d", width=2), name=_t("Lumpur awal", "Initial mud"), hoverinfo="skip"))
+    fig.add_trace(go.Scatter(x=[dump_xy[0]], y=[dump_xy[1]], mode="markers+text", text=[_t("Titik dump", "Dump point")], textposition="top center",
+                             marker=dict(size=13, color="#e5322d", symbol="x", line=dict(width=2, color="#fff")), name=_t("Titik dump", "Dump point")))
+    fig.update_layout(height=430, margin=dict(l=8, r=8, t=8, b=8), legend=dict(orientation="h", y=-0.12),
+                      xaxis=dict(scaleanchor="y", scaleratio=1, title="X lokal (m)"), yaxis=dict(title="Y lokal (m)"))
+    return fig
+
+
+def _dump_show_result(R):
+    res, plan, info = R["res"], R["plan"], R["info"]
+    ser = res["series"]
+    bal = res["balance"]
+    last = ser[-1]
+    c1, c2, c3 = st.columns(3)
+    rw, rm = res.get("level_rise_water"), res.get("level_rise_mud")
+    if R.get("cond") == "open":      # di lahan terbuka tak ada "muka" tunggal yang bermakna
+        rw = rm = None
+    _metric_card(_t("Kenaikan muka air", "Water level rise"), (f"{rw:+.2f} m" if rw is not None else "–"), container=c1)
+    _metric_card(_t("Kenaikan muka lumpur", "Mud level rise"), (f"{rm:+.2f} m" if rm is not None else "–"), container=c2)
+    _metric_card(_t("Volume dumping (lepas)", "Dumped volume (loose)"), f"{bal['dumped']:,.0f} m³", container=c3)
+    c4, c5, c6 = st.columns(3)
+    _metric_card(_t("Luas lumpur > 5 cm", "Mud area > 5 cm"), f"{res['mud_area_m2']:,.0f} m²", container=c4)
+    _metric_card(_t("Jangkauan lumpur dari titik dump", "Mud reach from dump point"), f"{res['mud_extent_m']:.0f} m", container=c5)
+    _metric_card(_t("Meluap keluar area (air / lumpur)", "Leaving the area (water / mud)"),
+                 f"{bal['out_water']:,.0f} / {bal['out_mud']:,.0f} m³", container=c6)
+    if bal["out_mud"] > 0.02 * max(bal["dumped"], 1.0):
+        _ui_warning(_t(
+            "Lumpur meluap keluar dari jendela simulasi -- jendela perlu diperlebar (isi 'Setengah lebar area' di bawah) atau "
+            "kolam/bundnya terlalu kecil untuk volume ini.",
+            "Mud leaves the simulation window -- widen the window ('Half width of the area' below) or the pond/bund is too small for this volume."))
+    elif bal["out_water"] > 0.02 * max(bal["dumped"], 1.0):
+        _ui_warning(_t("Air meluap keluar dari jendela simulasi (kolam penuh).", "Water overflows the simulation window (pond is full)."))
+    if hasattr(st, "iframe"):
+        st.iframe(info["html"], width="stretch", height=int(R["height"]))
+    else:
+        import streamlit.components.v1 as _dsc
+        _dsc.html(info["html"], height=int(R["height"]), scrolling=False)
+    st.caption(_t(
+        "Putar ▶ untuk animasi; seret = putar, klik kanan/Shift+seret = geser, scroll = zoom. Lapisan air, lumpur, timbunan dan truk bisa "
+        "dinyalakan/dimatikan di panel. Model ilustratif, belum dikalibrasi dengan kejadian lapangan.",
+        "Press ▶ to animate; drag = rotate, right-click/Shift+drag = pan, scroll = zoom. Water, mud, fill and truck layers can be toggled in the "
+        "panel. Illustrative model, not calibrated against field events."))
+    fig = go.Figure()
+    t = [s["t"] / 60.0 for s in ser]
+    fig.add_trace(go.Scatter(x=t, y=[s["fill_vol"] for s in ser], name=_t("Timbunan terbentuk (m³)", "Fill built (m³)"), line=dict(color="#8a6d4b", width=2)))
+    fig.add_trace(go.Scatter(x=t, y=[s["mud_vol"] for s in ser], name=_t("Volume lumpur (m³)", "Mud volume (m³)"), line=dict(color="#6b4423", width=2)))
+    fig.add_trace(go.Scatter(x=t, y=[s["water_vol"] for s in ser], name=_t("Volume air (m³)", "Water volume (m³)"), line=dict(color="#2f9bdb", width=2)))
+    fig.add_trace(go.Scatter(x=t, y=[s["dumped"] for s in ser], name=_t("Kumulatif dump (m³)", "Cumulative dumped (m³)"), line=dict(color="#555", dash="dot")))
+    fig.update_layout(height=300, margin=dict(l=10, r=10, t=30, b=10), title=_t("Volume terhadap waktu", "Volumes over time"),
+                      xaxis_title=_t("Waktu (menit)", "Time (min)"), yaxis_title="m³", legend=dict(orientation="h", y=-0.25))
+    st.plotly_chart(fig, width="stretch")
+    lv = [s for s in ser if np.isfinite(s["water_level"]) or np.isfinite(s["mud_level"])]
+    if lv:
+        fig2 = go.Figure()
+        fig2.add_trace(go.Scatter(x=[s["t"] / 60.0 for s in lv], y=[s["water_level"] for s in lv], name=_t("Muka air (m)", "Water level (m)"), line=dict(color="#2f9bdb", width=2)))
+        fig2.add_trace(go.Scatter(x=[s["t"] / 60.0 for s in lv], y=[s["mud_level"] for s in lv], name=_t("Muka lumpur (m)", "Mud level (m)"), line=dict(color="#6b4423", width=2)))
+        fig2.update_layout(height=280, margin=dict(l=10, r=10, t=30, b=10), title=_t("Elevasi muka air & lumpur", "Water & mud surface elevation"),
+                           xaxis_title=_t("Waktu (menit)", "Time (min)"), yaxis_title="Z (m)", legend=dict(orientation="h", y=-0.25))
+        st.plotly_chart(fig2, width="stretch")
+    st.markdown("**" + _t("Rencana ritase", "Load schedule") + "**")
+    st.dataframe(pd.DataFrame([{
+        _t("Ritase", "Load"): L["k"], _t("Volume lepas (m³)", "Loose vol. (m³)"): round(L["vol"], 1), _t("Berat (ton)", "Mass (t)"): round(L["mass_t"], 1),
+        _t("Mulai tumpah (s)", "Tip start (s)"): round(L["t_tip0"], 0), _t("Selesai tumpah (s)", "Tip end (s)"): round(L["t_tip1"], 0)}
+        for L in plan["loads"]]), width="stretch", hide_index=True)
+    st.markdown("**" + _t("Neraca volume", "Volume balance") + "**")
+    chk = abs((bal["dumped"] - bal["slaked"]) - bal["fill_added"]) / max(bal["dumped"], 1e-9) * 100.0
+    st.dataframe(pd.DataFrame([
+        (_t("Material di-dump (lepas)", "Material dumped (loose)"), bal["dumped"]),
+        (_t("  menjadi timbunan padat-bentuk", "  retained as fill"), bal["fill_added"]),
+        (_t("  hancur jadi lumpur (slaking)", "  slaked to mud"), bal["slaked"]),
+        (_t("Perubahan volume lumpur", "Mud volume change"), bal["mud_change"]),
+        (_t("Perubahan volume air", "Water volume change"), bal["water_change"]),
+        (_t("Air terserap pori timbunan", "Water held in fill pores"), bal["pore_water"]),
+        (_t("Air keluar jendela", "Water out of window"), bal["out_water"]),
+        (_t("Lumpur keluar jendela", "Mud out of window"), bal["out_mud"]),
+    ], columns=[_t("Komponen", "Item"), "m³"]).assign(**{"m³": lambda d: d["m³"].round(2)}), width="stretch", hide_index=True)
+    st.caption(_t(f"Kontrol kekekalan material timbunan: selisih {chk:.3f} % (harus ≈ 0).",
+                  f"Fill conservation check: difference {chk:.3f} % (should be ≈ 0)."))
+    st.download_button(_t("Unduh simulasi (HTML mandiri)", "Download simulation (standalone HTML)"), data=info["html"].encode("utf-8"),
+                       file_name="simulasi_dumping_3d.html", mime="text/html", key=f"dsim_dl_{R['sid']}")
+    _dump_section_ui(res, "single")
+
+
+def _dump_sim_tab():
+    _sub_header(_t("Simulasi Dumping Unit HD ke Kolam Air / Lumpur", "Haul Truck Dumping into a Water / Mud Pond"))
+    st.caption(_t(
+        "Simulasi unit HD (mis. Cat 777) menumpahkan material timbunan ke sump/kolam berisi air, lumpur, atau keduanya -- atau ke lahan "
+        "terbuka berlumpur. Muka air/lumpur naik sesuai volume & jenis material yang masuk; di kolam tertutup lumpur naik drastis, di "
+        "lahan terbuka lumpur menyebar. Kontur lokasi diambil dari segmen hasil Erosion Mapping.",
+        "Simulates a haul truck (e.g. Cat 777) dumping fill into a sump/pond holding water, mud or both -- or onto open muddy ground. "
+        "Water/mud rise with the volume and material type; in a closed pond mud rises sharply, on open ground it spreads. The site "
+        "contour comes from the Erosion Mapping segment."))
+    _ui_warning(_t(
+        "Model ILUSTRATIF (sandpile kekal-massa + lumpur yield-stress + shallow-water) untuk visualisasi & kajian awal. Belum dikalibrasi "
+        "dengan kejadian lapangan; sudut longsor bawah air, fraksi slaking, dan sifat lumpur adalah nilai indikatif. Spesifikasi unit selain "
+        "Cat 777 berupa perkiraan -- cek brosur unit Anda. Jangan dipakai sendirian untuk keputusan keselamatan/operasi.",
+        "ILLUSTRATIVE model (mass-conserving sandpile + yield-stress mud + shallow water) for visualisation & screening. Not calibrated "
+        "against field events; submerged repose angle, slaking fraction and mud properties are indicative. Unit specs other than the Cat 777 "
+        "are approximations -- check your unit's brochure. Do not use alone for safety/operational decisions."))
+    try:
+        dsm, dsc = _dump_load_modules()
+    except Exception as e:
+        st.error(_t(f"Modul simulasi dumping gagal dimuat: {e}", f"Dump simulation module failed to load: {e}"))
+        return
+    segs = st.session_state.get("segment_results", {})
+    if not segs:
+        _ui_info(_t("Belum ada hasil RUN ANALYSIS tersimpan. Jalankan analisis di tab 'Erosion Mapping' dulu untuk minimal satu segmen "
+                    "(kontur lokasi diambil dari sana).",
+                    "No saved RUN ANALYSIS results yet. Run the analysis in the 'Erosion Mapping' tab for at least one segment first "
+                    "(the site contour comes from there)."))
+        return
+    sids = list(segs.keys())
+    if st.session_state.get("dsim_segment") not in sids:
+        st.session_state["dsim_segment"] = sids[0]
+    sid = st.selectbox(_t("Segmen (sumber kontur DEM)", "Segment (DEM contour source)"), sids,
+                       format_func=lambda s: segs[s].get("label", s), key="dsim_segment")
+    seg = segs[sid]
+    if seg.get("grid_x") is None or seg.get("grid_z") is None:
+        st.error(_t("Hasil segmen ini tidak lengkap (grid elevasi tidak tersimpan) -- jalankan ulang RUN ANALYSIS.",
+                    "This segment's result is incomplete (elevation grid not stored) -- run RUN ANALYSIS again."))
+        return
+    gx, gy, gz = np.asarray(seg["grid_x"], float), np.asarray(seg["grid_y"], float), np.asarray(seg["grid_z"], float)
+    xs, ys, z = gx[:, 0], gy[0, :], gz
+    fin = np.isfinite(z)
+    if fin.sum() < 50:
+        st.error(_t("Grid elevasi segmen kosong/tidak valid.", "The segment elevation grid is empty/invalid."))
+        return
+    zmin, zmax = float(np.nanmin(z)), float(np.nanmax(z))
+
+    run_mode = st.radio(
+        _t("Mode simulasi", "Simulation mode"), ["single", "stage", "subdrain"], horizontal=True, key="dsim_mode",
+        format_func=lambda c: _t("Satu kali dump (cepat, satu material, satu titik)", "Single dump (quick, one material, one point)") if c == "single"
+        else (_t("Tahapan timbunan sampai desain final (lift/blok, armada campuran)", "Staged fill to final design (lifts/blocks, mixed fleet)") if c == "stage"
+              else _t("Subdrain pasir bertahap (jalur drainase, overflow, efisiensi pasir)", "Staged sand subdrain (drainage strips, overflow, sand efficiency)")))
+    if run_mode in ("stage", "subdrain"):
+        _dump_stage_ui(dsm, dsc, seg, sid, segs, xs, ys, z, zmin, zmax, sub_mode=(run_mode == "subdrain"))
+        return
+
+    # ---------------- 1. unit
+    _sub_header(_t("1. Unit pengangkut", "1. Haul unit"))
+    unit_names = list(dsm.UNITS.keys())
+    uname = st.selectbox(_t("Unit HD", "Haul truck"), unit_names, key="dsim_unit")
+    u0 = dsm.UNITS[uname]
+    if u0.get("verified"):
+        st.caption("✅ " + u0["note"])
+    else:
+        st.caption("⚠️ " + u0["note"])
+    with st.expander(_t("Ubah spesifikasi unit", "Edit unit specification")):
+        k = f"{uname}"
+        uc1, uc2, uc3 = st.columns(3)
+        payload = uc1.number_input(_t("Payload (ton)", "Payload (t)"), 5.0, 500.0, float(u0["payload_t"]), 0.5, key=f"dsim_pay_{k}")
+        cap = uc2.number_input(_t("Kapasitas bak (m³, lepas)", "Body capacity (m³, loose)"), 3.0, 300.0, float(u0["cap_m3"]), 0.5, key=f"dsim_cap_{k}")
+        raise_s = uc3.number_input(_t("Waktu bak naik (s)", "Hoist time (s)"), 5.0, 40.0, float(u0["raise_s"]), 1.0, key=f"dsim_rs_{k}")
+        uc4, uc5, uc6 = st.columns(3)
+        ulen = uc4.number_input(_t("Panjang (m)", "Length (m)"), 3.0, 20.0, float(u0["len_m"]), 0.1, key=f"dsim_len_{k}")
+        uwid = uc5.number_input(_t("Lebar (m)", "Width (m)"), 2.0, 12.0, float(u0["wid_m"]), 0.1, key=f"dsim_wid_{k}")
+        uhgt = uc6.number_input(_t("Tinggi (m)", "Height (m)"), 2.0, 10.0, float(u0["hgt_m"]), 0.1, key=f"dsim_hgt_{k}")
+    unit = dict(u0, payload_t=float(payload), cap_m3=float(cap), raise_s=float(raise_s), len_m=float(ulen), wid_m=float(uwid), hgt_m=float(uhgt))
+
+    # ---------------- 2. material
+    _sub_header(_t("2. Material timbunan", "2. Fill material"))
+    mnames = list(dsm.MATERIALS.keys())
+    mname = st.selectbox(_t("Jenis material", "Material type"), mnames, key="dsim_mat")
+    m0 = dsm.MATERIALS[mname]
+    with st.expander(_t("Ubah sifat material (nilai indikatif)", "Edit material properties (indicative values)")):
+        k = f"{mname}"
+        mc1, mc2, mc3 = st.columns(3)
+        rho_bcm = mc1.number_input(_t("Berat isi in-situ (t/m³)", "In-situ density (t/m³)"), 0.8, 3.5, float(m0["rho_bcm"]), 0.05, key=f"dsim_rho_{k}")
+        swell = mc2.number_input(_t("Faktor kembang (fraksi)", "Swell factor (fraction)"), 0.0, 0.8, float(m0["swell"]), 0.01, key=f"dsim_sw_{k}")
+        repose = mc3.number_input(_t("Sudut longsor kering (°)", "Dry repose angle (°)"), 20.0, 45.0, float(m0["repose"]), 0.5, key=f"dsim_rp_{k}")
+        mc4, mc5 = st.columns(2)
+        poro = mc4.number_input(_t("Porositas timbunan", "Fill porosity"), 0.0, 0.6, float(m0["porosity"]), 0.01, key=f"dsim_po_{k}")
+        slake = mc5.number_input(_t("Fraksi hancur jadi lumpur di air (slaking)", "Fraction slaking to mud in water"), 0.0, 1.0, float(m0["slake"]), 0.01, key=f"dsim_sl_{k}")
+    mat = dict(m0, rho_bcm=float(rho_bcm), swell=float(swell), repose=float(repose), porosity=float(poro), slake=float(slake))
+
+    # ---------------- 3. volume
+    _sub_header(_t("3. Volume yang di-dump", "3. Volume to dump"))
+    vc1, vc2, vc3 = st.columns([1.2, 1, 1])
+    vol = vc1.number_input(_t("Volume total (m³)", "Total volume (m³)"), 1.0, 20000.0, 300.0, 10.0, key="dsim_vol")
+    basis = vc2.radio(_t("Basis volume", "Volume basis"), ["LCM", "BCM"], horizontal=True, key="dsim_basis",
+                      help=_t("LCM = volume lepas (di bak). BCM = volume in-situ (dikonversi dengan faktor kembang).",
+                              "LCM = loose volume (in the body). BCM = in-situ volume (converted with the swell factor)."))
+    interval = vc3.number_input(_t("Jarak antar dump (detik)", "Time between dumps (s)"), 30.0, 600.0, 90.0, 5.0, key="dsim_int")
+    plan0 = dsm.plan_loads(unit, mat, vol, basis, None, interval)
+    vmax = plan0["v_max"]
+    vpl_in = st.number_input(
+        _t("Volume per ritase (m³, lepas)", "Volume per load (m³, loose)"), 1.0, 400.0, float(round(vmax, 1)), 0.5, key=f"dsim_vpl_{uname}_{mname}",
+        help=_t(f"Maksimum {vmax:.1f} m³ (dibatasi {plan0['limit']}). Isi lebih kecil bila bak tidak penuh.",
+                f"Maximum {vmax:.1f} m³ (limited by {plan0['limit']}). Enter less if the body is not full."))
+    plan = dsm.plan_loads(unit, mat, vol, basis, vpl_in, interval)
+    for w in plan["warnings"]:
+        _ui_warning(w)
+    for e in plan["errors"]:
+        st.error(e)
+    st.info(_t(
+        f"{plan['n_loads']} ritase × {plan['vol_per_load']:.1f} m³ lepas ({plan['vol_per_load'] * plan['rho_loose']:.1f} ton/ritase; batas "
+        f"{plan['limit']}). Total {plan['v_total_lcm']:,.0f} m³ lepas = {plan['v_total_bcm']:,.0f} m³ in-situ = {plan['mass_total_t']:,.0f} ton. "
+        f"Durasi dumping ≈ {(plan['loads'][-1]['t_leave'] - plan['loads'][0]['t_arrive']) / 60:.1f} menit.",
+        f"{plan['n_loads']} loads × {plan['vol_per_load']:.1f} m³ loose ({plan['vol_per_load'] * plan['rho_loose']:.1f} t/load; limit "
+        f"{plan['limit']}). Total {plan['v_total_lcm']:,.0f} m³ loose = {plan['v_total_bcm']:,.0f} m³ in-situ = {plan['mass_total_t']:,.0f} t. "
+        f"Dumping time ≈ {(plan['loads'][-1]['t_leave'] - plan['loads'][0]['t_arrive']) / 60:.1f} min."))
+    if plan["n_loads"] > 60:
+        _ui_warning(_t("Lebih dari 60 ritase -- simulasi akan lama. Pertimbangkan memecah menjadi beberapa simulasi.",
+                       "More than 60 loads -- the simulation will be slow. Consider splitting it."))
+
+    # ---------------- 4. lokasi & kondisi
+    _sub_header(_t("4. Lokasi dumping & kondisi kolam", "4. Dump location & pond condition"))
+    cond = st.radio(
+        _t("Kondisi lokasi", "Site condition"), ["both", "water", "mud", "open"], horizontal=True, key="dsim_cond",
+        format_func=lambda c: {"both": _t("Kolam air + lumpur", "Pond: water + mud"), "water": _t("Kolam air saja", "Pond: water only"),
+                               "mud": _t("Kolam lumpur saja", "Pond: mud only"), "open": _t("Lahan terbuka (lumpur menyebar)", "Open ground (mud spreads)")}[c])
+    dz = max(zmax - zmin, 0.5)
+    lw = lm = None
+    patch_in = None
+    if cond != "open":
+        lc1, lc2 = st.columns(2)
+        if cond in ("both", "water"):
+            lw = lc1.number_input(_t("Elevasi muka air (m)", "Water surface elevation (m)"), zmin - 5.0, zmax + 5.0,
+                                  float(round(zmin + (1.5 if cond == "both" else 1.0), 2)), 0.1, key=f"dsim_lw_{sid}_{cond}")
+        if cond in ("both", "mud"):
+            lm = lc2.number_input(_t("Elevasi muka lumpur (m)", "Mud surface elevation (m)"), zmin - 5.0, zmax + 5.0,
+                                  float(round(zmin + (0.5 if cond == "both" else 1.0), 2)), 0.1, key=f"dsim_lm_{sid}_{cond}")
+        if lw is not None and lm is not None and lm > lw:
+            _ui_warning(_t("Muka lumpur tidak boleh di atas muka air -- dipakai sama dengan muka air.", "Mud level cannot be above the water level -- set equal to it."))
+            lm = lw
+        st.caption(_t(f"Elevasi DEM segmen: {zmin:.2f} – {zmax:.2f} m. Air/lumpur hanya mengisi cekungan yang elevasinya di bawah muka tersebut "
+                      f"dan terhubung ke titik dump.",
+                      f"Segment DEM elevation: {zmin:.2f} – {zmax:.2f} m. Water/mud only fill depressions below that surface that connect to the dump point."))
+    lvl_ref = max([v for v in (lw, lm) if v is not None], default=None)
+
+    # titik dump
+    dxs, dys, dzz = _dump_decimate(xs, ys, z, 420)
+    auto_pt = None
+    if lvl_ref is not None:
+        try:
+            auto_pt = dsm.suggest_dump_point(dxs, dys, dzz, lvl_ref)
+        except Exception:
+            auto_pt = None
+    if auto_pt is None:
+        try:
+            cen = seg["boundary"].centroid
+            auto_pt = (float(cen.x), float(cen.y))
+        except Exception:
+            auto_pt = (float(np.mean(xs)), float(np.mean(ys)))
+        if lvl_ref is not None:
+            _ui_warning(_t("Tidak ada cekungan di bawah elevasi muka yang dipilih -- naikkan elevasi muka air/lumpur, atau titik dump diisi manual.",
+                           "No depression below the chosen surface elevation -- raise the water/mud elevation or set the dump point manually."))
+    pm = st.radio(_t("Titik dump", "Dump point"), ["auto", "manual"], horizontal=True, key="dsim_ptmode",
+                  format_func=lambda c: _t("Otomatis (tepi kolam, sisi paling landai)", "Automatic (pond edge, gentlest side)") if c == "auto"
+                  else _t("Manual (koordinat lokal)", "Manual (local coordinates)"))
+    if pm == "auto":
+        dump_xy = (float(auto_pt[0]), float(auto_pt[1]))
+    else:
+        pc1, pc2 = st.columns(2)
+        px_ = pc1.number_input("X lokal (m)", float(xs.min()), float(xs.max()), float(np.clip(auto_pt[0], xs.min(), xs.max())), 1.0, key=f"dsim_px_{sid}")
+        py_ = pc2.number_input("Y lokal (m)", float(ys.min()), float(ys.max()), float(np.clip(auto_pt[1], ys.min(), ys.max())), 1.0, key=f"dsim_py_{sid}")
+        dump_xy = (float(px_), float(py_))
+    try:
+        _E, _N = _field_lokal_to_utm(dump_xy[0], dump_xy[1])
+        st.caption(_t(f"Titik dump: X={dump_xy[0]:.1f}, Y={dump_xy[1]:.1f} (lokal) = UTM {float(_E):.1f} E, {float(_N):.1f} N.",
+                      f"Dump point: X={dump_xy[0]:.1f}, Y={dump_xy[1]:.1f} (local) = UTM {float(_E):.1f} E, {float(_N):.1f} N."))
+    except Exception:
+        pass
+    if cond == "open":
+        oc1, oc2 = st.columns(2)
+        prad = oc1.number_input(_t("Radius genangan lumpur awal (m)", "Initial mud patch radius (m)"), 2.0, 100.0, 12.0, 1.0, key="dsim_prad")
+        pth = oc2.number_input(_t("Tebal lumpur awal (m)", "Initial mud thickness (m)"), 0.05, 5.0, 0.6, 0.05, key="dsim_pth")
+        patch_in = (dump_xy[0], dump_xy[1], float(prad), float(pth))
+
+    with st.expander(_t("Lanjutan: lumpur, jendela & kualitas simulasi", "Advanced: mud, window & simulation quality")):
+        ac1, ac2, ac3 = st.columns(3)
+        mud_rho = ac1.number_input(_t("Rapat massa lumpur (kg/m³)", "Mud density (kg/m³)"), 1050.0, 2000.0, float(dsm.MUD_DEFAULT["rho"]), 50.0, key="dsim_mrho")
+        mud_ty = ac2.number_input(_t("Yield stress lumpur (Pa)", "Mud yield stress (Pa)"), 1.0, 1500.0, float(dsm.MUD_DEFAULT["tau_y"]), 10.0, key="dsim_mty",
+                                  help=_t("Makin besar = lumpur makin kental/tidak mudah menyebar.", "Higher = thicker mud that spreads less."))
+        mud_n = ac3.number_input(_t("Kekasaran Manning lumpur", "Mud Manning roughness"), 0.02, 0.5, float(dsm.MUD_DEFAULT["manning"]), 0.01, key="dsim_mn")
+        ac4, ac5, ac6 = st.columns(3)
+        half_in = ac4.number_input(_t("Setengah lebar area (m, 0 = otomatis)", "Half width of the area (m, 0 = auto)"), 0.0, 800.0, 0.0, 5.0, key="dsim_half")
+        qual = ac5.selectbox(_t("Resolusi grid", "Grid resolution"), [72, 96, 128], index=1, key="dsim_grid",
+                             format_func=lambda n: {72: _t("Cepat (72)", "Fast (72)"), 96: _t("Normal (96)", "Normal (96)"), 128: _t("Halus (128, lambat)", "Fine (128, slow)")}[n])
+        settle = ac6.number_input(_t("Waktu pengendapan setelah dump (s)", "Settling time after dumping (s)"), 30.0, 1800.0, 240.0, 30.0, key="dsim_settle")
+        vexag = st.slider(_t("Eksagerasi vertikal", "Vertical exaggeration"), 1.0, 5.0, 2.0, 0.5, key="dsim_vex")
+    img_choice = st.radio(_t("Citra di permukaan medan", "Imagery on the terrain"), ["none", "sat", "ortho"], horizontal=True, key="dsim_img",
+                          format_func=lambda c: {"none": _t("Tanpa citra", "No imagery"), "sat": _t("Satelit", "Satellite"), "ortho": "Orthophoto"}[c])
+
+    # ---------------- pratinjau
+    half_prev = float(half_in) if half_in else None
+    try:
+        dom_prev = dsm.prepare_domain(xs, ys, z, dump_xy, half_m=half_prev, n_target=40, level=lvl_ref)
+        win = (dom_prev["center"][0], dom_prev["center"][1], dom_prev["half"])
+    except Exception:
+        dom_prev, win = None, None
+    with st.expander(_t("Pratinjau lokasi (kontur, muka air/lumpur, titik dump, jendela simulasi)", "Location preview (contours, water/mud, dump point, window)"), expanded=True):
+        st.plotly_chart(_dump_preview_fig(xs, ys, z, lw, lm, dump_xy, win, patch_in), width="stretch")
+        if dom_prev is not None:
+            st.caption(_t(f"Jendela simulasi {2 * dom_prev['half']:.0f} × {2 * dom_prev['half']:.0f} m, sel ≈ {2 * dom_prev['half'] / (qual - 1):.2f} m.",
+                          f"Simulation window {2 * dom_prev['half']:.0f} × {2 * dom_prev['half']:.0f} m, cell ≈ {2 * dom_prev['half'] / (qual - 1):.2f} m."))
+
+    # ---------------- jalankan
+    run = st.button(_t("▶ Jalankan simulasi dumping", "▶ Run dump simulation"), type="primary", key="dsim_run", disabled=not plan["ok"])
+    if run:
+        pb = st.progress(0.0, text=_t("Menyiapkan domain…", "Preparing the domain…"))
+        try:
+            dom = dsm.prepare_domain(xs, ys, z, dump_xy, half_m=half_prev, n_target=int(qual), level=lvl_ref)
+            pb.progress(0.02, text=_t("Menjalankan simulasi…", "Running the simulation…"))
+            res = dsm.simulate(
+                dom, plan, mat, lw, lm, mud=dict(rho=float(mud_rho), tau_y=float(mud_ty), manning=float(mud_n)), dump_xy=dump_xy,
+                n_frames=80, settle_s=float(settle), mud_patch=patch_in,
+                progress=lambda f: pb.progress(min(0.95, 0.02 + 0.93 * float(f)), text=_t("Menjalankan simulasi…", "Running the simulation…")))
+            pb.progress(0.96, text=_t("Menyusun tampilan 3D…", "Building the 3D view…"))
+            imagery, affine, img_msg = None, _dump_affine(), None
+            if img_choice != "none":
+                prep = {"xs": np.array([dom["X"][0], dom["X"][-1]]), "ys": np.array([dom["Y"][0], dom["Y"][-1]])}
+                try:
+                    im, img_msg = _wsim_get_imagery(seg, sid, "ortho" if img_choice == "ortho" else "sat", prep)
+                except Exception as e:
+                    im, img_msg = None, str(e)
+                if im is not None:
+                    imagery = {"uri": _wsim_jpeg_datauri(im["rgb"]), "extent": im["extent"]}
+                    if im.get("frame") == "local":
+                        affine = None
+            html, info = dsc.build_scene_html(
+                res, plan, dom, uname, unit, mname, mat, title=_t("Simulasi Dumping 3D", "3D Dump Simulation"),
+                subtitle=f"{uname} · {mname} · {plan['v_total_lcm']:,.0f} m³ ({plan['n_loads']} {_t('ritase', 'loads')})",
+                vexag=float(vexag), imagery=imagery, three_inline=_wsim_find_local_three(), affine=affine,
+                template_html=_DUMP_VIEWER_TEMPLATE)
+            info["html"] = html
+            st.session_state["dsim_result"] = dict(res=res, plan=plan, info=info, sid=sid, height=800, img_msg=img_msg, cond=cond)
+            pb.empty()
+        except Exception as e:
+            pb.empty()
+            st.error(_t(f"Simulasi dumping gagal: {e}", f"Dump simulation failed: {e}"))
+    R = st.session_state.get("dsim_result")
+    if R is not None:
+        if R.get("sid") != sid:
+            st.caption(_t(f"(Hasil di bawah dari segmen '{segs.get(R['sid'], {}).get('label', R['sid'])}'.)",
+                          f"(Result below is from segment '{segs.get(R['sid'], {}).get('label', R['sid'])}'.)"))
+        if R.get("img_msg"):
+            _ui_info(R["img_msg"])
+        _sub_header(_t("Hasil simulasi", "Simulation result"))
+        _dump_show_result(R)
+
+
+
+
+def _dump_clock_fmt(h, hpd):
+    day = int(h // max(hpd, 1.0)) + 1
+    hh = h - (day - 1) * hpd
+    return f"{_t('Hari', 'Day')} {day} · {hh:04.1f} {_t('jam', 'h')}"
+
+
+def _dump_section_ui(res, tag):
+    """Potongan melintang 2D: pilih garis, geser waktu, lihat timbunan masuk ke air/lumpur, unduh DXF."""
+    dsm, _dsc = _dump_load_modules()
+    X, Y = np.asarray(res["X"], float), np.asarray(res["Y"], float)
+    nf = len(res["frames"]["f"])
+    with st.expander(_t("Potongan melintang 2D (cross section) & unduh DXF", "2D cross-section & DXF download"), expanded=False):
+        st.caption(_t("Pilih garis potongan pada denah, lalu geser waktu untuk melihat timbunan masuk ke air/lumpur dan muka air/lumpur naik. "
+                      "Warna per kolom: timbunan, pasir subdrain (bila ada), lumpur, air.",
+                      "Pick a section line on the plan, then scrub the time to see the fill entering the water/mud and the water/mud rising. Colours are per column: fill, subdrain sand (if any), mud, water."))
+        pond = res.get("pond")
+        if pond is not None and np.asarray(pond).any():
+            ix, iy = np.nonzero(np.asarray(pond))
+            cx, cy = float(X[ix].mean()), float(Y[iy].mean())
+        else:
+            cx, cy = float(X.mean()), float(Y.mean())
+        mode = st.radio(_t("Arah potongan", "Section direction"), ["x", "y", "manual"], horizontal=True, key=f"sec_mode_{tag}",
+                        format_func=lambda c: {"x": _t("Sejajar sumbu X", "Along X"), "y": _t("Sejajar sumbu Y", "Along Y"), "manual": _t("Manual (2 titik)", "Manual (2 points)")}[c])
+        if mode == "x":
+            off = st.slider(_t("Posisi Y garis potongan (m)", "Y position of the line (m)"), float(Y.min()), float(Y.max()), float(np.clip(cy, Y.min(), Y.max())), float(abs(Y[1] - Y[0])), key=f"sec_y_{tag}")
+            p0, p1 = (float(X.min()), off), (float(X.max()), off)
+        elif mode == "y":
+            off = st.slider(_t("Posisi X garis potongan (m)", "X position of the line (m)"), float(X.min()), float(X.max()), float(np.clip(cx, X.min(), X.max())), float(abs(X[1] - X[0])), key=f"sec_x_{tag}")
+            p0, p1 = (off, float(Y.min())), (off, float(Y.max()))
+        else:
+            q1, q2, q3, q4 = st.columns(4)
+            ax_ = q1.number_input("X A", float(X.min()), float(X.max()), float(X.min()), 1.0, key=f"sec_ax_{tag}")
+            ay_ = q2.number_input("Y A", float(Y.min()), float(Y.max()), float(cy), 1.0, key=f"sec_ay_{tag}")
+            bx_ = q3.number_input("X B", float(X.min()), float(X.max()), float(X.max()), 1.0, key=f"sec_bx_{tag}")
+            by_ = q4.number_input("Y B", float(Y.min()), float(Y.max()), float(cy), 1.0, key=f"sec_by_{tag}")
+            p0, p1 = (float(ax_), float(ay_)), (float(bx_), float(by_))
+        if np.hypot(p1[0] - p0[0], p1[1] - p0[1]) < 1.0:
+            _ui_warning(_t("Titik A dan B terlalu dekat.", "Points A and B are too close."))
+            return
+        try:
+            sec = dsm.section_sample(res, p0, p1)
+        except Exception as e:
+            st.error(_t(f"Potongan gagal: {e}", f"Section failed: {e}"))
+            return
+        kk = st.slider(_t("Waktu simulasi (frame)", "Simulation time (frame)"), 0, nf - 1, nf - 1, 1, key=f"sec_k_{tag}")
+        hpd = res.get("hours_per_day")
+        lab = f"frame {kk}/{nf - 1} · t = {res['times'][kk]:.0f} s"
+        if hpd and res.get("clock_knots"):
+            kn = np.array(res["clock_knots"], float)
+            ch = float(np.interp(res["times"][kk], kn[:, 0], kn[:, 1]))
+            lab = _dump_clock_fmt(ch, hpd) + " · " + lab
+        st.markdown("**" + lab + "**")
+        ve = st.slider(_t("Eksagerasi vertikal", "Vertical exaggeration"), 1.0, 6.0, 1.0, 0.5, key=f"sec_ve_{tag}")
+        lay = dsm.section_layers(sec, kk)
+        cols = {"timbunan": ("#b78b4a", _t("Timbunan", "Fill")), "pasir": ("#f2d675", _t("Pasir subdrain", "Subdrain sand")), "lumpur": ("#6b442a", _t("Lumpur", "Mud")), "air": ("rgba(47,155,219,0.75)", _t("Air", "Water"))}
+        fig = go.Figure()
+        d = sec["d"]
+        fig.add_trace(go.Scatter(x=np.r_[d, d[::-1]], y=np.r_[sec["z0"], np.full_like(d, float(np.nanmin(sec["z0"])) - 2.0)], fill="toself", fillcolor="#8d8d8d", line=dict(width=0),
+                                 name=_t("Tanah asli", "Existing ground"), hoverinfo="skip"))
+        for nm, (lo, hi) in lay.items():
+            col, lbl = cols[nm]
+            first = True
+            for i, j in dsm._runs(d, lo, hi):
+                fig.add_trace(go.Scatter(x=np.r_[d[i:j + 1], d[i:j + 1][::-1]], y=np.r_[hi[i:j + 1], lo[i:j + 1][::-1]], fill="toself", fillcolor=col, line=dict(width=0.6, color=col),
+                                         name=lbl, legendgroup=nm, showlegend=first, hoverinfo="skip"))
+                first = False
+        fig.add_trace(go.Scatter(x=d, y=sec["z0"], mode="lines", line=dict(color="#333", width=1.5), name=_t("Muka tanah asli", "Existing ground line")))
+        if sec["zd"] is not None:
+            fig.add_trace(go.Scatter(x=d, y=sec["zd"], mode="lines", line=dict(color="#18a058", width=2, dash="dash"), name=_t("Desain final", "Final design")))
+        l0 = dsm.section_layers(sec, 0)
+        fig.add_trace(go.Scatter(x=d, y=l0["air"][1], mode="lines", line=dict(color="#2f9bdb", width=1.2, dash="dot"), name=_t("Muka air awal", "Initial water level")))
+        fig.add_trace(go.Scatter(x=d, y=l0["lumpur"][1], mode="lines", line=dict(color="#a86b3a", width=1.2, dash="dot"), name=_t("Muka lumpur awal", "Initial mud level")))
+        zlo = float(np.nanmin(sec["z0"])) - 1.0
+        zhi = float(max(np.nanmax(lay["air"][1]), np.nanmax(sec["zd"]) if sec["zd"] is not None else -1e9)) + 1.0
+        fig.update_layout(height=430, margin=dict(l=10, r=10, t=10, b=10), xaxis=dict(title=_t("Jarak sepanjang potongan (m)", "Distance along section (m)")),
+                          yaxis=dict(title="Z (m)", range=[zlo, zhi]), legend=dict(orientation="h", y=-0.22))
+        if ve != 1.0:
+            fig.update_yaxes(scaleanchor="x", scaleratio=1.0 / ve)
+        else:
+            fig.update_yaxes(scaleanchor="x", scaleratio=1.0)
+        st.plotly_chart(fig, width="stretch")
+        pl = go.Figure()
+        pl.add_trace(go.Contour(x=X, y=Y, z=np.asarray(res["z"]).T, colorscale="Greys", ncontours=16, showscale=False, contours=dict(coloring="lines"), line=dict(width=1), hoverinfo="skip"))
+        pl.add_trace(go.Heatmap(x=X, y=Y, z=np.where((res["frames"]["hm"][kk] + res["frames"]["hw"][kk]) > 5, (res["frames"]["hm"][kk] + res["frames"]["hw"][kk]) / 100.0, np.nan).T,
+                                colorscale="Blues", showscale=False, opacity=0.6, hoverinfo="skip"))
+        pl.add_trace(go.Scatter(x=[p0[0], p1[0]], y=[p0[1], p1[1]], mode="lines+markers+text", text=["A", "B"], textposition="top center", line=dict(color="#e5322d", width=3), name=_t("Potongan", "Section")))
+        pl.update_layout(height=300, margin=dict(l=8, r=8, t=8, b=8), showlegend=False, xaxis=dict(scaleanchor="y", scaleratio=1, title="X"), yaxis=dict(title="Y"))
+        st.plotly_chart(pl, width="stretch")
+        incl = st.checkbox(_t("Sertakan muka air/lumpur awal (garis putus-putus) di DXF", "Include the initial water/mud level (dashed) in the DXF"), True, key=f"sec_inc_{tag}")
+        data = dsm.section_dxf(sec, kk, title=f"Potongan A-B | {lab}", ve=1.0, include_initial=bool(incl))
+        st.download_button(_t("Unduh potongan sebagai DXF", "Download section as DXF"), data=data, file_name=f"potongan_{tag}_frame{kk}.dxf", mime="application/dxf", key=f"sec_dl_{tag}_{kk}")
+        st.caption(_t("DXF: X = jarak sepanjang potongan, Y = elevasi (skala 1:1, tanpa eksagerasi). Layer: TANAH_ASLI, TIMBUNAN, PASIR_SUBDRAIN, LUMPUR, AIR, DESAIN_FINAL, AWAL_LUMPUR, AWAL_AIR.",
+                      "DXF: X = distance along the section, Y = elevation (1:1, no exaggeration). Layers: TANAH_ASLI, TIMBUNAN, PASIR_SUBDRAIN, LUMPUR, AIR, DESAIN_FINAL, AWAL_LUMPUR, AWAL_AIR."))
+
+
+def _dump_stage_show(R):
+    res, info = R["res"], R["info"]
+    bal = res["balance"]
+    hpd = res["hours_per_day"]
+    c1, c2, c3 = st.columns(3)
+    _metric_card(_t("Durasi konstruksi", "Construction duration"), f"{res['op_days']:.1f} " + _t("hari", "days"),
+                 help_text=_t(f"{res['op_hours']:.1f} jam kerja pada {hpd:.0f} jam/hari.", f"{res['op_hours']:.1f} working hours at {hpd:.0f} h/day."), container=c1)
+    _metric_card(_t("Total ritase", "Total loads"), f"{res['loads_total']:,}", container=c2)
+    _metric_card(_t("Capaian desain final", "Final design reached"), f"{100 * res['coverage']:.1f} %",
+                 help_text=_t(f"Kelebihan timbunan di luar desain {res['overfill']:,.0f} m³.", f"Fill outside the design {res['overfill']:,.0f} m³."), container=c3)
+    c4, c5, c6 = st.columns(3)
+    rw, rm = res.get("level_rise_water"), res.get("level_rise_mud")
+    _metric_card(_t("Kenaikan muka air", "Water level rise"), (f"{rw:+.2f} m" if rw is not None else "–"), container=c4)
+    _metric_card(_t("Kenaikan muka lumpur", "Mud level rise"), (f"{rm:+.2f} m" if rm is not None else "–"), container=c5)
+    _metric_card(_t("Air dipompa / meluap / lumpur meluap", "Pumped / water overflow / mud overflow"),
+                 f"{bal.get('pumped', 0):,.0f} / {bal['out_water']:,.0f} / {bal['out_mud']:,.0f} m³", container=c6)
+    for w in res.get("warnings", []):
+        _ui_warning(w)
+    if bal["out_mud"] > 0.02 * max(bal["dumped"], 1.0) or bal["out_water"] > 0.02 * max(bal["dumped"], 1.0):
+        _ui_warning(_t(
+            "Air/lumpur terdesak keluar dari jendela simulasi karena kolam penuh -- pada kondisi nyata perlu pompa/sump drainase atau tanggul. "
+            "Coba isi debit pompa, atau perlebar jendela.",
+            "Water/mud is pushed out of the simulation window as the pond fills -- in reality you would need pumps/drainage sumps or bunds. "
+            "Try entering a pump rate, or widen the window."))
+    if hasattr(st, "iframe"):
+        st.iframe(info["html"], width="stretch", height=int(R["height"]))
+    else:
+        import streamlit.components.v1 as _dsc
+        _dsc.html(info["html"], height=int(R["height"]), scrolling=False)
+    if res.get("sub"):
+        st.caption(_t("Garis kuning = rencana jalur subdrain, biru = rute air keluar, hijau/merah di permukaan = jalur pasir efektif/terkurung. Lumpur memucat saat terkonsolidasi.",
+                      "Yellow = planned strips, blue = water discharge route, green/red on the surface = effective/trapped sand strips. Mud lightens as it consolidates."))
+    st.caption(_t(
+        "Kerangka hijau = permukaan desain final. HUD menampilkan hari/jam kerja, lift/blok, ritase, progres volume, dan muka air/lumpur. "
+        "Satu animasi truk mewakili beberapa ritase digabung (tertulis di HUD); waktu simulasi dimampatkan, jam kerja dihitung dari armada. "
+        "Penyebaran material per blok dianggap dilakukan dozer. Model ilustratif, belum dikalibrasi.",
+        "Green wireframe = final design surface. The HUD shows working day/hour, lift/block, loads, volume progress and water/mud levels. "
+        "One truck animation represents several loads merged (shown in the HUD); simulated time is compressed, working hours come from the fleet. "
+        "Spreading of material per block is assumed done by dozers. Illustrative model, not calibrated."))
+    kn = np.array(res.get("clock_knots") or ([[e["t_tip0"], e["clock_h"]] for e in res["events"]] + [[res["t_end"], res["op_hours"]]]), float)
+    ts = np.array([s["t"] for s in res["series"]], float)
+    ch = np.interp(ts, kn[:, 0], kn[:, 1])
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=ch / hpd, y=[100 * s["fill_vol"] / res["Vtot"] for s in res["series"]], name=_t("Progres timbunan (% desain)", "Fill progress (% of design)"),
+                             line=dict(color="#2aa876", width=3)))
+    wl = [s["water_level"] for s in res["series"]]
+    ml = [s["mud_level"] for s in res["series"]]
+    fig.add_trace(go.Scatter(x=ch / hpd, y=wl, name=_t("Muka air (m)", "Water level (m)"), yaxis="y2", line=dict(color="#2f9bdb", width=2)))
+    fig.add_trace(go.Scatter(x=ch / hpd, y=ml, name=_t("Muka lumpur (m)", "Mud level (m)"), yaxis="y2", line=dict(color="#7a4a1d", width=2, dash="dot")))
+    fig.update_layout(height=340, margin=dict(l=10, r=10, t=30, b=10), title=_t("Progres timbunan dan kenaikan muka air/lumpur terhadap hari kerja", "Fill progress and water/mud rise vs working day"),
+                      xaxis_title=_t("Hari kerja", "Working day"), yaxis=dict(title="%"), yaxis2=dict(title="Z (m)", overlaying="y", side="right"), legend=dict(orientation="h", y=-0.28))
+    st.plotly_chart(fig, width="stretch")
+    st.markdown("**" + _t("Jadwal tahapan (lift & blok)", "Stage schedule (lifts & blocks)") + "**")
+    rows = []
+    for s in res["stages"]:
+        rows.append({_t("Lift", "Lift"): f"{s['lift']}/{s['n_lifts']}", _t("Blok", "Block"): s["block"], _t("Jenis", "Type"): (_t("Pasir subdrain", "Sand subdrain") if s.get("kind") == "sand" else _t("Timbunan", "Fill")), _t("Elevasi lift (m)", "Lift elev. (m)"): round(s["lift_z"], 2),
+                     _t("Ritase", "Loads"): s["n_loads"], _t("Volume blok (m³)", "Block vol. (m³)"): round(s["vol_target"]),
+                     _t("Mulai", "Start"): _dump_clock_fmt(s["clock0_h"], hpd), _t("Selesai", "End"): _dump_clock_fmt(s["clock1_h"], hpd)})
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+    if res.get("sub"):
+        _dump_sub_show(res)
+    st.markdown("**" + _t("Armada & material", "Fleet & material") + "**")
+    mrows = []
+    for o in res["fleet"]:
+        nm = res["mat_names"][o["mat"]]
+        n_l = sum(e["n_by_mat"][i] for e in res["events"] for i, oo in enumerate(res["fleet"]) if oo is o and i < len(e["n_by_mat"]))
+        mrows.append({_t("Material", "Material"): nm, _t("Unit", "Units"): o["units"], _t("Cycle (menit)", "Cycle (min)"): o["cycle_min"],
+                      _t("Ritase/jam", "Loads/h"): round(o["rate"], 2), _t("Porsi ritase", "Load share"): f"{100 * o['share']:.0f} %",
+                      _t("Muatan (m³ lepas)", "Payload (m³ loose)"): round(o["v_loose"], 1), _t("Ritase total", "Total loads"): n_l,
+                      _t("Tonase (ton)", "Tonnage (t)"): round(n_l * o["mass_t"])})
+    st.dataframe(pd.DataFrame(mrows), width="stretch", hide_index=True)
+    st.download_button(_t("Unduh simulasi (HTML mandiri)", "Download simulation (standalone HTML)"), data=info["html"].encode("utf-8"),
+                       file_name="simulasi_tahapan_timbunan_3d.html", mime="text/html", key=f"dsim_stage_dl_{R['sid']}")
+    _dump_section_ui(res, "stage" if not res.get("sub") else "sub")
+
+
+def _dump_sub_show(res):
+    sb = res["sub"]
+    _sub_header(_t("Efektivitas & efisiensi subdrain", "Subdrain effectiveness & efficiency"))
+    c1, c2, c3 = st.columns(3)
+    d90 = sb.get("days_u90")
+    _metric_card(_t("Konsolidasi lumpur akhir (U)", "Final mud consolidation (U)"), f"{100 * sb['uavg_final']:.0f} %",
+                 help_text=_t(f"Rata-rata berbobot tebal pada kolam. U 90 % dicapai: " + (f"hari ke-{d90:.0f}" if d90 else "belum tercapai") + f" (konstruksi + {sb['post_days']:.0f} hari pasca).",
+                              f"Thickness-weighted over the pond. U 90 % reached: " + (f"day {d90:.0f}" if d90 else "not reached") + f" (construction + {sb['post_days']:.0f} days after)."), container=c1)
+    _metric_card(_t("Air lumpur tertiriskan", "Mud water drained"), f"{sb['drained_m3']:,.0f} m³", container=c2)
+    _metric_card(_t("Pasir terpasang", "Sand placed"), f"{sb['sand_placed_m3']:,.0f} m³",
+                 help_text=_t(f"{sb['sand_loads']:,} ritase · {sb['sand_per_drained']:.2f} m³ pasir per m³ air tertiriskan." if sb.get("sand_per_drained") else f"{sb['sand_loads']:,} ritase.",
+                              f"{sb['sand_loads']:,} loads · {sb['sand_per_drained']:.2f} m³ sand per m³ drained." if sb.get("sand_per_drained") else f"{sb['sand_loads']:,} loads."), container=c3)
+    c4, c5, c6 = st.columns(3)
+    tot = max(sb["eff_m2"] + sb["trapped_m2"], 1.0)
+    _metric_card(_t("Jalur efektif / terkurung (akhir)", "Effective / trapped strips (final)"), f"{sb['eff_m2']:,.0f} / {sb['trapped_m2']:,.0f} m²",
+                 help_text=_t(f"{100 * sb['trapped_m2'] / tot:.0f} % luas pasir tidak tersambung ke outlet atau di bawah elevasi outlet (mode gravitasi).",
+                              f"{100 * sb['trapped_m2'] / tot:.0f} % of the sand area is not connected to the outlet or below the outlet elevation (gravity mode)."), container=c4)
+    _metric_card(_t("Kapasitas alir jalur", "Strip flow capacity"), f"{sb['q_cap_m3d']:,.0f} m³/" + _t("hari", "day"),
+                 help_text=_t(f"Puncak kebutuhan {sb['q_peak_m3d']:,.0f} m³/hari" + (f" → bila dibatasi kapasitas, ≈ {sb['cap_days']:.0f} hari." if sb.get("cap_days") else "."),
+                              f"Peak demand {sb['q_peak_m3d']:,.0f} m³/day" + (f" → if capacity-limited, ≈ {sb['cap_days']:.0f} days." if sb.get("cap_days") else ".")), container=c5)
+    _metric_card(_t("Kenaikan yield stress lumpur", "Mud yield-stress gain"), f"×{1 + sb['tau_gain_mean']:.1f}", container=c6)
+    rt = sb["route"]
+    st.info(_t(f"Titik outlet ({sb['outlet'][0]:.0f}, {sb['outlet'][1]:.0f}) elevasi {sb['outlet_z']:.2f} m · mode {'gravitasi' if sb['mode'] == 'gravity' else 'pompa'} · tata letak {sb['layout_kind']}. Rute air: {rt['note']}",
+               f"Outlet ({sb['outlet'][0]:.0f}, {sb['outlet'][1]:.0f}) at {sb['outlet_z']:.2f} m · {'gravity' if sb['mode'] == 'gravity' else 'pump'} mode · layout {sb['layout_kind']}. Water route: {rt['note']}"))
+    if sb.get("mud_out_pond", 0) > 0:
+        _ui_warning(_t(f"Sebagian lumpur ({sb['mud_out_pond']:,.0f} m³) terdesak keluar dari batas kolam awal; bagian itu tidak ikut dihitung dalam U.",
+                       f"Part of the mud ({sb['mud_out_pond']:,.0f} m³) was pushed outside the original pond; it is excluded from U."))
+    _ui_info(_t("Model pengeringan bersifat fenomenologis (difusi konsolidasi c_h, drain hanya di jalur pasir yang efektif). Perlu dikalibrasi dengan data piezometer/settlement sebelum dipakai untuk desain.",
+                "The dewatering model is phenomenological (consolidation diffusion c_h, drains only on effective sand strips). Calibrate against piezometer/settlement data before using it for design."))
+
+
+def _dump_stage_ui(dsm, dsc, seg, sid, segs, xs, ys, z, zmin, zmax, sub_mode=False):
+    import math
+    K = "dsub" if sub_mode else "dsim"
+    if sub_mode:
+        st.caption(_t(
+            "Modul SUBDRAIN: pasir dipasang bertahap sebagai jalur-jalur drainase di dalam timbunan, mengikuti kenaikan lumpur & timbunan, menuju titik overflow. "
+            "Hasilnya: jalur mana yang efektif (terhubung ke outlet) atau terkurung, ke mana air lumpur tertiriskan, seberapa cepat lumpur terkonsolidasi, dan berapa pasir yang dipakai.",
+            "SUBDRAIN module: sand is placed in stages as drainage strips inside the fill, following the rising mud and fill, toward an overflow point. "
+            "Output: which strips are effective (connected to the outlet) or trapped, where the mud water drains to, how fast the mud consolidates, and how much sand is used."))
+    st.caption(_t(
+        "Unggah desain final timbunan (DXF/CSV). Aplikasi menghitung volume terhadap kontur awal, membagi menjadi lift & blok dari tepi akses ke dalam, "
+        "menjadwalkan armada (rasio material campuran), lalu mensimulasikan unit dumping dan pembentukan timbunan bertahap bersama kenaikan muka air/lumpur.",
+        "Upload the final fill design (DXF/CSV). The app computes the volume against the existing contour, splits it into lifts & blocks from the access edge inward, "
+        "schedules the fleet (mixed-material ratio) and simulates the dumping and staged fill build-up together with the rising water/mud."))
+    up = st.file_uploader(_t("Berkas desain final timbunan (DXF atau CSV/TXT: X,Y,Z)", "Final fill design file (DXF or CSV/TXT: X,Y,Z)"),
+                          type=["dxf", "csv", "txt", "xyz"], key=K + "_design_file",
+                          help=_t("Sistem koordinat harus sama dengan kontur segmen (koordinat lokal DXF Erosion Mapping). DXF boleh berisi garis kontur ber-elevasi, titik, atau 3DFACE.",
+                                  "The coordinate system must match the segment contour (local DXF coordinates of Erosion Mapping). The DXF may hold elevated contour lines, points or 3DFACEs."))
+    R0 = st.session_state.get(K + "_stage_result")
+    if up is None:
+        _ui_info(_t("Unggah berkas desain final untuk memulai.", "Upload the final design file to begin."))
+        if R0 is not None:
+            _sub_header(_t("Hasil simulasi terakhir", "Last simulation result"))
+            _dump_stage_show(R0)
+        return
+    ck = (up.name, up.size)
+    cache = st.session_state.get("dsim_design_cache")
+    if not cache or cache.get("key") != ck:
+        try:
+            P, dinfo = dsm.parse_design_file(up.name, up.getvalue())
+            cache = dict(key=ck, P=P, info=dinfo, fn=dsm.make_design_fn(P))
+            st.session_state["dsim_design_cache"] = cache
+        except Exception as e:
+            st.error(_t(f"Berkas desain gagal dibaca: {e}", f"Could not read the design file: {e}"))
+            return
+    dinfo, fn = cache["info"], cache["fn"]
+    st.caption(_t(f"Terbaca {dinfo['n_pts']:,} titik · elevasi {dinfo['zmin']:.2f} – {dinfo['zmax']:.2f} m · X {dinfo['bbox'][0]:.0f}…{dinfo['bbox'][1]:.0f} · Y {dinfo['bbox'][2]:.0f}…{dinfo['bbox'][3]:.0f}.",
+                  f"Read {dinfo['n_pts']:,} points · elevation {dinfo['zmin']:.2f} – {dinfo['zmax']:.2f} m · X {dinfo['bbox'][0]:.0f}…{dinfo['bbox'][1]:.0f} · Y {dinfo['bbox'][2]:.0f}…{dinfo['bbox'][3]:.0f}."))
+    b = dinfo["bbox"]
+    if b[1] < xs.min() or b[0] > xs.max() or b[3] < ys.min() or b[2] > ys.max():
+        st.error(_t("Koordinat desain tidak beririsan dengan kontur segmen -- cek sistem koordinat (harus lokal DXF yang sama).",
+                    "The design coordinates do not overlap the segment contour -- check the coordinate system (must be the same local DXF)."))
+        return
+    dxs, dys, dz0 = _dump_decimate(xs, ys, z, 500)
+    GX, GY = np.meshgrid(dxs, dys, indexing="ij")
+    zdd = fn(GX, GY)
+    Dd = np.where(np.isfinite(zdd), np.maximum(zdd - dz0, 0.0), 0.0)
+    cell_a = abs(float(dxs[1] - dxs[0])) * abs(float(dys[1] - dys[0]))
+    fmask = Dd > 0.10
+    V_bcm = float(Dd[fmask].sum() * cell_a)
+    if V_bcm <= 0:
+        st.error(_t("Desain final tidak berada di atas kontur awal (tidak ada volume timbunan).", "The final design is not above the existing contour (no fill volume)."))
+        return
+    zfp = float(dz0[fmask].min())
+    zhi = float(np.nanmax(np.where(fmask, zdd, np.nan)))
+
+    # ---------------- 1. armada & material
+    _sub_header(_t("1. Unit, material & armada", "1. Unit, material & fleet"))
+    uname = st.selectbox(_t("Unit HD", "Haul truck"), list(dsm.UNITS.keys()), key="dsim_s_unit")
+    u0 = dsm.UNITS[uname]
+    st.caption(("✅ " if u0.get("verified") else "⚠️ ") + u0["note"])
+    with st.expander(_t("Ubah spesifikasi unit", "Edit unit specification")):
+        uc1, uc2, uc3 = st.columns(3)
+        payload = uc1.number_input(_t("Payload (ton)", "Payload (t)"), 5.0, 500.0, float(u0["payload_t"]), 0.5, key=f"dsim_s_pay_{uname}")
+        cap = uc2.number_input(_t("Kapasitas bak (m³, lepas)", "Body capacity (m³, loose)"), 3.0, 300.0, float(u0["cap_m3"]), 0.5, key=f"dsim_s_cap_{uname}")
+        raise_s = uc3.number_input(_t("Waktu bak naik (s)", "Hoist time (s)"), 5.0, 40.0, float(u0["raise_s"]), 1.0, key=f"dsim_s_rs_{uname}")
+    unit = dict(u0, payload_t=float(payload), cap_m3=float(cap), raise_s=float(raise_s))
+    mnames = list(dsm.MATERIALS.keys())
+    SAND_NAME = "Pasir subdrain (bersih)"
+    mn_fill = [m for m in mnames if not (sub_mode and m == SAND_NAME)]
+    sel = st.multiselect(_t("Material timbunan (maks. %d, campuran sesuai rasio armada)" % (2 if sub_mode else 3), "Fill materials (max %d, mixed per fleet ratio)" % (2 if sub_mode else 3)), mn_fill,
+                         default=[m for m in ("Claystone (batulempung)", "Sandstone (batupasir)") if m in mn_fill], max_selections=(2 if sub_mode else 3), key=K + "_s_mats")
+    if not sel:
+        _ui_info(_t("Pilih minimal satu material.", "Select at least one material."))
+        return
+    mats, fleet = [], []
+    st.markdown("**" + _t("Armada per material (rasio ritase mengikuti jumlah unit ÷ cycle time)", "Fleet per material (load ratio follows units ÷ cycle time)") + "**")
+    for i, mn in enumerate(sel):
+        m0 = dsm.MATERIALS[mn]
+        fc1, fc2, fc3 = st.columns([2, 1, 1])
+        fc1.markdown(f"<div style='padding-top:30px'>{mn}</div>", unsafe_allow_html=True)
+        nun = fc2.number_input(_t("Jumlah unit", "Units"), 0, 200, 3 if i == 0 else 1, 1, key=f"dsim_s_n_{mn}")
+        cyc = fc3.number_input(_t("Cycle time (menit)", "Cycle time (min)"), 3.0, 240.0, 22.0, 1.0, key=f"dsim_s_c_{mn}",
+                               help=_t("Waktu satu siklus pulang-pergi termasuk antre, muat, dan dumping.", "One round-trip cycle including queueing, loading and dumping."))
+        with st.expander(_t(f"Sifat material: {mn}", f"Material properties: {mn}")):
+            mc1, mc2, mc3 = st.columns(3)
+            rho_b = mc1.number_input(_t("Berat isi in-situ (t/m³)", "In-situ density (t/m³)"), 0.8, 3.5, float(m0["rho_bcm"]), 0.05, key=f"dsim_s_rho_{mn}")
+            swl = mc2.number_input(_t("Faktor kembang", "Swell factor"), 0.0, 0.8, float(m0["swell"]), 0.01, key=f"dsim_s_sw_{mn}")
+            rep = mc3.number_input(_t("Sudut longsor kering (°)", "Dry repose (°)"), 20.0, 45.0, float(m0["repose"]), 0.5, key=f"dsim_s_rp_{mn}")
+            mc4, mc5 = st.columns(2)
+            por = mc4.number_input(_t("Porositas", "Porosity"), 0.0, 0.6, float(m0["porosity"]), 0.01, key=f"dsim_s_po_{mn}")
+            slk = mc5.number_input(_t("Fraksi slaking jadi lumpur", "Slaking-to-mud fraction"), 0.0, 1.0, float(m0["slake"]), 0.01, key=f"dsim_s_sl_{mn}")
+        mats.append(dict(m0, rho_bcm=float(rho_b), swell=float(swl), repose=float(rep), porosity=float(por), slake=float(slk)))
+        if nun > 0:
+            fleet.append(dict(mat=i, units=int(nun), cycle_min=float(cyc)))
+    if not fleet:
+        _ui_warning(_t("Isi jumlah unit minimal satu material.", "Enter at least one unit for a material."))
+        return
+    tc1, tc2, tc3 = st.columns(3)
+    hpd = tc1.number_input(_t("Jam kerja efektif per hari", "Effective working hours per day"), 1.0, 24.0, 20.0, 1.0, key="dsim_s_hpd")
+    target_d = tc2.number_input(_t("Target waktu konstruksi (hari)", "Target construction time (days)"), 0.1, 3650.0, 7.0, 0.5, key="dsim_s_target")
+    compacted = tc3.checkbox(_t("Volume desain = timbunan padat", "Design volume = compacted fill"), True, key="dsim_s_compact",
+                             help=_t("Bila aktif, tiap ritase dihitung setara volume in-situ (setelah dozer menyebar & memadatkan). Bila tidak, volume lepas.",
+                                     "If on, each load counts as in-situ volume (after dozers spread and compact it). Otherwise loose volume."))
+    pf, tot_rate = dsm.plan_fleet(unit, mats, fleet, compacted)
+    bbar = sum(o["share"] * o["fvol"] for o in pf)
+    n_est = V_bcm / bbar
+    h_est = n_est / tot_rate
+    d_est = h_est / hpd
+    st.info(_t(
+        f"Volume desain ≈ {V_bcm:,.0f} m³ (luas {fmask.sum() * cell_a:,.0f} m², tebal maks {Dd.max():.1f} m). Armada {tot_rate:.1f} ritase/jam → "
+        f"≈ {n_est:,.0f} ritase, {h_est:,.0f} jam kerja ≈ {d_est:.1f} hari.",
+        f"Design volume ≈ {V_bcm:,.0f} m³ (area {fmask.sum() * cell_a:,.0f} m², max thickness {Dd.max():.1f} m). Fleet {tot_rate:.1f} loads/h → "
+        f"≈ {n_est:,.0f} loads, {h_est:,.0f} working hours ≈ {d_est:.1f} days."))
+    if d_est > target_d * 1.02:
+        need = int(math.ceil(sum(o["units"] for o in pf) * d_est / target_d))
+        _ui_warning(_t(f"Armada ini butuh {d_est:.1f} hari, melebihi target {target_d:.1f} hari. Untuk memenuhi target dengan rasio yang sama dibutuhkan ≈ {need} unit "
+                       f"(sekarang {sum(o['units'] for o in pf)}).",
+                       f"This fleet needs {d_est:.1f} days, over the {target_d:.1f}-day target. About {need} units are needed at the same ratio (now {sum(o['units'] for o in pf)})."))
+    else:
+        st.success(_t(f"Armada ini memenuhi target ({d_est:.1f} ≤ {target_d:.1f} hari).", f"This fleet meets the target ({d_est:.1f} ≤ {target_d:.1f} days)."))
+    st.dataframe(pd.DataFrame([{_t("Material", "Material"): sel[o["mat"]], _t("Porsi ritase", "Load share"): f"{100 * o['share']:.0f} %",
+                                _t("Muatan (m³ lepas)", "Payload (m³ loose)"): round(o["v_loose"], 1), _t("Batas", "Limit"): o["limit"],
+                                _t("Ritase/jam", "Loads/h"): round(o["rate"], 2)} for o in pf]), width="stretch", hide_index=True)
+
+    # ---------------- 2. kondisi awal
+    _sub_header(_t("2. Kondisi awal kolam & drainase", "2. Initial pond condition & drainage"))
+    cond = st.radio(_t("Kondisi lokasi", "Site condition"), ["both", "water", "mud", "dry"], horizontal=True, key="dsim_s_cond",
+                    format_func=lambda c: {"both": _t("Air + lumpur", "Water + mud"), "water": _t("Air saja", "Water only"), "mud": _t("Lumpur saja", "Mud only"),
+                                           "dry": _t("Kering (tanpa kolam)", "Dry (no pond)")}[c])
+    lw = lm = None
+    if cond != "dry":
+        lc1, lc2 = st.columns(2)
+        if cond in ("both", "water"):
+            lw = lc1.number_input(_t("Elevasi muka air (m)", "Water surface elevation (m)"), zmin - 5.0, zmax + 5.0, float(round(zfp + 1.5, 2)), 0.1, key=f"dsim_s_lw_{sid}_{cond}")
+        if cond in ("both", "mud"):
+            lm = lc2.number_input(_t("Elevasi muka lumpur (m)", "Mud surface elevation (m)"), zmin - 5.0, zmax + 5.0, float(round(zfp + 0.5, 2)), 0.1, key=f"dsim_s_lm_{sid}_{cond}")
+        if lw is not None and lm is not None and lm > lw:
+            lm = lw
+    pump = st.number_input(_t("Debit pompa dewatering (m³/jam, 0 = tanpa pompa)", "Dewatering pump rate (m³/h, 0 = no pump)"), 0.0, 20000.0, 0.0, 50.0, key="dsim_s_pump",
+                           help=_t("Air yang terdesak timbunan dipompa keluar selama jam kerja. Tanpa pompa, kolam yang ditimbun penuh akan meluap/menyebarkan air & lumpur.",
+                                   "Water displaced by the fill is pumped out during working hours. Without a pump, a fully filled pond overflows/spreads water and mud."))
+
+    # ---------------- 3. tahapan
+    _sub_header(_t("3. Tahapan & titik akses", "3. Staging & access point"))
+    sc1, sc2, sc3 = st.columns(3)
+    lift_h = sc1.number_input(_t("Tinggi lift (m)", "Lift height (m)"), 0.5, 30.0, float(min(max(round((zhi - zfp) / 3.0, 1), 1.0), 10.0)), 0.5, key="dsim_s_lift")
+    bpl = sc2.number_input(_t("Blok per lift", "Blocks per lift"), 1, 12, 4, 1, key="dsim_s_bpl")
+    grid_n = sc3.selectbox(_t("Resolusi grid", "Grid resolution"), [64, 80, 96], index=1, key="dsim_s_grid",
+                           format_func=lambda n: {64: _t("Cepat (64)", "Fast (64)"), 80: _t("Normal (80)", "Normal (80)"), 96: _t("Halus (96, lambat)", "Fine (96, slow)")}[n])
+    am = st.radio(_t("Titik akses haul road (tempat truk masuk)", "Haul road access point"), ["auto", "manual"], horizontal=True, key="dsim_s_am",
+                  format_func=lambda c: _t("Otomatis (tepi footprint tertinggi)", "Automatic (highest footprint edge)") if c == "auto" else _t("Manual (koordinat lokal)", "Manual (local coordinates)"))
+    access = None
+    if am == "manual":
+        ac1, ac2 = st.columns(2)
+        axv = ac1.number_input("X lokal (m)", float(xs.min()), float(xs.max()), float(np.clip(0.5 * (b[0] + b[1]), xs.min(), xs.max())), 1.0, key=f"dsim_s_ax_{sid}")
+        ayv = ac2.number_input("Y lokal (m)", float(ys.min()), float(ys.max()), float(np.clip(0.5 * (b[2] + b[3]), ys.min(), ys.max())), 1.0, key=f"dsim_s_ay_{sid}")
+        access = (float(axv), float(ayv))
+    with st.expander(_t("Lanjutan: animasi, lumpur & waktu", "Advanced: animation, mud & timing")):
+        ad1, ad2, ad3 = st.columns(3)
+        max_ev = ad1.number_input(_t("Jumlah animasi dump (ritase digabung)", "Number of dump animations (loads merged)"), 12, 80, 36, 2, key="dsim_s_ev",
+                                  help=_t("Makin banyak = animasi lebih rinci tetapi hitung lebih lama.", "More = finer animation but slower."))
+        gap_s = ad2.number_input(_t("Jeda antar dump (s simulasi)", "Gap between dumps (sim s)"), 10.0, 120.0, 22.0, 2.0, key="dsim_s_gap")
+        armor = ad3.number_input(_t("Peredam slaking (m timbunan)", "Slaking armouring (m of fill)"), 0.5, 10.0, 2.5, 0.5, key="dsim_s_armor",
+                                 help=_t("Makin tebal timbunan di suatu sel, makin sedikit material baru yang terpapar air & hancur jadi lumpur.", "The thicker the fill in a cell, the less new material is exposed to water and slakes to mud."))
+        ae1, ae2, ae3 = st.columns(3)
+        mud_rho = ae1.number_input(_t("Rapat massa lumpur (kg/m³)", "Mud density (kg/m³)"), 1050.0, 2000.0, float(dsm.MUD_DEFAULT["rho"]), 50.0, key="dsim_s_mrho")
+        mud_ty = ae2.number_input(_t("Yield stress lumpur (Pa)", "Mud yield stress (Pa)"), 1.0, 1500.0, float(dsm.MUD_DEFAULT["tau_y"]), 10.0, key="dsim_s_mty")
+        mud_n = ae3.number_input(_t("Manning lumpur", "Mud Manning"), 0.02, 0.5, float(dsm.MUD_DEFAULT["manning"]), 0.01, key="dsim_s_mn")
+        vexag = st.slider(_t("Eksagerasi vertikal", "Vertical exaggeration"), 1.0, 5.0, 2.0, 0.5, key="dsim_s_vex")
+    img_choice = st.radio(_t("Citra di permukaan medan", "Imagery on the terrain"), ["none", "sat", "ortho"], horizontal=True, key="dsim_s_img",
+                          format_func=lambda c: {"none": _t("Tanpa citra", "No imagery"), "sat": _t("Satelit", "Satellite"), "ortho": "Orthophoto"}[c])
+
+    # ---------------- 3b. subdrain
+    sub = None
+    sand_mat = None
+    if sub_mode:
+        _sub_header(_t("4. Subdrain pasir", "4. Sand subdrain"))
+        m_sand0 = dsm.MATERIALS[SAND_NAME]
+        sd1, sd2, sd3 = st.columns(3)
+        s_w = sd1.number_input(_t("Lebar jalur pasir (m)", "Sand strip width (m)"), 1.0, 30.0, 4.0, 0.5, key="dsub_w")
+        s_t = sd2.number_input(_t("Tebal satu lapis pasir (m)", "Sand layer thickness (m)"), 0.3, 3.0, 0.8, 0.1, key="dsub_t",
+                               help=_t("Pasir dipasang per lift (satu lapis jalur di tiap lift), mengikuti kenaikan timbunan.", "Sand is placed once per lift, following the rising fill."))
+        s_mode = sd3.radio(_t("Pembuangan air", "Water discharge"), ["gravity", "pump"], key="dsub_mode",
+                           format_func=lambda c: _t("Gravitasi (overflow)", "Gravity (overflow)") if c == "gravity" else _t("Pompa (ke outlet)", "Pump (to outlet)"),
+                           help=_t("Gravitasi: jalur hanya efektif jika puncak pasir ≥ elevasi outlet. Pompa: cukup terhubung ke outlet.", "Gravity: a strip works only if the sand top ≥ outlet elevation. Pump: only needs to connect to the outlet."))
+        sf1, sf2 = st.columns(2)
+        s_un = sf1.number_input(_t("Unit angkut pasir", "Sand haul units"), 1, 100, 1, 1, key="dsub_un")
+        sa = st.radio(_t("Sumber pasir", "Sand source"), ["auto", "manual"], horizontal=True, key="dsub_src",
+                      format_func=lambda c: _t("Otomatis (cycle time diisi manual)", "Automatic (enter cycle time)") if c == "auto" else _t("Manual: titik sumber + kecepatan rata-rata", "Manual: source point + average speed"))
+        if sa == "manual":
+            q1, q2, q3 = st.columns(3)
+            sxv = q1.number_input("X sumber (m)", float(xs.min()), float(xs.max()), float(xs.min()), 1.0, key=f"dsub_sx_{sid}")
+            syv = q2.number_input("Y sumber (m)", float(ys.min()), float(ys.max()), float(ys.min()), 1.0, key=f"dsub_sy_{sid}")
+            spd = q3.number_input(_t("Kecepatan rata-rata (km/jam)", "Average speed (km/h)"), 5.0, 60.0, 25.0, 1.0, key="dsub_spd")
+            ref = access if access is not None else (0.5 * (b[0] + b[1]), 0.5 * (b[2] + b[3]))
+            dist = float(math.hypot(sxv - ref[0], syv - ref[1])) * 1.3
+            cyc_est = 2.0 * dist / (spd * 1000.0 / 60.0) + 8.0
+            st.caption(_t(f"Jarak angkut ≈ {dist:,.0f} m (×1,3 faktor jalan) → cycle time ≈ {cyc_est:.0f} menit (termasuk muat/dump 8 menit).",
+                          f"Haul distance ≈ {dist:,.0f} m (×1.3 road factor) → cycle time ≈ {cyc_est:.0f} min (incl. 8 min load/dump)."))
+            s_cyc = cyc_est
+        else:
+            s_cyc = sf2.number_input(_t("Cycle time pasir (menit)", "Sand cycle time (min)"), 3.0, 240.0, 20.0, 1.0, key="dsub_cyc")
+        oa = st.radio(_t("Titik overflow / outlet air", "Overflow / outlet point"), ["auto", "manual"], horizontal=True, key="dsub_out",
+                      format_func=lambda c: _t("Otomatis (pour point kolam)", "Automatic (pond pour point)") if c == "auto" else _t("Manual (koordinat lokal)", "Manual (local coordinates)"))
+        out_xy, out_z = None, None
+        if oa == "manual":
+            o1, o2, o3 = st.columns(3)
+            oxv = o1.number_input("X outlet (m)", float(xs.min()), float(xs.max()), float(xs.max()), 1.0, key=f"dsub_ox_{sid}")
+            oyv = o2.number_input("Y outlet (m)", float(ys.min()), float(ys.max()), float(ys.max()), 1.0, key=f"dsub_oy_{sid}")
+            ozv = o3.number_input(_t("Elevasi outlet (m, 0 = dari kontur)", "Outlet elevation (m, 0 = from contour)"), -1000.0, 5000.0, 0.0, 0.1, key="dsub_oz")
+            out_xy = (float(oxv), float(oyv)); out_z = float(ozv) if ozv != 0.0 else None
+        la = st.radio(_t("Tata letak jalur", "Strip layout"), ["auto", "dxf"], horizontal=True, key="dsub_lay",
+                      format_func=lambda c: _t("Otomatis dari kontur kolam", "Automatic from the pond contour") if c == "auto" else _t("Ikuti DXF desain subdrain (referensi)", "Follow subdrain design DXF (reference)"))
+        pattern, spacing, lines_dxf = "herringbone", 12.0, None
+        if la == "auto":
+            l1, l2 = st.columns(2)
+            pattern = l1.selectbox(_t("Pola", "Pattern"), ["herringbone", "comb", "spine"], key="dsub_pat",
+                                   format_func=lambda c: {"herringbone": _t("Tulang ikan", "Herringbone"), "comb": _t("Sisir", "Comb"), "spine": _t("Tulang punggung saja", "Spine only")}[c])
+            spacing = l2.number_input(_t("Jarak antar cabang (m)", "Branch spacing (m)"), 3.0, 80.0, 12.0, 1.0, key="dsub_sp")
+        else:
+            upl = st.file_uploader(_t("DXF desain subdrain (LINE/POLYLINE; koordinat lokal sama)", "Subdrain design DXF (LINE/POLYLINE; same local coordinates)"), type=["dxf"], key="dsub_dxf")
+            if upl is None:
+                _ui_info(_t("Unggah DXF desain subdrain, atau pilih tata letak otomatis.", "Upload the subdrain design DXF, or choose the automatic layout."))
+                return
+            try:
+                lines_dxf = dsm.parse_polylines_dxf(upl.getvalue())
+            except Exception as e:
+                st.error(_t(f"DXF subdrain gagal dibaca: {e}", f"Could not read the subdrain DXF: {e}"))
+                return
+            if not lines_dxf:
+                st.error(_t("Tidak ada garis di DXF.", "No lines found in the DXF."))
+                return
+            st.caption(_t(f"Terbaca {len(lines_dxf)} garis jalur.", f"Read {len(lines_dxf)} strip lines."))
+        with st.expander(_t("Lanjutan: parameter pengeringan lumpur", "Advanced: mud dewatering parameters")):
+            p1, p2, p3 = st.columns(3)
+            ch = p1.number_input(_t("Koef. konsolidasi c_h (m²/hari)", "Consolidation coeff. c_h (m²/day)"), 0.01, 50.0, 0.5, 0.05, key="dsub_ch")
+            rmax = p2.number_input(_t("Penyusutan tebal lumpur maks.", "Max mud thickness reduction"), 0.05, 0.8, 0.4, 0.05, key="dsub_rmax")
+            tgain = p3.number_input(_t("Kenaikan yield stress (×)", "Yield-stress gain (×)"), 0.0, 30.0, 6.0, 0.5, key="dsub_tg")
+            p4, p5, p6 = st.columns(3)
+            ksand = p4.number_input(_t("Permeabilitas pasir k (m/s)", "Sand permeability k (m/s)"), 1e-5, 1e-1, 5e-3, 1e-4, format="%.5f", key="dsub_k")
+            gi = p5.number_input(_t("Gradien hidrolik", "Hydraulic gradient"), 0.001, 0.5, 0.05, 0.005, format="%.3f", key="dsub_gi")
+            pdays = p6.number_input(_t("Pengeringan pasca konstruksi (hari)", "Post-construction drainage (days)"), 0.0, 720.0, 90.0, 10.0, key="dsub_pd")
+            pipe = st.number_input(_t("Debit pipa/pompa tambahan (m³/hari, 0 = tanpa)", "Extra pipe/pump discharge (m³/day, 0 = none)"), 0.0, 1e6, 0.0, 50.0, key="dsub_pipe")
+            nsb = st.number_input(_t("Blok pemasangan pasir per lift", "Sand placement blocks per lift"), 1, 8, 4, 1, key="dsub_nsb")
+        sand_mat = dict(m_sand0)
+        sub = dict(sand_idx=len(sel), sand_fleet=dict(units=int(s_un), cycle_min=float(s_cyc)), width=float(s_w), thick=float(s_t), spacing=float(spacing), pattern=pattern,
+                   polylines=lines_dxf, outlet_xy=out_xy, outlet_z=out_z, mode=s_mode, ch=float(ch), r_max=float(rmax), tau_gain=float(tgain), k_sand=float(ksand), grad_i=float(gi),
+                   tol=0.1, post_days=float(pdays), n_sand_blocks=int(nsb), pipe_m3d=float(pipe))
+        mats = mats + [sand_mat]
+        sel_all = list(sel) + [SAND_NAME]
+    else:
+        sel_all = list(sel)
+
+    # ---------------- pratinjau
+    with st.expander(_t("Pratinjau tebal timbunan (desain − kontur awal)", "Preview of fill thickness (design − existing contour)"), expanded=True):
+        fig = go.Figure()
+        fig.add_trace(go.Contour(x=dxs, y=dys, z=np.where(np.isfinite(dz0), dz0, np.nan).T, colorscale="Greys", ncontours=18, showscale=False, contours=dict(coloring="lines"),
+                                 line=dict(width=1), hoverinfo="skip", name=_t("Kontur awal", "Existing contour")))
+        fig.add_trace(go.Heatmap(x=dxs, y=dys, z=np.where(fmask, Dd, np.nan).T, colorscale="YlOrBr", colorbar=dict(title="m", thickness=10),
+                                 hovertemplate="X %{x:.1f}<br>Y %{y:.1f}<br>" + _t("Tebal", "Thickness") + " %{z:.2f} m<extra></extra>", opacity=0.85, name=_t("Tebal timbunan", "Fill thickness")))
+        if lw is not None:
+            fig.add_trace(go.Contour(x=dxs, y=dys, z=(np.where(np.isfinite(dz0), dz0, 1e9) < lw).astype(float).T, contours=dict(start=0.5, end=0.5, size=1, coloring="lines"),
+                                     line=dict(color="#2f9bdb", width=3), showscale=False, hoverinfo="skip", name=_t("Muka air", "Water level")))
+        if access is not None:
+            fig.add_trace(go.Scatter(x=[access[0]], y=[access[1]], mode="markers+text", text=[_t("Akses", "Access")], textposition="top center",
+                                     marker=dict(size=13, color="#e5322d", symbol="x"), name=_t("Akses", "Access")))
+        fig.update_layout(height=430, margin=dict(l=8, r=8, t=8, b=8), legend=dict(orientation="h", y=-0.12), xaxis=dict(scaleanchor="y", scaleratio=1, title="X lokal (m)"), yaxis=dict(title="Y lokal (m)"))
+        st.plotly_chart(fig, width="stretch")
+
+    if sub_mode and sub.get("polylines") is None:
+        with st.expander(_t("Rekomendasi tata letak (efisiensi pasir vs kecepatan tiris)", "Layout recommendation (sand efficiency vs drainage speed)")):
+            gtd = st.number_input(_t("Target hari menuju U = 90 %", "Target days to U = 90 %"), 5.0, 2000.0, 90.0, 5.0, key="dsub_gtd")
+            if st.button(_t("Hitung perbandingan", "Compare layouts"), key="dsub_cmp"):
+                try:
+                    dom_c = dsm.design_domain(xs, ys, z, fn, n_target=int(grid_n))
+                    hm_c, hw_c, pond_c = dsm.init_pond(dom_c, lw, lm)
+                    pp_c = dsm.pour_point(dom_c, pond_c)
+                    oxy = sub["outlet_xy"] or (pp_c["xy"] if pp_c else None)
+                    if oxy is None or not pond_c.any():
+                        st.warning(_t("Kolam atau titik outlet tidak ditemukan.", "Pond or outlet not found."))
+                    else:
+                        rows_c, best_c = dsm.compare_layouts(dom_c, pond_c, oxy, sub["width"], sub["thick"], sub["ch"], target_days=float(gtd),
+                                                             via=(pp_c["path"] if (pp_c and sub["outlet_xy"] is None) else None))
+                        st.session_state["dsub_cmp_res"] = (rows_c, best_c)
+                except Exception as e:
+                    st.error(_t(f"Perbandingan gagal: {e}", f"Comparison failed: {e}"))
+            cr = st.session_state.get("dsub_cmp_res")
+            if cr:
+                rows_c, best_c = cr
+                st.dataframe(pd.DataFrame([{_t("Pola", "Pattern"): o["pattern"], _t("Jarak cabang (m)", "Spacing (m)"): o["spacing"], _t("Panjang jalur (m)", "Length (m)"): round(o["length_m"]),
+                                            _t("Pasir/lapis (m³)", "Sand/layer (m³)"): round(o["sand_m3"]), _t("Hari ke U=90%", "Days to U=90%"): (round(o["days"]) if o["days"] else "-"),
+                                            _t("% luas kolam", "% pond area"): round(o["area_pct"], 1)} for o in rows_c]), width="stretch", hide_index=True)
+                if best_c:
+                    st.success(_t(f"Rekomendasi: {best_c['pattern']}, jarak cabang {best_c['spacing']:.0f} m (pasir paling hemat yang memenuhi target; asumsi jalur selesai & efektif).",
+                                  f"Recommended: {best_c['pattern']}, branch spacing {best_c['spacing']:.0f} m (least sand meeting the target; assumes finished, effective strips)."))
+
+    run = st.button(_t("▶ Jalankan simulasi subdrain", "▶ Run subdrain simulation") if sub_mode else _t("▶ Jalankan simulasi tahapan timbunan", "▶ Run staged fill simulation"), type="primary", key=K + "_s_run")
+    if run:
+        pb = st.progress(0.0, text=_t("Menyiapkan domain & permukaan desain…", "Preparing the domain & design surface…"))
+        try:
+            dom = dsm.design_domain(xs, ys, z, fn, n_target=int(grid_n))
+            if dom is None:
+                raise ValueError(_t("Footprint timbunan tidak ditemukan.", "Fill footprint not found."))
+            pb.progress(0.02, text=_t("Menjalankan simulasi tahapan (±1–4 menit)…", "Running the staged simulation (about 1–4 min)…"))
+            res = dsm.run_staged(
+                dom, mats, sel_all, fleet, unit, level_w=lw, level_m=lm, mud=dict(rho=float(mud_rho), tau_y=float(mud_ty), manning=float(mud_n)), access_xy=access,
+                lift_h=float(lift_h), blocks_per_lift=int(bpl), max_events=int(max_ev), hours_per_day=float(hpd), compacted=bool(compacted), gap_s=float(gap_s),
+                pump_m3h=float(pump), armor_m=float(armor), sub=sub, progress=lambda f: pb.progress(min(0.95, 0.02 + 0.93 * float(f)), text=_t("Menjalankan simulasi tahapan…", "Running the staged simulation…")))
+            pb.progress(0.96, text=_t("Menyusun tampilan 3D…", "Building the 3D view…"))
+            imagery, affine, img_msg = None, _dump_affine(), None
+            if img_choice != "none":
+                prep = {"xs": np.array([dom["X"][0], dom["X"][-1]]), "ys": np.array([dom["Y"][0], dom["Y"][-1]])}
+                try:
+                    im, img_msg = _wsim_get_imagery(seg, sid, "ortho" if img_choice == "ortho" else "sat", prep)
+                except Exception as e:
+                    im, img_msg = None, str(e)
+                if im is not None:
+                    imagery = {"uri": _wsim_jpeg_datauri(im["rgb"]), "extent": im["extent"]}
+                    if im.get("frame") == "local":
+                        affine = None
+            mixtxt = " : ".join(f"{o['units']} {sel[o['mat']].split(' (')[0]}" for o in pf)
+            html, info = dsc.build_scene_html(
+                res, None, dom, uname, unit, " + ".join(sel_all), mats[0], title=(_t("Subdrain Pasir pada Timbunan", "Sand Subdrain in the Fill") if sub_mode else _t("Tahapan Timbunan ke Desain Final", "Staged Fill to Final Design")),
+                subtitle=f"{uname} · {mixtxt}", vexag=float(vexag), imagery=imagery, three_inline=_wsim_find_local_three(), affine=affine,
+                template_html=_DUMP_VIEWER_TEMPLATE, mat_list=mats)
+            info["html"] = html
+            st.session_state[K + "_stage_result"] = dict(res=res, info=info, sid=sid, height=800, img_msg=img_msg)
+            pb.empty()
+        except Exception as e:
+            pb.empty()
+            st.error(_t(f"Simulasi tahapan gagal: {e}", f"Staged simulation failed: {e}"))
+    R = st.session_state.get(K + "_stage_result")
+    if R is not None:
+        if R.get("img_msg"):
+            _ui_info(R["img_msg"])
+        _sub_header(_t("Hasil simulasi tahapan", "Staged simulation result"))
+        _dump_stage_show(R)
+
+with tabD:
+    _dump_sim_tab()
+
+
+# =========================================================
 # =========== TAB 8: SIMULASI AIR 3D (HUJAN / TITIK) ======
 # =========================================================
 with tab5:
@@ -23615,6 +27009,7 @@ with tab8:
                     mime="application/json",
                     key="xs_field_export_dl",
                 )
+            _rain_lock_ui(_seg_res_left)
 
             _trainee_tip(
                 "**Langkah tab Cross Section:** (1) pastikan Erosion Mapping segmen ini sudah dijalankan, (2) pilih tipe section "
