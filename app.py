@@ -231,6 +231,65 @@ def kl_cap(contours, max_pts):
     return out
 
 
+def kl_merge_lines(contours, max_pts=40000, zscale=None):
+    """Gabung SEMUA polyline kontur jadi SATU trace (dipisah None) + kurangi titik tampilan.
+    Ribuan trace Plotly (satu per entity) membuat tab browser 'Halaman Tidak Merespons'.
+    Hanya untuk tampilan; data analisis tidak berubah."""
+    tot = 0
+    for c in contours:
+        tot += len(c)
+    stride = max(1, -(-tot // max_pts)) if tot else 1
+    X = []; Y = []; Z = []
+    for c in contours:
+        n = len(c)
+        if n < 2:
+            continue
+        a = _kl_np.asarray(c, dtype=float)
+        if stride > 1 and n > 2:
+            idx = _kl_np.unique(_kl_np.append(_kl_np.arange(0, n, stride), n - 1))
+            a = a[idx]
+        X.extend(a[:, 0].tolist()); X.append(None)
+        Y.extend(a[:, 1].tolist()); Y.append(None)
+        if zscale is not None:
+            Z.extend((a[:, 2] * zscale).tolist()); Z.append(None)
+    return X, Y, Z
+
+
+def kl_merge_points(contours, zscale=None, max_pts=3000):
+    """Entity POINT tunggal (len==1) -> satu trace marker, dibatasi jumlahnya."""
+    P = [c[0] for c in contours if len(c) == 1]
+    if len(P) > max_pts:
+        P = P[::-(-len(P) // max_pts)]
+    z = [p[2] * (zscale or 1.0) for p in P]
+    return [p[0] for p in P], [p[1] for p in P], z
+
+
+def kl_display_mesh(x, y, z, inten, tris, max_tri=150000):
+    """Sederhanakan mesh 3D HANYA untuk tampilan (vertex clustering) bila segitiga > max_tri.
+    Grid 800x800 = >1 juta segitiga membuat browser tidak merespons. Analisis tidak berubah."""
+    tris = _kl_np.asarray(tris)
+    nt = len(tris)
+    if nt <= max_tri:
+        return x, y, z, inten, tris
+    x = _kl_np.asarray(x, float); y = _kl_np.asarray(y, float); z = _kl_np.asarray(z, float)
+    inten = _kl_np.asarray(inten, float)
+    f = (nt / float(max_tri)) ** 0.5
+    n = len(x)
+    h = f * max(((x.max() - x.min()) * (y.max() - y.min()) / max(n, 1)) ** 0.5, 1e-9)
+    ix = _kl_np.floor((x - x.min()) / h).astype(_kl_np.int64)
+    iy = _kl_np.floor((y - y.min()) / h).astype(_kl_np.int64)
+    key = ix * (int(iy.max()) + 2) + iy
+    u, inv, cnt = _kl_np.unique(key, return_inverse=True, return_counts=True)
+    def _m(v):
+        return _kl_np.bincount(inv, weights=v, minlength=len(u)) / cnt
+    t = inv[tris]
+    ok = (t[:, 0] != t[:, 1]) & (t[:, 1] != t[:, 2]) & (t[:, 0] != t[:, 2])
+    t = t[ok]
+    _, first = _kl_np.unique(_kl_np.sort(t, axis=1), axis=0, return_index=True)
+    t = t[_kl_np.sort(first)]
+    return _m(x), _m(y), _m(z), _m(inten), t
+
+
 def kl_optimize(contours, mode="auto", target=KL_AUTO_TARGET):
     """Return (contours_baru, info). mode: auto|none|ringan|sedang|agresif."""
     n0 = sum(len(c) for c in contours)
@@ -12582,14 +12641,13 @@ with tab1:
 
                             # garis desain DXF (2D) sebagai konteks visual
                             _pick_legend_shown = False
-                            for _c in contours:
-                                if len(_c) < 2:
-                                    continue
+                            _mx, _my, _ = kl_merge_lines(contours)
+                            if _mx:
                                 fig_pick.add_trace(go.Scatter(
-                                    x=[p[0] for p in _c], y=[p[1] for p in _c],
+                                    x=_mx, y=_my,
                                     mode="lines", line=dict(color="#222222", width=1),
                                     name="Desain DXF", legendgroup="dxf",
-                                    showlegend=not _pick_legend_shown, hoverinfo="skip",
+                                    showlegend=True, hoverinfo="skip",
                                 ))
                                 _pick_legend_shown = True
 
@@ -13036,17 +13094,19 @@ with tab1:
 
                     fig = go.Figure()
 
+                    _dm_x, _dm_y, _dm_z, _dm_i, _dm_t = kl_display_mesh(
+                        x_mesh, y_mesh, z_mesh, zone_map[inside], valid_triangles)
                     fig.add_trace(
                         go.Mesh3d(
-                            x=x_mesh,
-                            y=y_mesh,
-                            z=z_mesh * vertical_exaggeration,
+                            x=_dm_x,
+                            y=_dm_y,
+                            z=_dm_z * vertical_exaggeration,
 
-                            i=valid_triangles[:,0],
-                            j=valid_triangles[:,1],
-                            k=valid_triangles[:,2],
+                            i=_dm_t[:,0],
+                            j=_dm_t[:,1],
+                            k=_dm_t[:,2],
 
-                            intensity=zone_map[inside],
+                            intensity=_dm_i,
 
                             colorscale=[
                                 [0,"green"],
@@ -13092,40 +13152,29 @@ with tab1:
                             _step = max(1, len(_overlay_contours) // _MAX_DXF_OVERLAY_ENTITIES)
                             _overlay_contours = _overlay_contours[::_step]
 
-                        _dxf_overlay_legend_shown = False
-                        for _c in _overlay_contours:
-                            if len(_c) < 1:
-                                continue
-                            _cx = [p[0] for p in _c]
-                            _cy = [p[1] for p in _c]
-                            _cz = [p[2] * vertical_exaggeration for p in _c]
-
-                            if len(_c) == 1:
-                                # entity berupa POINT tunggal -> gambar sebagai marker, bukan garis
-                                fig.add_trace(
-                                    go.Scatter3d(
-                                        x=_cx, y=_cy, z=_cz,
-                                        mode="markers",
-                                        marker=dict(size=3, color="#111111", symbol="circle"),
-                                        name="DXF Asli (overlay)",
-                                        legendgroup="dxf_overlay",
-                                        showlegend=not _dxf_overlay_legend_shown,
-                                        hoverinfo="skip",
-                                    )
+                        _cx, _cy, _cz = kl_merge_lines(_overlay_contours, max_pts=30000, zscale=vertical_exaggeration)
+                        if _cx:
+                            fig.add_trace(
+                                go.Scatter3d(
+                                    x=_cx, y=_cy, z=_cz,
+                                    mode="lines",
+                                    line=dict(color="#111111", width=2),
+                                    name="DXF Asli (overlay)",
+                                    legendgroup="dxf_overlay",
+                                    showlegend=True,
+                                    hoverinfo="skip",
                                 )
-                            else:
-                                fig.add_trace(
-                                    go.Scatter3d(
-                                        x=_cx, y=_cy, z=_cz,
-                                        mode="lines",
-                                        line=dict(color="#111111", width=2),
-                                        name="DXF Asli (overlay)",
-                                        legendgroup="dxf_overlay",
-                                        showlegend=not _dxf_overlay_legend_shown,
-                                        hoverinfo="skip",
-                                    )
+                            )
+                        _px, _py, _pz = kl_merge_points(_overlay_contours, zscale=vertical_exaggeration)
+                        if _px:
+                            fig.add_trace(
+                                go.Scatter3d(
+                                    x=_px, y=_py, z=_pz, mode="markers",
+                                    marker=dict(size=3, color="#111111", symbol="circle"),
+                                    name="DXF Asli (titik)", legendgroup="dxf_overlay",
+                                    showlegend=False, hoverinfo="skip",
                                 )
-                            _dxf_overlay_legend_shown = True
+                            )
 
                     critical_y, critical_x = np.where(
                         overflow_zone & inside
@@ -13596,21 +13645,19 @@ with tab1:
 
                     fig2 = go.Figure()
 
-                    for contour in contours:
-
-                        xs = [p[0] for p in contour]
-                        ys = [p[1] for p in contour]
-
+                    _mx, _my, _ = kl_merge_lines(contours)
+                    if _mx:
                         fig2.add_trace(
                             go.Scatter(
-                                x=xs,
-                                y=ys,
+                                x=_mx,
+                                y=_my,
                                 mode="lines",
                                 line=dict(
                                     color="white",
                                     width=0.2
                                 ),
-                                showlegend=False
+                                showlegend=False,
+                                hoverinfo="skip"
                             )
                         )
 
@@ -13776,11 +13823,10 @@ with tab1:
                                 hovertemplate="X=%{x:.1f}, Y=%{y:.1f}<br>Indeks=%{z:.2f}<extra></extra>",
                             ))
 
-                            for contour in contours:
-                                xs = [p[0] for p in contour]
-                                ys = [p[1] for p in contour]
+                            _mx, _my, _ = kl_merge_lines(contours)
+                            if _mx:
                                 fig2_export.add_trace(go.Scatter(
-                                    x=xs, y=ys, mode="lines",
+                                    x=_mx, y=_my, mode="lines",
                                     line=dict(color="rgba(60,60,60,0.5)", width=0.6),
                                     showlegend=False, hoverinfo="skip",
                                 ))
@@ -14663,15 +14709,18 @@ with tab1:
                         # sama dengan chart individualnya (cuma triangle yang ketutupan segmen
                         # belakangan yang dibuang, & warna vertex di pita transisi dibaurkan),
                         # digambar bersama di sini
+                        _cb_x, _cb_y, _cb_z, _cb_i, _cb_t = kl_display_mesh(
+                            _res["x_mesh"], _res["y_mesh"], _res["z_mesh"], _intensity, _tri,
+                            max_tri=max(40000, 300000 // max(1, len(_seg_items_ordered))))
                         fig_combo.add_trace(
                             go.Mesh3d(
-                                x=_res["x_mesh"],
-                                y=_res["y_mesh"],
-                                z=_res["z_mesh"] * _ve,
-                                i=_tri[:, 0],
-                                j=_tri[:, 1],
-                                k=_tri[:, 2],
-                                intensity=_intensity,
+                                x=_cb_x,
+                                y=_cb_y,
+                                z=_cb_z * _ve,
+                                i=_cb_t[:, 0],
+                                j=_cb_t[:, 1],
+                                k=_cb_t[:, 2],
+                                intensity=_cb_i,
                                 colorscale=_combo_colorscale,
                                 cmin=_combo_zmin,
                                 cmax=_combo_zmax,
@@ -14711,40 +14760,19 @@ with tab1:
                                 _step = max(1, len(_overlay_contours_combo) // _MAX_DXF_OVERLAY_ENTITIES)
                                 _overlay_contours_combo = _overlay_contours_combo[::_step]
 
-                            _dxf_overlay_legend_shown_combo = False
-                            for _c in _overlay_contours_combo:
-                                if len(_c) < 1:
-                                    continue
-                                _cx = [p[0] for p in _c]
-                                _cy = [p[1] for p in _c]
-                                _cz = [p[2] * _ve_overlay for p in _c]
-
-                                if len(_c) == 1:
-                                    fig_combo.add_trace(
-                                        go.Scatter3d(
-                                            x=_cx, y=_cy, z=_cz,
-                                            mode="markers",
-                                            marker=dict(size=3, color="#111111", symbol="circle"),
-                                            name="DXF Desain Asli (overlay)",
-                                            legendgroup="dxf_overlay_combo",
-                                            showlegend=not _dxf_overlay_legend_shown_combo,
-                                            hoverinfo="skip",
-                                        )
+                            _cx, _cy, _cz = kl_merge_lines(_overlay_contours_combo, max_pts=30000, zscale=_ve_overlay)
+                            if _cx:
+                                fig_combo.add_trace(
+                                    go.Scatter3d(
+                                        x=_cx, y=_cy, z=_cz,
+                                        mode="lines",
+                                        line=dict(color="#111111", width=2),
+                                        name="DXF Desain Asli (overlay)",
+                                        legendgroup="dxf_overlay_combo",
+                                        showlegend=True,
+                                        hoverinfo="skip",
                                     )
-                                else:
-                                    fig_combo.add_trace(
-                                        go.Scatter3d(
-                                            x=_cx, y=_cy, z=_cz,
-                                            mode="lines",
-                                            line=dict(color="#111111", width=2),
-                                            name="DXF Desain Asli (overlay)",
-                                            legendgroup="dxf_overlay_combo",
-                                            showlegend=not _dxf_overlay_legend_shown_combo,
-                                            hoverinfo="skip",
-                                        )
-                                    )
-                                _dxf_overlay_legend_shown_combo = True
-
+                                )
                     for _i_seg, (_sid_k, _res) in enumerate(_seg_items_ordered):
                         _ve = _res.get("vertical_exaggeration", vertical_exaggeration)
                         _color = _combo_palette[_i_seg % len(_combo_palette)]
