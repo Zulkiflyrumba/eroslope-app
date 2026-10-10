@@ -8586,6 +8586,9 @@ _tab_labels = [
 if _is_admin:
     _tab_labels.append("9. " + _t("Monitoring Deviation", "Monitoring Deviation"))
 _tab_labels.append(f"{len(_tab_labels) + 1}. " + _t("Simulasi Dumping", "Dump Simulation"))
+_tab_labels.append(f"{len(_tab_labels) + 1}. " + _t("Beban Unit & Tegangan", "Unit Load & Stress"))
+_tab_labels.append(f"{len(_tab_labels) + 1}. " + _t("Ketahanan Sekatan", "Bund Resistance"))
+_tab_labels.append(f"{len(_tab_labels) + 1}. " + _t("Mud Pocket", "Mud Pocket"))
 
 _STAGE_GROUPS = [
     ("rgba(79,183,131,0.45)", _t("1) Data Dasar &amp; Desain", "1) Base Data &amp; Design")),
@@ -8601,10 +8604,10 @@ st.markdown(f'<div style="display:flex; flex-wrap:wrap; gap:4px; align-items:cen
            unsafe_allow_html=True)
 
 if _is_admin:
-    tab1, tab8, tab7, tab6, tab9, tab4, tab2, tab5, tab3, tabD = st.tabs(_tab_labels)
+    tab1, tab8, tab7, tab6, tab9, tab4, tab2, tab5, tab3, tabD, tabE, tabF, tabG = st.tabs(_tab_labels)
 else:
     # User surveyor tidak menampilkan tab "Monitoring Deviation" sama sekali.
-    tab1, tab8, tab7, tab6, tab9, tab4, tab2, tab5, tabD = st.tabs(_tab_labels)
+    tab1, tab8, tab7, tab6, tab9, tab4, tab2, tab5, tabD, tabE, tabF, tabG = st.tabs(_tab_labels)
     tab3 = None
 
 # (tab_hub & tab_workflow dipindah ke landing page -- lihat blok "if st.session_state.home_page:")
@@ -13031,45 +13034,7 @@ with tab1:
                         width="stretch"
                     )
 
-                    _risk_type_colors = {
-                        "Erosi Tebing": "#C0392B", "Sedimentasi": "#2E86C1",
-                        "Overflow": "#2471A3", "Erosi Dasar": "#B7950B",
-                    }
-                    fig_priority = go.Figure()
-                    for rtype in top10["JenisRisikoDominan"].unique():
-                        sub = top10[top10["JenisRisikoDominan"] == rtype]
-                        fig_priority.add_trace(go.Bar(
-                            x=sub["RiskScore"], y=sub["ID_Titik"], orientation="h",
-                            name=rtype, marker_color=_risk_type_colors.get(rtype, "#888"),
-                            text=sub["RiskScore"].round(2), textposition="outside"
-                        ))
-                    fig_priority.update_layout(
-                        title="Sebaran Risk Index — 10 Titik Prioritas Mitigasi",
-                        xaxis_title="Risk Index", height=420, barmode="overlay",
-                        yaxis=dict(autorange="reversed")
-                    )
-                    st.plotly_chart(fig_priority, width="stretch", key=f"fig_priority_{sid}")
-
-                    # ================= EXPORT PNG "SEBARAN RISK INDEX" UNTUK LAPORAN PDF =================
-                    # Sebelumnya chart ini HANYA tampil interaktif di layar (st.plotly_chart) dan
-                    # tidak pernah disimpan sebagai gambar statis -- akibatnya tidak pernah ikut
-                    # masuk ke GENERATE EXECUTIVE REPORT. Sekarang di-export sekali di sini lalu
-                    # path-nya disimpan ke segment_results supaya bisa dipakai ulang saat generate PDF.
-                    #
-                    # PERBAIKAN PERFORMA: hanya re-export (panggil kaleido, yang berat) kalau memang
-                    # baru diklik RUN ANALYSIS atau file PNG-nya belum pernah ada. Rerun lain (chat,
-                    # edit tabel ground-truth, dsb) tinggal pakai file yang sudah ada -> jauh lebih cepat.
-                    risk_index_chart_path = f"RiskIndexDistribution_{sid}.png"
-                    try:
-                        if run_button_clicked or not os.path.exists(risk_index_chart_path):
-                            pio.write_image(fig_priority, risk_index_chart_path, format="png",
-                                             width=1300, height=550, scale=2)
-                    except Exception as _e_riskidx_png:
-                        risk_index_chart_path = None
-                        _ui_caption(
-                            f"Catatan: gagal membuat snapshot 'Sebaran Risk Index' untuk laporan PDF "
-                            f"({_e_riskidx_png}). Pastikan paket 'kaleido' terpasang (pip install -U kaleido)."
-                        )
+                    risk_index_chart_path = None   # grafik Sebaran Risk Index dihapus dari tampilan & laporan
 
                     _sub_header(
                         "Numerical Modelling"
@@ -13377,330 +13342,6 @@ with tab1:
                             f"punya {_total_segments_now} segmen) — bukan ditampilkan terpisah, "
                             "supaya hanya ada satu output analisa 3D per proyek."
                         )
-
-                    # ================= SIMULASI ALIRAN AIR (ANIMASI 3D) =================
-                    st.markdown("#### " + _t("Simulasi Aliran Air (Animasi)", "Water Flow Simulation (Animation)"))
-                    _ui_caption(
-                        "Animasi ini memutar ulang jalur aliran (streamline steepest-descent) "
-                        "yang sama dengan hasil 'Numerical Modelling' di atas — bukan simulasi "
-                        "hidrolik baru — divisualisasikan sebagai pergerakan titik air dari hulu "
-                        "ke hilir mengikuti topografi hasil DXF, seperti video, langsung di browser."
-                    )
-
-                    run_animation = st.checkbox(
-                        f"Buat animasi untuk {seg_label}",
-                        key=f"anim_toggle_{sid}",
-                        value=False,
-                        help="Nonaktif secara default supaya RUN ANALYSIS tetap cepat. Centang untuk membangun animasi."
-                    )
-
-                    if run_animation and len(flow_paths) > 0:
-
-                        n_frames = st.slider(
-                            _t("Jumlah frame animasi", "Number of animation frames"), 15, 80, 30, 5,
-                            key=f"anim_frames_{sid}",
-                            help="Makin banyak frame = animasi makin halus, tapi makin berat dibangun."
-                        )
-
-                        with st.spinner("Membangun frame animasi..."):
-
-                            # Samakan panjang progres semua path terhadap path TERPANJANG,
-                            # supaya path yang lebih pendek berhenti duluan (lebih realistis
-                            # dibanding semua path "selesai" bersamaan).
-                            max_len = max(len(px) for px, py, pz, pd in flow_paths)
-                            max_len = max(max_len, 2)
-
-                            frame_indices = np.linspace(1, max_len, n_frames, dtype=int)
-
-                            # PENTING: sekarang tiap flow_paths menghasilkan 2 trace "Aliran Air"
-                            # (garis + marker terpisah, lihat perbaikan render di atas), bukan 1
-                            # seperti sebelumnya -- slicing harus ikut dikali 2. Ditambah 1 trace
-                            # lagi "Titik Berhenti Aliran" (fitur diagnosis) kalau ada -- kalau
-                            # tidak disesuaikan, trace2 ini ikut kebawa jadi "base" animasi.
-                            _n_trailing_flow_traces = 2 * len(flow_paths) + _n_stop_marker_trace
-                            anim_base_traces = (
-                                list(fig.data[:-_n_trailing_flow_traces])
-                                if _n_trailing_flow_traces > 0 else list(fig.data)
-                            )
-
-                            frames = []
-                            for f_i, cut in enumerate(frame_indices):
-                                frame_traces = []
-                                for px, py, pz, pdep in flow_paths:
-                                    c = min(cut, len(px))
-                                    if c < 1:
-                                        continue
-                                    trail_x = px[:c]
-                                    trail_y = py[:c]
-                                    trail_pd = pdep[:c]
-                                    trail_z = ((np.array(pz[:c]) + np.array(trail_pd)) * vertical_exaggeration).tolist()
-
-                                    # jejak air yang sudah dilalui (permukaan air, bukan tanah)
-                                    frame_traces.append(
-                                        go.Scatter3d(
-                                            x=trail_x, y=trail_y, z=trail_z,
-                                            mode="lines",
-                                            line=dict(color="rgba(0,200,255,0.55)", width=3),
-                                            showlegend=False
-                                        )
-                                    )
-                                    # "partikel air" di ujung jejak (bagian terdepan aliran), ukuran
-                                    # mengikuti ketebalan air di titik itu supaya makin tebal makin
-                                    # besar terlihat -- lebih mirip aliran air sungguhan (bukan cuma
-                                    # titik seragam)
-                                    head_size = float(np.clip(6 + trail_pd[-1] * 25, 6, 24))
-                                    frame_traces.append(
-                                        go.Scatter3d(
-                                            x=[trail_x[-1]], y=[trail_y[-1]], z=[trail_z[-1]],
-                                            mode="markers",
-                                            marker=dict(size=head_size, color="#00E5FF", symbol="circle"),
-                                            showlegend=False
-                                        )
-                                    )
-                                frames.append(go.Frame(data=anim_base_traces + frame_traces, name=str(f_i)))
-
-                            fig_anim = go.Figure(
-                                data=anim_base_traces + list(frames[0].data[len(anim_base_traces):]),
-                                frames=frames
-                            )
-
-                            fig_anim.update_layout(
-                                title=dict(
-                                    text=f"Simulasi Aliran Air — {seg_label} ({analysis_method})",
-                                    x=0.5
-                                ),
-                                height=850,
-                                scene=dict(aspectmode="data"),
-                                updatemenus=[dict(
-                                    type="buttons",
-                                    showactive=False,
-                                    y=1,
-                                    x=0.05,
-                                    xanchor="left",
-                                    yanchor="top",
-                                    buttons=[
-                                        dict(
-                                            label="▶ Play",
-                                            method="animate",
-                                            args=[None, dict(
-                                                frame=dict(duration=140, redraw=True),
-                                                fromcurrent=True,
-                                                transition=dict(duration=0)
-                                            )]
-                                        ),
-                                        dict(
-                                            label="Pause",
-                                            method="animate",
-                                            args=[[None], dict(
-                                                frame=dict(duration=0, redraw=False),
-                                                mode="immediate"
-                                            )]
-                                        )
-                                    ]
-                                )],
-                                sliders=[dict(
-                                    steps=[
-                                        dict(
-                                            method="animate",
-                                            args=[[str(k)], dict(
-                                                frame=dict(duration=0, redraw=True),
-                                                mode="immediate"
-                                            )],
-                                            label=str(k)
-                                        ) for k in range(len(frames))
-                                    ],
-                                    x=0.1, y=0, len=0.85
-                                )]
-                            )
-
-                            st.plotly_chart(fig_anim, width="stretch", key=f"fig_anim_{sid}")
-                            st.caption(_t(
-                                "Tekan ▶ Play untuk menjalankan animasi, atau geser slider untuk "
-                                "melihat progres aliran pada frame tertentu.",
-                                "Press ▶ Play to run the animation, or drag the slider to "
-                                "see the flow progress at a specific frame."
-                            ))
-
-                    # ================= SIMULASI HUJAN (ANIMASI: TETES JATUH + ALIRAN MULTI-TITIK) =================
-                    st.markdown("#### " + _t("Simulasi Hujan (Animasi Tetes Jatuh + Aliran Multi-Titik)", "Rainfall Simulation (Falling Drop + Multi-Point Flow Animation)"))
-                    _ui_caption(
-                        "Berbeda dari animasi di atas (yang cuma mengikuti 1 titik hulu), simulasi ini "
-                        "mengambil beberapa titik ACAK tersebar di seluruh area kajian untuk mewakili "
-                        "hujan yang jatuh merata, lalu menganimasikan tetes air jatuh dari atas ke "
-                        "permukaan tanah, dilanjutkan air tersebut mengalir ke hilir mengikuti topografi "
-                        "-- seperti video simulasi hujan turun dan alirannya."
-                    )
-
-                    run_rain_animation = st.checkbox(
-                        f"Buat animasi hujan untuk {seg_label}",
-                        key=f"rain_anim_toggle_{sid}",
-                        value=False,
-                        help="Nonaktif secara default supaya RUN ANALYSIS tetap cepat. Centang untuk membangun animasi hujan."
-                    )
-
-                    if run_rain_animation:
-
-                        colra1, colra2, colra3 = st.columns(3)
-
-                        n_rain_points = colra1.slider(
-                            "Jumlah titik hujan", 5, 40, 15, 1,
-                            key=f"rain_n_points_{sid}",
-                            help="Makin banyak titik = representasi hujan makin rapat, tapi makin berat dibangun."
-                        )
-                        n_frames_rain = colra2.slider(
-                            _t("Jumlah frame animasi", "Number of animation frames"), 15, 80, 35, 5,
-                            key=f"rain_anim_frames_{sid}"
-                        )
-                        rain_fall_height = colra3.number_input(
-                            "Tinggi jatuh tetes (m)", 1.0, 200.0, 20.0, 1.0,
-                            key=f"rain_fall_height_{sid}",
-                            help="Cuma untuk efek visual tetes air jatuh dari langit sebelum mulai mengalir, bukan parameter hidrologi."
-                        )
-
-                        with st.spinner("Membangun animasi hujan (titik acak + streamline + tetes jatuh)..."):
-
-                            rng = np.random.default_rng(42 + idx)
-                            valid_iy, valid_ix = np.where(inside)
-
-                            if len(valid_iy) == 0:
-                                _ui_warning("Tidak ada sel valid di dalam boundary untuk mensimulasikan hujan.")
-                            else:
-                                n_pick = min(n_rain_points, len(valid_iy))
-                                pick_idx = rng.choice(len(valid_iy), size=n_pick, replace=False)
-
-                                rain_paths = []
-                                for k in pick_idx:
-                                    rr, cc = int(valid_iy[k]), int(valid_ix[k])
-                                    rx0 = float(grid_x[rr, 0])
-                                    ry0 = float(grid_y[0, cc])
-                                    _paths, _ = trace_multiple_flow(
-                                        rx0, ry0, grid_x, grid_y, dz_dx, dz_dy, grid_z, boundary,
-                                        n_stream=1, inside=inside,
-                                        depth0=0.1, flow_acc=flow_acc_grid,
-                                        d8_recv_r=_d8_recv_r, d8_recv_c=_d8_recv_c,
-                                        d8_has_recv=_d8_has_recv
-                                    )
-                                    if _paths:
-                                        rain_paths.append(_paths[0])
-
-                                if not rain_paths:
-                                    _ui_warning("Gagal membangun streamline hujan untuk segmen ini.")
-                                else:
-                                    # sama seperti anim_base_traces di atas: tiap flow_paths
-                                    # sekarang menghasilkan 2 trace (garis + marker), plus 1
-                                    # trace "Titik Berhenti Aliran" kalau ada -- slicing harus
-                                    # ikut disesuaikan.
-                                    _n_trailing_flow_traces_rain = 2 * len(flow_paths) + _n_stop_marker_trace
-                                    base_traces_rain = (
-                                        list(fig.data[:-_n_trailing_flow_traces_rain])
-                                        if _n_trailing_flow_traces_rain > 0 else list(fig.data)
-                                    )
-
-                                    max_len_rain = max(len(p[0]) for p in rain_paths)
-                                    max_len_rain = max(max_len_rain, 2)
-
-                                    n_fall_frames = max(4, n_frames_rain // 4)
-                                    n_flow_frames = max(4, n_frames_rain - n_fall_frames)
-                                    frame_indices_rain = np.linspace(1, max_len_rain, n_flow_frames, dtype=int)
-
-                                    frames_rain = []
-
-                                    # -- Fase 1: tetes hujan jatuh dari atas menuju permukaan tanah --
-                                    for f_i in range(n_fall_frames):
-                                        t = (f_i + 1) / n_fall_frames
-                                        frame_traces = []
-                                        for (px, py, pz, pdep) in rain_paths:
-                                            z_ground = pz[0] * vertical_exaggeration
-                                            z_start = z_ground + rain_fall_height * vertical_exaggeration
-                                            z_now = z_start + (z_ground - z_start) * t
-                                            frame_traces.append(
-                                                go.Scatter3d(
-                                                    x=[px[0]], y=[py[0]], z=[z_now],
-                                                    mode="markers",
-                                                    marker=dict(size=5, color="#7FD8FF", symbol="circle", opacity=0.85),
-                                                    showlegend=False
-                                                )
-                                            )
-                                        frames_rain.append(
-                                            go.Frame(data=base_traces_rain + frame_traces, name=f"fall_{f_i}")
-                                        )
-
-                                    # -- Fase 2: air mengalir ke hilir mengikuti masing-masing streamline --
-                                    for f_i, cut in enumerate(frame_indices_rain):
-                                        frame_traces = []
-                                        for (px, py, pz, pdep) in rain_paths:
-                                            c = min(cut, len(px))
-                                            if c < 1:
-                                                continue
-                                            trail_x = px[:c]
-                                            trail_y = py[:c]
-                                            trail_pd = pdep[:c]
-                                            trail_z = (
-                                                (np.array(pz[:c]) + np.array(trail_pd)) * vertical_exaggeration
-                                            ).tolist()
-                                            frame_traces.append(
-                                                go.Scatter3d(
-                                                    x=trail_x, y=trail_y, z=trail_z,
-                                                    mode="lines",
-                                                    line=dict(color="rgba(120,210,255,0.5)", width=2),
-                                                    showlegend=False
-                                                )
-                                            )
-                                            head_size = float(np.clip(4 + trail_pd[-1] * 20, 4, 18))
-                                            frame_traces.append(
-                                                go.Scatter3d(
-                                                    x=[trail_x[-1]], y=[trail_y[-1]], z=[trail_z[-1]],
-                                                    mode="markers",
-                                                    marker=dict(size=head_size, color="#7FD8FF", symbol="circle"),
-                                                    showlegend=False
-                                                )
-                                            )
-                                        frames_rain.append(
-                                            go.Frame(data=base_traces_rain + frame_traces, name=f"flow_{f_i}")
-                                        )
-
-                                    fig_rain_anim = go.Figure(
-                                        data=base_traces_rain + list(frames_rain[0].data[len(base_traces_rain):]),
-                                        frames=frames_rain
-                                    )
-
-                                    fig_rain_anim.update_layout(
-                                        title=dict(text=f"Simulasi Hujan — {seg_label}", x=0.5),
-                                        height=850,
-                                        scene=dict(aspectmode="data"),
-                                        updatemenus=[dict(
-                                            type="buttons", showactive=False, y=1, x=0.05,
-                                            xanchor="left", yanchor="top",
-                                            buttons=[
-                                                dict(label="▶ Play", method="animate", args=[None, dict(
-                                                    frame=dict(duration=110, redraw=True),
-                                                    fromcurrent=True, transition=dict(duration=0)
-                                                )]),
-                                                dict(label="Pause", method="animate", args=[[None], dict(
-                                                    frame=dict(duration=0, redraw=False), mode="immediate"
-                                                )]),
-                                            ]
-                                        )],
-                                        sliders=[dict(
-                                            steps=[
-                                                dict(
-                                                    method="animate",
-                                                    args=[[fr.name], dict(
-                                                        frame=dict(duration=0, redraw=True), mode="immediate"
-                                                    )],
-                                                    label=str(k)
-                                                ) for k, fr in enumerate(frames_rain)
-                                            ],
-                                            x=0.1, y=0, len=0.85
-                                        )]
-                                    )
-
-                                    st.plotly_chart(fig_rain_anim, width="stretch", key=f"fig_rain_anim_{sid}")
-                                    _ui_caption(
-                                        "Fase awal: tetes air hujan 'jatuh' dari atas ke permukaan tanah di "
-                                        "beberapa titik acak. Fase berikutnya: air tsb mengalir ke hilir mengikuti "
-                                        "topografi. Tekan ▶ Play atau geser slider."
-                                    )
 
                     _sub_header(
                         "2D Risk Map"
@@ -23505,42 +23146,229 @@ function terrainY(x, z){ // tinggi medan (belum eksagerasi) di (x, z) scene, bil
   return (Z(i0,j0)*(1-fx)+Z(i0+1,j0)*fx)*(1-fy)+(Z(i0,j0+1)*(1-fx)+Z(i0+1,j0+1)*fx)*fy;
 }
 var Lg=TR.len, Wg=TR.wid, Hg=TR.hgt;
-var truck = new T.Group(), bedG = new T.Group(), loadMesh;
-(function(){
-  var yel = new T.MeshLambertMaterial({color:0xf2b61c}), drk = new T.MeshLambertMaterial({color:0x2b2f34}), blk = new T.MeshLambertMaterial({color:0x111214}), glass = new T.MeshLambertMaterial({color:0x2c4a63});
-  function box(w,h,d,m,x,y,z){ var b=new T.Mesh(new T.BoxGeometry(w,h,d),m); b.position.set(x,y,z); return b; }
-  truck.add(box(Lg*0.9, Hg*0.16, Wg*0.62, drk, Lg*0.47, Hg*0.30, 0));
-  var r=Hg*0.2, wy=r;
-  [[Lg*0.26,-1],[Lg*0.26,1],[Lg*0.34,-1],[Lg*0.34,1],[Lg*0.80,-1],[Lg*0.80,1]].forEach(function(p){
-    var w = new T.Mesh(new T.CylinderGeometry(r, r, Wg*0.13, 16), blk); w.rotation.x = Math.PI/2; w.position.set(p[0], wy, p[1]*Wg*0.40); truck.add(w); });
-  truck.add(box(Lg*0.2, Hg*0.30, Wg*0.30, yel, Lg*0.86, Hg*0.5, -Wg*0.2));
-  truck.add(box(Lg*0.05, Hg*0.12, Wg*0.26, glass, Lg*0.965, Hg*0.58, -Wg*0.2));
-  truck.add(box(Lg*0.46, Hg*0.04, Wg*0.84, yel, Lg*0.68, Hg*0.9, 0));
-  truck.add(box(Lg*0.18, Hg*0.1, Wg*0.5, drk, Lg*0.97, Hg*0.28, 0));
-  bedG.position.set(Lg*0.03, Hg*0.38, 0);
-  var bl=Lg*0.84, bw=Wg*0.86, bh=Hg*0.36, mt=0.18;
-  bedG.add(box(bl, mt, bw, yel, bl/2, 0, 0));
-  bedG.add(box(bl, bh, mt, yel, bl/2, bh/2, bw/2)); bedG.add(box(bl, bh, mt, yel, bl/2, bh/2, -bw/2));
-  bedG.add(box(mt, bh*1.25, bw, yel, bl, bh*0.62, 0));
-  loadMesh = new T.Mesh(new T.BoxGeometry(bl*0.94, bh*0.9, bw*0.92), new T.MeshLambertMaterial({color:matCol})); loadMesh.position.set(bl*0.5, bh*0.5, 0); bedG.add(loadMesh);
-  truck.add(bedG);
-})();
+// ===== UNITS3D: model 3D unit tambang yang lebih realistis (HD artikulasi, dozer, excavator) =====
+// Konvensi: sumbu +x = depan unit, +y = atas, z = lebar; y=0 = permukaan tanah. Satuan meter.
+var UNITS3D = (function(T){
+  function mat(c, o){ o = o || {}; return new T.MeshPhongMaterial({color:c, specular:(o.sp===undefined?0x2a2a2a:o.sp), shininess:(o.sh||36), transparent:!!o.tr, opacity:(o.op===undefined?1:o.op), emissive:(o.em||0x000000)}); }
+  var M = {};
+  function mats(col){
+    return { body:mat(col), body2:mat(new T.Color(col).multiplyScalar(0.78).getHex()), dark:mat(0x2a2d31,{sp:0x111111,sh:12}), steel:mat(0x7b8289,{sh:60,sp:0x555555}),
+      rubber:mat(0x151618,{sp:0x050505,sh:6}), glass:mat(0x20384a,{sp:0xaad4ff,sh:90,tr:true,op:0.82}), lamp:mat(0xfff3c4,{em:0xffe9a0}), red:mat(0xb3261e,{em:0x300808}), hub:mat(0x9aa1a8,{sh:50}), grille:mat(0x1b1d20,{sh:8}) };
+  }
+  function box(w,h,d,m,x,y,z){ var b = new T.Mesh(new T.BoxGeometry(w,h,d), m); b.position.set(x||0,y||0,z||0); return b; }
+  function cyl(r,len,m,x,y,z,seg){ var g = new T.CylinderGeometry(r,r,len,seg||18); g.rotateX(Math.PI/2); var c = new T.Mesh(g,m); c.position.set(x||0,y||0,z||0); return c; }   // sumbu sepanjang z
+  function extrude(pts, depth, m, x, y, z){ var sh = new T.Shape(); sh.moveTo(pts[0][0],pts[0][1]); for (var i=1;i<pts.length;i++) sh.lineTo(pts[i][0],pts[i][1]); sh.closePath();
+    var g = new T.ExtrudeGeometry(sh,{depth:depth,bevelEnabled:false}); g.translate(0,0,-depth/2); var me = new T.Mesh(g,m); me.position.set(x||0,y||0,z||0); return me; }
+  function hull(P){ P = P.slice().sort(function(a,b){ return a[0]-b[0] || a[1]-b[1]; }); function cr(o,a,b){ return (a[0]-o[0])*(b[1]-o[1])-(a[1]-o[1])*(b[0]-o[0]); }
+    var lo = [], up = [], i; for (i=0;i<P.length;i++){ while (lo.length>=2 && cr(lo[lo.length-2],lo[lo.length-1],P[i])<=0) lo.pop(); lo.push(P[i]); }
+    for (i=P.length-1;i>=0;i--){ while (up.length>=2 && cr(up[up.length-2],up[up.length-1],P[i])<=0) up.pop(); up.push(P[i]); } up.pop(); lo.pop(); return lo.concat(up); }
+  function circPts(cx,cy,r,n){ var o=[]; for (var i=0;i<n;i++){ var a=i/n*Math.PI*2; o.push([cx+r*Math.cos(a), cy+r*Math.sin(a)]); } return o; }
+  // jalur track (hull dari beberapa lingkaran roda) -> rangka + grouser + roda; circles=[[cx,cy,r],...]
+  function trackAssembly(circles, tw, S, grouserEvery){
+    var g = new T.Group(), P = []; circles.forEach(function(c){ P = P.concat(circPts(c[0],c[1],c[2],20)); });
+    var H = hull(P); g.add(extrude(H, tw, S.rubber, 0,0,0));
+    // grouser sepanjang keliling
+    var per = [], tot = 0, i; for (i=0;i<H.length;i++){ var a=H[i], b=H[(i+1)%H.length], l=Math.hypot(b[0]-a[0], b[1]-a[1]); per.push({a:a,b:b,l:l,s:tot}); tot += l; }
+    var step = grouserEvery || 0.34, n = Math.max(12, Math.round(tot/step)), gm = new T.BoxGeometry(0.11, 0.07, tw*1.04), inst = new T.InstancedMesh(gm, S.dark, n), q = new T.Matrix4(), e = new T.Euler(), p = new T.Vector3(), sc = new T.Vector3(1,1,1), qq = new T.Quaternion();
+    for (i=0;i<n;i++){ var s = (i+0.5)/n*tot, k = 0; while (k<per.length-1 && per[k].s+per[k].l < s) k++; var sg = per[k], u = (s-sg.s)/sg.l, ang = Math.atan2(sg.b[1]-sg.a[1], sg.b[0]-sg.a[0]);
+      p.set(sg.a[0]+(sg.b[0]-sg.a[0])*u, sg.a[1]+(sg.b[1]-sg.a[1])*u, 0); e.set(0,0,ang); qq.setFromEuler(e); q.compose(p,qq,sc); inst.setMatrixAt(i,q); }
+    g.add(inst);
+    // roda & sprocket tampak di sisi luar
+    circles.forEach(function(c, k){ var w = cyl(c[2]*0.82, 0.05, S.steel, c[0], c[1], tw/2+0.03, 14); g.add(w); var w2 = cyl(c[2]*0.82, 0.05, S.steel, c[0], c[1], -tw/2-0.03, 14); g.add(w2); });
+    return g;
+  }
+  function link(m, A, B){ var dx = B[0]-A[0], dy = B[1]-A[1]; m.position.set(A[0],A[1],A[2]===undefined?m.position.z:A[2]); m.rotation.z = Math.atan2(dy,dx); m.scale.set(Math.hypot(dx,dy),1,1); }
+  function cylUnit(r, m, z){ var g = new T.CylinderGeometry(r,r,1,12); g.rotateZ(-Math.PI/2); g.translate(0.5,0,0); var c = new T.Mesh(g,m); c.position.z = z||0; return c; }   // panjang 1 sepanjang +x
+
+  // =========================================================== HD (Cat 777 / HD785 / 785 style)
+  M.makeHD = function(o){
+    var L=o.L, W=o.W, H=o.H, S = mats(o.color||0xf2b61c), G = new T.Group(), out = {group:G, wheels:[], L:L, W:W, H:H};
+    var r = H*0.335, tw = W*0.115, ax1 = L*0.27, ax2 = L*0.735;
+    // rangka & poros
+    G.add(box(L*0.86, H*0.085, W*0.40, S.dark, L*0.49, H*0.27, 0));
+    G.add(box(L*0.12, H*0.12, W*0.36, S.dark, L*0.03, H*0.30, 0));
+    G.add(cyl(H*0.06, W*0.80, S.dark, ax1, r, 0, 12)); G.add(cyl(H*0.045, W*0.80, S.dark, ax2, r, 0, 12));
+    // ban (dual belakang, tunggal depan) dengan tapak
+    function tyre(x, z){
+      var wg = new T.Group(); wg.position.set(x, r, z);
+      wg.add(cyl(r*0.99, tw*0.78, S.rubber, 0,0,0, 28));
+      wg.add(cyl(r*0.86, tw, S.rubber, 0,0,0, 28));
+      var lug = new T.BoxGeometry(r*0.18, r*0.12, tw*0.96), im = new T.InstancedMesh(lug, S.rubber, 24), m4 = new T.Matrix4(), qq = new T.Quaternion(), e = new T.Euler(), p = new T.Vector3(), sc = new T.Vector3(1,1,1);
+      for (var i=0;i<24;i++){ var a = i/24*Math.PI*2; p.set(Math.cos(a)*r*1.0, Math.sin(a)*r*1.0, 0); e.set(0,0,a+Math.PI/2); qq.setFromEuler(e); m4.compose(p,qq,sc); im.setMatrixAt(i,m4); }
+      wg.add(im);
+      wg.add(cyl(r*0.52, tw*1.04, S.hub, 0,0,0, 20)); wg.add(cyl(r*0.22, tw*1.1, S.dark, 0,0,0, 12));
+      for (var k=0;k<8;k++){ var bolt = box(r*0.07, r*0.07, 0.02, S.dark, Math.cos(k/8*6.283)*r*0.36, Math.sin(k/8*6.283)*r*0.36, tw*0.54); wg.add(bolt); }
+      G.add(wg); out.wheels.push(wg); }
+    [-1,1].forEach(function(s){ tyre(ax1, s*W*0.405); tyre(ax1, s*W*0.29); tyre(ax2, s*W*0.405); });
+    // bumper, grille, lampu, kap mesin
+    G.add(box(L*0.03, H*0.07, W*0.56, S.dark, L*0.995, H*0.15, 0));
+    G.add(box(L*0.16, H*0.19, W*0.36, S.body, L*0.905, H*0.45, 0));              // kap mesin
+    G.add(box(L*0.02, H*0.17, W*0.30, S.grille, L*0.987, H*0.45, 0));
+    for (var gi=0; gi<5; gi++) G.add(box(L*0.012, H*0.012, W*0.31, S.steel, L*0.995, H*0.38+gi*H*0.04, 0));
+    [-1,1].forEach(function(s){ G.add(box(L*0.015, H*0.035, W*0.07, S.lamp, L*0.99, H*0.54, s*W*0.13)); G.add(box(L*0.015, H*0.03, W*0.035, S.lamp, L*0.992, H*0.33, s*W*0.2)); });
+    // dek + pagar
+    G.add(box(L*0.2, H*0.02, W*0.62, S.dark, L*0.80, H*0.37, 0));
+    // kabin (kiri/-z)
+    var cx = L*0.80, cz = -W*0.27;
+    G.add(box(L*0.14, H*0.27, W*0.17, S.body, cx, H*0.52, cz));
+    G.add(box(L*0.003, H*0.17, W*0.14, S.glass, cx+L*0.0715, H*0.56, cz));        // kaca depan
+    G.add(box(L*0.11, H*0.15, W*0.003, S.glass, cx, H*0.56, cz-W*0.0865));          // kaca samping luar
+    G.add(box(L*0.11, H*0.15, W*0.003, S.glass, cx, H*0.56, cz+W*0.0865));
+    G.add(box(L*0.16, H*0.018, W*0.2, S.body2, cx, H*0.665, cz));                   // atap kabin
+    // tangga + pegangan
+    var lx = L*0.915, lz = -W*0.40;
+    [-1,1].forEach(function(s){ G.add(box(L*0.006, H*0.34, L*0.006, S.steel, lx+s*L*0.014, H*0.19, lz)); });
+    for (var ri=0; ri<5; ri++) G.add(box(L*0.03, H*0.01, W*0.012, S.steel, lx, H*0.06+ri*H*0.055, lz));
+    G.add(box(L*0.2, H*0.012, W*0.012, S.steel, L*0.80, H*0.43, -W*0.33)); G.add(box(L*0.2, H*0.012, W*0.012, S.steel, L*0.80, H*0.40, -W*0.33));
+    // tangki (kanan), knalpot
+    G.add(box(L*0.14, H*0.18, W*0.075, S.body2, L*0.60, H*0.40, W*0.31));
+    G.add(cyl(H*0.012, H*0.34, S.dark, L*0.85, H*0.55, W*0.12, 8).rotateX(Math.PI/2));
+    // bak (pivot di belakang) --------------------------------------------------------------
+    var pv = new T.Group(); pv.position.set(L*0.04, H*0.345, 0); G.add(pv); out.bed = pv;
+    var bl = L*0.64, bh = H*0.43, bw = W*0.80;
+    pv.add(extrude([[0,H*0.01],[bl*0.08,-bh*0.04],[bl*0.62,-bh*0.04],[bl*0.96,bh*0.34],[bl*1.0,bh*0.98],[0,bh*0.86]], bw, S.body, 0,0,0));
+    // rusuk samping
+    for (var k=1;k<=6;k++){ var xx = bl*(0.1+0.16*k), hh = bh*(0.9 + 0.1*(xx/bl)); [-1,1].forEach(function(s){ pv.add(box(L*0.012, hh*0.78, W*0.012, S.body2, xx, hh*0.46, s*(bw/2+W*0.005))); }); }
+    [-1,1].forEach(function(s){ pv.add(box(bl*1.0, bh*0.07, W*0.03, S.body2, bl*0.5, bh*0.93, s*(bw/2))); });   // rel atas
+    pv.add(box(L*0.012, bh*0.95, bw*1.0, S.body2, bl*0.02, bh*0.46, 0));                                     // pintu belakang
+    // kanopi
+    pv.add(extrude([[bl*0.86,bh*1.0],[bl*1.26,bh*1.02-H*0.02],[bl*1.26,bh*1.0-H*0.02],[bl*0.86,bh*0.90]], bw*0.93, S.body2, 0,0,0));
+    // muatan (origin di lantai, di-scale oleh viewer)
+    var ld = extrude([[bl*0.06,0],[bl*0.62,0],[bl*0.93,bh*0.32],[bl*0.93,bh*0.8],[bl*0.7,bh*1.18],[bl*0.4,bh*1.28],[bl*0.12,bh*1.02],[bl*0.06,bh*0.6]], bw*0.9, new T.MeshLambertMaterial({color:o.loadColor||0x7a6a55}), 0, -bh*0.03, 0);
+    pv.add(ld); out.load = ld; out.loadBase = -bh*0.03; out.bedLen = bl; out.bedH = bh; out.bedW = bw;
+    // silinder hoist (2)
+    out.hoist = []; [-1,1].forEach(function(s){ var c = cylUnit(H*0.028, S.steel, s*W*0.2); G.add(c); out.hoist.push(c); var c2 = cylUnit(H*0.04, S.dark, s*W*0.2); G.add(c2); out.hoist.push(c2); });
+    out.hoistA = [L*0.24, H*0.30]; out.hoistB = [bl*0.34, -bh*0.02];
+    out.setBed = function(ang){ pv.rotation.z = ang; var ca = Math.cos(ang), sa = Math.sin(ang), bx = pv.position.x + out.hoistB[0]*ca - out.hoistB[1]*sa, by = pv.position.y + out.hoistB[0]*sa + out.hoistB[1]*ca;
+      for (var i=0;i<out.hoist.length;i+=2){ var t = (i===0)?1:0; link(out.hoist[i], out.hoistA, [bx,by]); out.hoist[i].position.z = out.hoist[i].position.z; var Lx = Math.hypot(bx-out.hoistA[0], by-out.hoistA[1]); out.hoist[i].scale.x = Lx; out.hoist[i+1].position.copy(out.hoist[i].position); out.hoist[i+1].rotation.z = out.hoist[i].rotation.z; out.hoist[i+1].scale.x = Lx*0.55; } };
+    out.setSpin = function(a){ out.wheels.forEach(function(w){ w.rotation.z = -a; }); };
+    out.wheelR = r; out.setBed(0);
+    return out;
+  };
+
+  // =========================================================== DOZER (Cat D8 / D6 style)
+  M.makeDozer = function(o){
+    var L=o.L, W=o.W, H=o.H, S = mats(o.color||0xf2b61c), G = new T.Group(), out = {group:G, L:L, W:W, H:H};
+    var tw = W*0.17, tz = W*0.40, rr = H*0.17;
+    [-1,1].forEach(function(s){
+      var tr = trackAssembly([[ L*0.50, rr, rr ],[ -L*0.10, rr, rr*0.9 ],[ -L*0.44, rr*2.05, rr*1.15 ]], tw, S, 0.34); tr.position.z = s*tz; G.add(tr);
+      G.add(box(L*1.0, H*0.025, tw*1.25, S.body2, L*0.02, H*0.50, s*tz));            // fender
+    });
+    // badan
+    G.add(box(L*0.50, H*0.20, W*0.46, S.dark, -L*0.02, H*0.33, 0));
+    G.add(extrude([[ -L*0.06,H*0.43],[ L*0.46,H*0.43],[ L*0.46,H*0.58],[ L*0.20,H*0.69],[ -L*0.06,H*0.69]], W*0.44, S.body, 0,0,0));  // kap mesin
+    G.add(box(L*0.015, H*0.14, W*0.30, S.grille, L*0.465, H*0.52, 0));
+    for (var i=0;i<4;i++) G.add(box(L*0.012, H*0.01, W*0.31, S.steel, L*0.47, H*0.47+i*H*0.035, 0));
+    [-1,1].forEach(function(s){ G.add(box(L*0.015, H*0.03, W*0.05, S.lamp, L*0.46, H*0.64, s*W*0.14)); });
+    // kabin + ROPS
+    var cx = -L*0.26;
+    G.add(box(L*0.30, H*0.28, W*0.40, S.body, cx, H*0.66+H*0.0, 0));
+    G.add(box(L*0.003, H*0.22, W*0.36, S.glass, cx+L*0.1515, H*0.70, 0));
+    G.add(box(L*0.26, H*0.22, W*0.003, S.glass, cx, H*0.70, -W*0.201)); G.add(box(L*0.26, H*0.22, W*0.003, S.glass, cx, H*0.70, W*0.201));
+    G.add(box(L*0.003, H*0.22, W*0.36, S.glass, cx-L*0.1515, H*0.70, 0));
+    G.add(box(L*0.38, H*0.03, W*0.5, S.body2, cx, H*0.985, 0));
+    [[-1,-1],[-1,1],[1,-1],[1,1]].forEach(function(p){ G.add(box(L*0.018, H*0.32, L*0.018, S.dark, cx+p[0]*L*0.17, H*0.82, p[1]*W*0.21)); });
+    G.add(cyl(H*0.02, H*0.30, S.dark, L*0.22, H*0.83, -W*0.12, 8).rotateX(Math.PI/2));   // knalpot
+    // ripper (belakang)
+    var rip = new T.Group(); rip.position.set(-L*0.60, H*0.34, 0); G.add(rip); out.ripper = rip;
+    rip.add(box(L*0.07, H*0.12, W*0.62, S.dark, -L*0.02, 0, 0)); [-1,0,1].forEach(function(s){ rip.add(box(L*0.025, H*0.34, L*0.03, S.steel, -L*0.03, -H*0.16, s*W*0.2)); rip.add(box(L*0.04, H*0.05, L*0.035, S.dark, -L*0.015, -H*0.35, s*W*0.2)); });
+    // push-arm + blade (pivot di samping badan)
+    var arm = new T.Group(); arm.position.set(-L*0.02, H*0.30, 0); G.add(arm); out.arm = arm;
+    var armLen = L*0.76, bladeX = armLen + L*0.07, Wb = W*1.22, Hb = H*0.56;
+    [-1,1].forEach(function(s){ arm.add(box(armLen, H*0.07, W*0.045, S.body, armLen*0.5, 0, s*W*0.505)); });
+    arm.add(box(L*0.06, H*0.10, W*0.95, S.body2, armLen*0.05, 0, 0));
+    var bl = new T.Group(); bl.position.set(bladeX, 0, 0); arm.add(bl); out.blade = bl;
+    var arc = [], N = 7, R = Hb*1.25; for (var j=0;j<=N;j++){ var a = -0.1+1.0*j/N; arc.push([ R*(1-Math.cos(a))*0.9, -Hb*0.34 + R*Math.sin(a)*0.95 ]); }   // profil cembung ke depan
+    var pts = []; arc.forEach(function(p){ pts.push([p[0]+L*0.0, p[1]]); }); arc.slice().reverse().forEach(function(p){ pts.push([p[0]-L*0.018, p[1]]); });
+    bl.add(extrude(pts, Wb, S.body, 0, 0, 0));
+    bl.add(box(L*0.03, Hb*0.06, Wb*1.0, S.steel, L*0.0, -Hb*0.34, 0));          // cutting edge
+    bl.add(box(L*0.03, Hb*0.05, Wb*1.0, S.steel, R*(1-Math.cos(0.9))*0.9, -Hb*0.34 + R*Math.sin(0.9)*0.95, 0));
+    [-1,1].forEach(function(s){ bl.add(extrude([[ -L*0.02,-Hb*0.34],[ L*0.09,-Hb*0.34],[ L*0.09,Hb*0.2],[ -L*0.02,Hb*0.6]], W*0.03, S.body2, 0,0,s*Wb/2)); });
+    // silinder angkat blade
+    var hc = cylUnit(H*0.028, S.steel, W*0.28), hc2 = cylUnit(H*0.028, S.steel, -W*0.28); G.add(hc); G.add(hc2); out.lift = [hc,hc2];
+    out.setBlade = function(a){ arm.rotation.z = a; var ca=Math.cos(a), sa=Math.sin(a), B=[arm.position.x + armLen*0.7*ca, arm.position.y + armLen*0.7*sa + H*0.05]; link(hc,[L*0.36, H*0.52],B); link(hc2,[L*0.36,H*0.52],B); hc.position.z = W*0.28; hc2.position.z = -W*0.28; };
+    out.bladeW = Wb; out.bladeH = Hb; out.bladeX = bladeX; out.setBlade(0);
+    return out;
+  };
+
+  // =========================================================== EXCAVATOR (Cat 349 / PC450 style)
+  M.makeExcavator = function(o){
+    var L=o.L, W=o.W, H=o.H, S = mats(o.color||0xf2b61c), G = new T.Group(), out = {group:G, L:L, W:W, H:H};
+    var tw = W*0.19, tz = W*0.40, rr = H*0.14;
+    [-1,1].forEach(function(s){ var tr = trackAssembly([[ L*0.46, rr, rr ],[ -L*0.46, rr, rr ],[ -L*0.10, rr*0.95, rr*0.8 ],[ L*0.10, rr*0.95, rr*0.8 ]], tw, S, 0.36); tr.position.z = s*tz; G.add(tr); });
+    G.add(box(L*0.62, H*0.13, W*0.62, S.dark, 0, H*0.20, 0));                                      // carbody
+    G.add(cyl(L*0.26, H*0.07, S.steel, 0, H*0.29, 0, 24).rotateX(Math.PI/2));
+    var hs = new T.Group(); hs.position.set(0, H*0.31, 0); G.add(hs); out.house = hs;
+    // dek + counterweight
+    hs.add(box(L*0.86, H*0.05, W*0.86, S.body2, -L*0.08, H*0.03, 0));
+    hs.add(extrude([[ -L*0.50,0],[ -L*0.50,H*0.46],[ -L*0.42,H*0.50],[ -L*0.22,H*0.44],[ -L*0.22,0]], W*0.80, S.dark, 0,0,0));
+    hs.add(box(L*0.003, H*0.30, W*0.78, S.body2, -L*0.505, H*0.24, 0));
+    // kap mesin + grille
+    hs.add(box(L*0.28, H*0.30, W*0.74, S.body, -L*0.30+L*0.14-L*0.14, H*0.20, 0).translateX(-L*0.06));
+    for (var i=0;i<5;i++) hs.add(box(L*0.2, H*0.012, W*0.002, S.dark, -L*0.17, H*0.12+i*H*0.045, W*0.371));
+    hs.add(box(L*0.12, H*0.06, W*0.74, S.body2, -L*0.06, H*0.37, 0));
+    // kabin kiri depan
+    hs.add(box(L*0.24, H*0.50, W*0.30, S.body, L*0.20, H*0.30, -W*0.28));
+    hs.add(box(L*0.003, H*0.40, W*0.27, S.glass, L*0.322, H*0.34, -W*0.28));
+    hs.add(box(L*0.20, H*0.38, W*0.003, S.glass, L*0.2, H*0.34, -W*0.43)); hs.add(box(L*0.20, H*0.38, W*0.003, S.glass, L*0.2, H*0.34, -W*0.13));
+    hs.add(box(L*0.28, H*0.03, W*0.34, S.body2, L*0.21, H*0.56, -W*0.28));
+    hs.add(box(L*0.003, H*0.07, W*0.30, S.glass, L*0.23, H*0.58, -W*0.28).rotateZ(0.3));
+    hs.add(cyl(H*0.02, H*0.30, S.dark, -L*0.10, H*0.58, W*0.28, 8).rotateX(Math.PI/2));
+    hs.add(box(L*0.25, H*0.012, W*0.012, S.steel, L*0.02, H*0.12, W*0.43)); hs.add(box(L*0.25, H*0.012, W*0.012, S.steel, L*0.02, H*0.09, W*0.43));
+    // boom
+    var fx = L*0.31, fy = H*0.12; out.foot = [fx, fy + hs.position.y];
+    var lb = o.lb || L*1.30, ls = o.ls || L*0.66, lk = o.lk || L*0.32; out.lb=lb; out.ls=ls; out.lk=lk;
+    var bm = new T.Group(); bm.position.set(fx, fy, 0); hs.add(bm); out.boom = bm;
+    var bt = H*0.10; bm.add(extrude([[0,-bt],[lb*0.35,lb*0.20-bt],[lb*0.72,lb*0.16-bt],[lb,-bt*0.4],[lb,bt*0.5],[lb*0.72,lb*0.16+bt*1.3],[lb*0.35,lb*0.20+bt*1.6],[0,bt]], W*0.12, S.body, 0,0,0));
+    var sk = new T.Group(); sk.position.set(lb, 0, 0); bm.add(sk); out.stick = sk;
+    var st = H*0.065; sk.add(extrude([[-bt*0.5,-st],[ls*0.5,-st*1.1],[ls,-st*0.6],[ls,st*0.7],[ls*0.5,st*1.8],[0,st*1.5]], W*0.09, S.body, 0,0,0));
+    var bk = new T.Group(); bk.position.set(ls, 0, 0); sk.add(bk); out.bucket = bk;
+    var bw = o.bw || W*0.55, bh = lk*0.9;
+    bk.add(extrude([[0,0.05],[lk*0.45,-bh*0.55],[lk*1.0,-bh*0.95],[lk*1.05,-bh*0.80],[lk*0.8,-bh*0.28],[lk*0.55,bh*0.0],[lk*0.2,bh*0.18]], bw, S.dark, 0,0,0));
+    for (var ti=0; ti<5; ti++) bk.add(box(lk*0.14, bh*0.10, bw*0.07, S.steel, lk*1.08, -bh*0.86, -bw*0.4+ti*bw*0.2));
+    bk.add(box(lk*0.5, bh*0.08, bw*1.0, S.steel, lk*0.32, -bh*0.32, 0).rotateZ(-0.5));
+    bk.add(box(lk*0.5, bh*0.08, bw*1.02, S.body, lk*0.30, -bh*0.2, 0));
+    out.bucketW = bw; out.bucketH = bh;
+    // silinder
+    var cb = cylUnit(H*0.045, S.steel, W*0.12), cb2 = cylUnit(H*0.065, S.dark, W*0.12), cb3 = cylUnit(H*0.045, S.steel, -W*0.12), cb4 = cylUnit(H*0.065, S.dark, -W*0.12);
+    [cb,cb2,cb3,cb4].forEach(function(c){ hs.add(c); }); out.cylB=[cb,cb2,cb3,cb4];
+    var cs = cylUnit(H*0.04, S.steel, 0), cs2 = cylUnit(H*0.055, S.dark, 0); bm.add(cs); bm.add(cs2); out.cylS=[cs,cs2];
+    var ck = cylUnit(H*0.032, S.steel, 0), ck2 = cylUnit(H*0.045, S.dark, 0); sk.add(ck); sk.add(ck2); out.cylK=[ck,ck2];
+    out.pose = {swing:0, boom:0.7, stick:-1.1, bucket:-1.0};
+    out.setPose = function(sw, b, s, c){
+      out.pose = {swing:sw, boom:b, stick:s, bucket:c}; hs.rotation.y = sw; bm.rotation.z = b; sk.rotation.z = s; bk.rotation.z = c;
+      function R(a, p){ return [p[0]*Math.cos(a)-p[1]*Math.sin(a), p[0]*Math.sin(a)+p[1]*Math.cos(a)]; }
+      // silinder boom (di bingkai house)
+      var bB = R(b, [lb*0.30, bt*2.8]); bB = [fx+bB[0], fy+bB[1]];
+      [[cb,cb2,W*0.12],[cb3,cb4,-W*0.12]].forEach(function(p){ link(p[0], [fx-L*0.12, fy-H*0.04], bB); p[0].position.z = p[2]; var ln = Math.hypot(bB[0]-fx+L*0.12, bB[1]-fy+H*0.04); p[0].scale.x = ln; link(p[1],[fx-L*0.12, fy-H*0.04], bB); p[1].position.z = p[2]; p[1].scale.x = ln*0.55; });
+      // silinder stick (di bingkai boom)
+      var sB = R(s, [ls*0.16, st*3.2]); sB = [lb + sB[0], sB[1]]; link(cs, [lb*0.55, bt*4.2], sB); link(cs2, [lb*0.55, bt*4.2], sB); cs2.scale.x *= 0.55;
+      // silinder bucket (di bingkai stick)
+      var kB = R(c, [lk*0.25, lk*0.2]); kB = [ls + kB[0], kB[1]]; link(ck, [ls*0.28, st*2.6], kB); link(ck2, [ls*0.28, st*2.6], kB); ck2.scale.x *= 0.55;
+    };
+    // IK: ujung gigi bucket pada (r, y) relatif sumbu house & permukaan tanah; phi = sudut absolut gigi bucket
+    out.ik = function(r, y, phi){
+      var tipL = bh*0.95, tipAng = Math.atan2(-bh*0.95, lk*1.0), kd = Math.hypot(lk*1.0, bh*0.95);      // jarak pivot->gigi, arah relatif bucket
+      var ab = phi + 0, px = r - kd*Math.cos(ab + tipAng), py = (y - hs.position.y) - kd*Math.sin(ab + tipAng);
+      var dx = px - fx, dy = py - fy, d = Math.min(Math.hypot(dx,dy), lb+ls-0.05); d = Math.max(d, Math.abs(lb-ls)+0.05);
+      var a0 = Math.atan2(dy, dx), cosA = (lb*lb + d*d - ls*ls)/(2*lb*d), A = Math.acos(Math.max(-1,Math.min(1,cosA)));
+      var bAbs = a0 + A; var tx = fx + lb*Math.cos(bAbs), ty = fy + lb*Math.sin(bAbs), sAbs = Math.atan2(py - ty, px - tx);
+      return {boom:bAbs, stick:sAbs - bAbs, bucket:ab - sAbs};
+    };
+    out.tipAt = function(sw, b, s, c){ var bAbs = b, sAbs = b + s, kAbs = b + s + c, kd = Math.hypot(lk, bh*0.95), ang = Math.atan2(-bh*0.95, lk);
+      var x = fx + lb*Math.cos(bAbs) + ls*Math.cos(sAbs) + kd*Math.cos(kAbs+ang), y = hs.position.y + fy + lb*Math.sin(bAbs) + ls*Math.sin(sAbs) + kd*Math.sin(kAbs+ang); return [x, y]; };
+    out.setPose(0, 0.7, -1.1, -1.0);
+    return out;
+  };
+  return M;
+})(THREE);
+
+var HDm = UNITS3D.makeHD({L:Lg, W:Wg*1.12, H:Math.max(Hg*1.25, Lg*0.5), loadColor:matCol});
+var truck = HDm.group, bedG = HDm.bed, loadMesh = HDm.load;
 scene.add(truck);
-var dozer = new T.Group(), dzPile;
-(function(){
-  var yel = new T.MeshLambertMaterial({color:0xe8a317}), drk = new T.MeshLambertMaterial({color:0x2b2f34}), blk = new T.MeshLambertMaterial({color:0x15171a}), steel = new T.MeshLambertMaterial({color:0x6b7178});
-  function box(w,h,d,m,x,y,z){ var b=new T.Mesh(new T.BoxGeometry(w,h,d),m); b.position.set(x,y,z); return b; }
-  var DL = 5.4, DW = 3.4, DH = 3.2;
-  dozer.add(box(DL, 0.9, DW*0.62, yel, 0, 1.35, 0));
-  [-1,1].forEach(function(s){ dozer.add(box(DL*1.12, 1.15, 0.85, blk, 0, 0.58, s*DW*0.42)); });
-  dozer.add(box(DL*0.34, 1.35, DW*0.5, yel, -DL*0.2, 2.35, 0));
-  dozer.add(box(DL*0.06, 0.55, DW*0.4, new T.MeshLambertMaterial({color:0x2c4a63}), -DL*0.04, 2.55, 0));
-  dozer.add(box(DL*0.3, 0.8, DW*0.4, drk, DL*0.28, 1.6, 0));
-  var bl = box(0.35, 1.5, DW*1.08, steel, DL*0.62, 0.9, 0); dozer.add(bl);
-  [-1,1].forEach(function(s){ dozer.add(box(1.1, 0.25, 0.25, steel, DL*0.52, 0.8, s*DW*0.4)); });
-  dzPile = new T.Mesh(new T.BoxGeometry(1.6, 1.0, DW*0.95), new T.MeshLambertMaterial({color:matCol}));
-  dzPile.position.set(DL*0.62+0.95, 0.55, 0); dozer.add(dzPile);
-})();
+var DZm = UNITS3D.makeDozer({L:5.4, W:3.4, H:3.2});
+var dozer = DZm.group, dzPile = new T.Mesh(new T.BoxGeometry(1.6, 1.0, DZm.bladeW*0.95), new T.MeshLambertMaterial({color:matCol}));
+dzPile.position.set(DZm.bladeX+0.95, 0.55, 0); dozer.add(dzPile);
 dozer.visible = false; scene.add(dozer);
 var marker = new T.Group(), cur = {f:new Float32Array(N), hm:new Float32Array(N), hw:new Float32Array(N)};
 (function(){
@@ -23661,9 +23489,9 @@ function updateTruck(t){
   if (so > 0.8 || STG){ ty = terrainY(x, z) + fillAt(x, z); if (so <= 0.8) ty = Math.max(ty, padY - 0.3); }
   truck.position.set(x, ty*vex + 0.12, z); truck.rotation.set(0, heading, 0);
   updateDozer(t, ld, so, tipT);
-  bedG.rotation.z = bedAng; loadMesh.scale.set(1, Math.max(rem, 0.02), 1); loadMesh.position.y = (Hg*0.36*0.9*Math.max(rem,0.02))/2 + 0.1; loadMesh.visible = rem > 0.03;
+  HDm.setBed(bedAng); HDm.setSpin(off*0.5); loadMesh.scale.set(1, Math.max(rem, 0.02), 1); loadMesh.position.y = HDm.loadBase; loadMesh.visible = rem > 0.03;
   // partikel jatuhan
-  var sf = surfAtDump(), lipH = ty*vex + 0.12 + Hg*0.38 + 0.2, g = 9.81, n = 0;
+  var sf = surfAtDump(), lipH = ty*vex + 0.12 + HDm.H*0.36 + HDm.bedH*0.9*Math.cos(bedAng), g = 9.81, n = 0;
   var lx = dp.x + ap.x*final, lz = dp.z + ap.z*final, vo = 3.2;
   if (t >= ld.t_tip0 && t <= ld.t_tip1 + 6){
     for (var p=0; p<NP; p++){
@@ -24163,7 +23991,7 @@ def _dump_sim_tab():
                              format_func=lambda n: {72: _t("Cepat (72)", "Fast (72)"), 96: _t("Normal (96)", "Normal (96)"), 128: _t("Halus (128, lambat)", "Fine (128, slow)")}[n])
         settle = ac6.number_input(_t("Waktu pengendapan setelah dump (s)", "Settling time after dumping (s)"), 30.0, 1800.0, 240.0, 30.0, key="dsim_settle")
         vexag = st.slider(_t("Eksagerasi vertikal", "Vertical exaggeration"), 1.0, 5.0, 2.0, 0.5, key="dsim_vex")
-    img_choice = st.radio(_t("Citra di permukaan medan", "Imagery on the terrain"), ["none", "sat", "ortho"], horizontal=True, key="dsim_img",
+    img_choice = st.radio(_t("Citra ArcGIS di medan dasar (timbunan baru, lumpur & air tetap polos)", "ArcGIS imagery on the base terrain (new fill, mud & water stay plain)"), ["none", "sat", "ortho"], index=1, horizontal=True, key="dsim_img",
                           format_func=lambda c: {"none": _t("Tanpa citra", "No imagery"), "sat": _t("Satelit", "Satellite"), "ortho": "Orthophoto"}[c])
 
     # ---------------- pratinjau
@@ -24598,7 +24426,7 @@ def _dump_stage_ui(dsm, dsc, seg, sid, segs, xs, ys, z, zmin, zmax, sub_mode=Fal
         mud_ty = ae2.number_input(_t("Yield stress lumpur (Pa)", "Mud yield stress (Pa)"), 1.0, 1500.0, float(dsm.MUD_DEFAULT["tau_y"]), 10.0, key="dsim_s_mty")
         mud_n = ae3.number_input(_t("Manning lumpur", "Mud Manning"), 0.02, 0.5, float(dsm.MUD_DEFAULT["manning"]), 0.01, key="dsim_s_mn")
         vexag = st.slider(_t("Eksagerasi vertikal", "Vertical exaggeration"), 1.0, 5.0, 2.0, 0.5, key="dsim_s_vex")
-    img_choice = st.radio(_t("Citra di permukaan medan", "Imagery on the terrain"), ["none", "sat", "ortho"], horizontal=True, key="dsim_s_img",
+    img_choice = st.radio(_t("Citra ArcGIS di medan dasar (timbunan baru, lumpur & air tetap polos)", "ArcGIS imagery on the base terrain (new fill, mud & water stay plain)"), ["none", "sat", "ortho"], index=1, horizontal=True, key="dsim_s_img",
                           format_func=lambda c: {"none": _t("Tanpa citra", "No imagery"), "sat": _t("Satelit", "Satellite"), "ortho": "Orthophoto"}[c])
 
     # ---------------- 3b. subdrain
@@ -24769,6 +24597,3980 @@ def _dump_stage_ui(dsm, dsc, seg, sid, segs, xs, ys, z, zmin, zmax, sub_mode=Fal
 
 with tabD:
     _dump_sim_tab()
+
+
+# =========================================================
+# ====== MODUL: BEBAN UNIT & DISTRIBUSI TEGANGAN KE LAPISAN ==
+# =========================================================
+_UNITLOAD_SRC = r'''"""
+Mesin distribusi beban unit (HD / dozer / excavator) ke lapisan tanah -- ILUSTRATIF/indikatif.
+
+Metode:
+  * Beban roda/track -> patch persegi panjang bertekanan seragam (ban: tekanan inflasi; track: berat / luas telapak).
+  * Tegangan tambahan vertikal (delta sigma_z): Boussinesq untuk beban persegi panjang seragam (superposisi 4 sudut), banyak patch & banyak unit
+    dijumlahkan (superposisi linear).
+  * Lapisan berbeda kekakuan: kedalaman ekuivalen Odemark  z_eq = sum h_i * f * (E_i/E_n)^(1/3)  (f = 0.9) -> lapisan keras menyebarkan beban
+    lebih lebar, lapisan lunak di bawahnya menerima tegangan lebih kecil/lebar.
+  * Tegangan efektif awal: berat sendiri (gamma atau gamma_sat di bawah muka air) dikurangi tekanan pori; lumpur/lempung jenuh dianggap
+    undrained saat pembebanan cepat (delta u = delta sigma).
+  * Kapasitas dukung indikatif per lapisan (c, phi): Nc*c + Nq*sigma0 + 0.5*gamma*B*Ngamma.
+Tidak menggantikan analisis geoteknik (PLAXIS, Rocscience, dsb).
+"""
+import math
+import numpy as np
+
+UNITS = {
+    "Cat 777 (HD, ±91 t payload)": dict(kind="truck", empty_t=66.0, payload_t=91.0, front_empty=0.47, front_loaded=0.33,
+                                        n_front=2, n_rear=4, tire_w=0.69, p_kpa=700.0, wheelbase=4.4, track_front=3.4, track_rear=2.9, dual_gap=0.95,
+                                        len_m=9.7, wid_m=5.2, note="Spesifikasi perkiraan (brosur resmi: cek). Distribusi as diasumsikan."),
+    "Komatsu HD785 (HD, ±91 t payload)": dict(kind="truck", empty_t=71.0, payload_t=91.0, front_empty=0.46, front_loaded=0.33,
+                                              n_front=2, n_rear=4, tire_w=0.69, p_kpa=700.0, wheelbase=4.5, track_front=3.4, track_rear=2.9, dual_gap=0.95,
+                                              len_m=10.3, wid_m=5.2, note="Spesifikasi perkiraan."),
+    "Cat 785 (HD, ±136 t payload)": dict(kind="truck", empty_t=108.0, payload_t=136.0, front_empty=0.46, front_loaded=0.33,
+                                         n_front=2, n_rear=4, tire_w=0.84, p_kpa=750.0, wheelbase=4.9, track_front=4.0, track_rear=3.4, dual_gap=1.05,
+                                         len_m=11.4, wid_m=6.1, note="Spesifikasi perkiraan."),
+    "Dozer D8 (±39 t)": dict(kind="track", empty_t=39.0, payload_t=0.0, track_len=3.3, shoe_w=0.61, gauge=2.16, len_m=5.8, wid_m=3.4,
+                             note="Spesifikasi perkiraan; tekanan telapak ≈ 0,9 kg/cm²."),
+    "Dozer D6 (±20 t)": dict(kind="track", empty_t=20.0, payload_t=0.0, track_len=2.6, shoe_w=0.56, gauge=1.88, len_m=4.9, wid_m=3.2, note="Spesifikasi perkiraan."),
+    "Excavator 50 t": dict(kind="track", empty_t=50.0, payload_t=0.0, track_len=4.4, shoe_w=0.6, gauge=2.7, len_m=9.5, wid_m=3.4, note="Spesifikasi perkiraan."),
+}
+
+LAYER_PRESETS = {
+    "Timbunan (claystone/sandstone padat)": dict(type="timbunan", gamma=19.5, gamma_sat=20.5, c=15.0, phi=28.0, E=30.0, nu=0.3),
+    "Timbunan sandstone/batupasir": dict(type="timbunan", gamma=19.0, gamma_sat=20.0, c=5.0, phi=34.0, E=45.0, nu=0.3),
+    "Pasir subdrain": dict(type="pasir", gamma=17.5, gamma_sat=19.5, c=0.0, phi=32.0, E=30.0, nu=0.3),
+    "Lumpur (soft)": dict(type="lumpur", gamma=14.5, gamma_sat=14.5, c=6.0, phi=0.0, E=1.5, nu=0.45),
+    "Lempung lunak (tanah asli)": dict(type="lempung", gamma=16.5, gamma_sat=16.5, c=25.0, phi=0.0, E=6.0, nu=0.4),
+    "Lempung kaku": dict(type="lempung", gamma=18.5, gamma_sat=18.5, c=80.0, phi=0.0, E=25.0, nu=0.35),
+    "Batuan lapuk": dict(type="batuan", gamma=22.0, gamma_sat=22.5, c=60.0, phi=32.0, E=300.0, nu=0.25),
+}
+GW = 9.81
+
+
+# ---------------------------------------------------------------- Boussinesq: beban persegi panjang seragam
+def _corner(a, b, z):
+    """Faktor pengaruh sudut (bertanda) pada kedalaman z untuk persegi dengan sudut berjarak a (x) dan b (y) dari titik."""
+    a = np.asarray(a, float); b = np.asarray(b, float); z = np.maximum(np.asarray(z, float), 1e-6)
+    s = np.sign(a) * np.sign(b)
+    m = np.abs(a) / z
+    n = np.abs(b) / z
+    r = np.sqrt(m * m + n * n + 1.0)
+    I = (1.0 / (4.0 * math.pi)) * ((2 * m * n * r / (m * m + n * n + m * m * n * n + 1.0)) * ((m * m + n * n + 2.0) / (m * m + n * n + 1.0))
+                                   + np.arctan2(2 * m * n * r, m * m + n * n - m * m * n * n + 1.0))
+    return s * I
+
+
+def rect_stress(q, x1, x2, y1, y2, X, Y, Z):
+    """Delta sigma_z (kPa) di (X, Y, Z) akibat tekanan q pada persegi [x1,x2]x[y1,y2] (setengah ruang homogen)."""
+    return q * (_corner(x2 - X, y2 - Y, Z) - _corner(x1 - X, y2 - Y, Z) - _corner(x2 - X, y1 - Y, Z) + _corner(x1 - X, y1 - Y, Z))
+
+
+# ---------------------------------------------------------------- patch kontak unit
+def unit_patches(unit, state, pose, dyn=1.0):
+    """Daftar patch kontak (persegi dalam koordinat denah) untuk satu unit.
+    pose = (x, y, heading_deg): pusat unit & arah maju (0 = +X, 90 = +Y).  state = 'loaded'|'empty'.
+    Return list dict(poly=[4 titik], q (kPa), force (kN), center=(x,y), size=(len,wid), label)."""
+    x0, y0, hd = pose
+    th = math.radians(hd)
+    cu, su = math.cos(th), math.sin(th)
+    mass = unit["empty_t"] + (unit["payload_t"] if state == "loaded" else 0.0)
+    W = mass * 9.81 * dyn          # kN
+    out = []
+
+    def add(u, v, L, B, F, q, label):
+        # (u,v) pusat patch dalam sumbu unit; L panjang (sepanjang u), B lebar (sepanjang v)
+        cx = x0 + u * cu - v * su
+        cy = y0 + u * su + v * cu
+        pts = []
+        for du, dv in ((-L / 2, -B / 2), (L / 2, -B / 2), (L / 2, B / 2), (-L / 2, B / 2)):
+            uu, vv = u + du, v + dv
+            pts.append((x0 + uu * cu - vv * su, y0 + uu * su + vv * cu))
+        out.append(dict(poly=pts, q=q, force=F, center=(cx, cy), size=(L, B), label=label))
+
+    if unit["kind"] == "truck":
+        fr = unit["front_loaded"] if state == "loaded" else unit["front_empty"]
+        Wf, Wr = W * fr, W * (1 - fr)
+        nf, nr = unit["n_front"], unit["n_rear"]
+        w = unit["tire_w"]
+        p = unit["p_kpa"]
+        ufront, urear = unit["wheelbase"] * (1 - fr), -unit["wheelbase"] * fr    # titik berat antara as
+        for sgn in (-1, 1):
+            Fw = Wf / nf
+            Lp = max(Fw / (p * w), 0.05)
+            add(ufront, sgn * unit["track_front"] / 2, Lp, w, Fw, Fw / (Lp * w), "ban depan")
+        per_side = nr // 2
+        for sgn in (-1, 1):
+            for k in range(per_side):
+                off = (k - (per_side - 1) / 2.0) * unit["dual_gap"]
+                Fw = Wr / nr
+                Lp = max(Fw / (p * w), 0.05)
+                add(urear, sgn * unit["track_rear"] / 2 + off, Lp, w, Fw, Fw / (Lp * w), "ban belakang")
+    else:
+        Lt, b = unit["track_len"], unit["shoe_w"]
+        for sgn in (-1, 1):
+            Fw = W / 2
+            add(0.0, sgn * unit["gauge"] / 2, Lt, b, Fw, Fw / (Lt * b), "track")
+    return out
+
+
+def _bbox(poly):
+    xs = [p[0] for p in poly]; ys = [p[1] for p in poly]
+    return min(xs), max(xs), min(ys), max(ys)
+
+
+# ---------------------------------------------------------------- lapisan
+def prep_layers(layers):
+    """layers: dari permukaan dipijak ke bawah; tiap dict(name,type,h,gamma,gamma_sat,c,phi,E,nu). Tambah z0/z1."""
+    out, z = [], 0.0
+    for L in layers:
+        d = dict(L)
+        d["z0"], d["z1"] = z, z + float(L["h"])
+        z = d["z1"]
+        out.append(d)
+    return out
+
+
+def equiv_depth(z, layers, f=0.9):
+    """Kedalaman ekuivalen Odemark untuk kedalaman z (array) -- modulus acuan = modulus lapisan tempat titik berada."""
+    z = np.asarray(z, float)
+    zeq = np.zeros_like(z)
+    for k, L in enumerate(layers):
+        inL = (z >= L["z0"]) & (z < L["z1"] + 1e-9)
+        if k == len(layers) - 1:
+            inL = z >= L["z0"]
+        if not inL.any():
+            continue
+        En = max(min(layers[j]["E"] for j in range(k + 1)), 1e-3)     # modulus acuan = terlunak dari permukaan s.d. lapisan ini (hasil menurun monoton)
+        acc = 0.0
+        for j in range(k):
+            acc += layers[j]["h"] * f * (max(layers[j]["E"], 1e-3) / En) ** (1.0 / 3.0)
+        zeq[inL] = acc + (z[inL] - L["z0"]) * (max(L["E"], 1e-3) / En) ** (1.0 / 3.0)
+    return zeq
+
+
+def _rot_rect_stress(p, X, Y, Z):
+    """Persegi dapat berotasi: ubah titik ke sumbu patch lalu pakai rect_stress."""
+    cx, cy = p["center"]
+    pts = p["poly"]
+    # sumbu patch: dari titik 0 ke 1 = sumbu panjang (u)
+    ux, uy = pts[1][0] - pts[0][0], pts[1][1] - pts[0][1]
+    Lp = math.hypot(ux, uy)
+    ux, uy = ux / Lp, uy / Lp
+    vx, vy = -uy, ux
+    dx, dy = X - cx, Y - cy
+    U = dx * ux + dy * uy
+    V = dx * vx + dy * vy
+    L, B = p["size"]
+    return rect_stress(p["q"], -L / 2, L / 2, -B / 2, B / 2, U, V, Z)
+
+
+def stress_field(patches, X, Y, z, layers):
+    X, Y, zb = np.broadcast_arrays(np.asarray(X, float), np.asarray(Y, float), np.asarray(z, float))
+    ze = np.maximum(equiv_depth(zb.ravel(), layers).reshape(zb.shape), 0.02)
+    tot = np.zeros(zb.shape)
+    for p in patches:
+        tot += _rot_rect_stress(p, X, Y, ze)
+    return tot
+
+
+# ---------------------------------------------------------------- tegangan awal & kapasitas dukung
+def initial_stress(layers, zw, dz=0.1, hw_above=0.0):
+    """Profil tegangan total/pori/efektif awal terhadap kedalaman (z dari permukaan dipijak; zw = kedalaman muka air tanah, boleh <0 = air di atas)."""
+    ztot = layers[-1]["z1"]
+    z = np.arange(0.0, ztot + dz, dz)
+    sig = np.zeros_like(z)
+    u = np.zeros_like(z)
+    s = max(hw_above, 0.0) * GW if zw < 0 else 0.0
+    prev = 0.0
+    for i, zi in enumerate(z):
+        L = next((l for l in layers if l["z0"] <= zi < l["z1"] + 1e-9), layers[-1])
+        gam = L["gamma_sat"] if zi >= zw else L["gamma"]
+        if i > 0:
+            s += gam * (zi - prev)
+        sig[i] = s
+        u[i] = max(0.0, (zi - zw) * GW) if zw >= 0 else (zi + (-zw)) * GW if zw < 0 else 0.0
+        prev = zi
+    return z, sig, u, sig - u
+
+
+def bearing_capacity(L, sigma0, B):
+    """q_ult indikatif (kPa) untuk lapisan L (c, phi) pada tegangan overburden sigma0 dan lebar efektif B."""
+    phi = math.radians(L["phi"])
+    c = L["c"]
+    if L["phi"] < 0.5:
+        return 5.14 * c + sigma0
+    Nq = math.exp(math.pi * math.tan(phi)) * math.tan(math.radians(45) + phi / 2) ** 2
+    Nc = (Nq - 1) / math.tan(phi)
+    Ng = 2 * (Nq + 1) * math.tan(phi)
+    return c * Nc + sigma0 * Nq + 0.5 * L["gamma"] * max(B, 0.3) * Ng
+
+
+def analyse(units, layers, zw=1e9, hw_above=0.0, dyn=1.0, nx=181, ny=181, margin=None):
+    """units: list dict(unit=<spec>, state, pose). Return dict ringkasan per lapisan + profil kedalaman di titik kritis."""
+    L = prep_layers(layers)
+    patches_all = []
+    for u in units:
+        patches_all += unit_patches(u["unit"], u["state"], u["pose"], dyn)
+    zt = L[-1]["z1"]
+    zs = np.linspace(0.05, zt, 160)
+    # titik kritis: cari di bidang denah pada kedalaman 0.5 m titik dgn tegangan maks
+    xs = np.array([c for p in patches_all for c in (p["center"][0],)])
+    ys = np.array([p["center"][1] for p in patches_all])
+    gx = np.linspace(xs.min() - 6, xs.max() + 6, 120)
+    gy = np.linspace(ys.min() - 6, ys.max() + 6, 120)
+    GXm, GYm = np.meshgrid(gx, gy, indexing="ij")
+    f0 = stress_field(patches_all, GXm, GYm, 0.3, L)
+    ic = np.unravel_index(int(np.argmax(f0)), f0.shape)
+    xc, yc = float(GXm[ic]), float(GYm[ic])
+    prof = stress_field(patches_all, xc, yc, zs, L)
+    z_i, sig_i, u_i, eff_i = initial_stress(L, zw, hw_above=hw_above)
+    rows = []
+    Bmin = min(min(p["size"]) for p in patches_all)
+    for l in L:
+        zt0, zb0, zm = l["z0"], l["z1"], 0.5 * (l["z0"] + l["z1"])
+        zz = np.array([max(zt0, 0.05), zm, max(zb0 - 1e-3, 0.06)])
+        d = stress_field(patches_all, xc, yc, zz, L)
+        # maksimum horizontal di tengah lapisan (cari pada grid denah)
+        fm = stress_field(patches_all, GXm, GYm, max(zm, 0.05), L)
+        dmax_mid = float(fm.max())
+        i_m = int(np.argmin(np.abs(z_i - zm)))
+        s0 = float(eff_i[i_m])
+        undrained = (l["phi"] < 0.5) or l["type"] in ("lumpur", "lempung")
+        B_eff = Bmin + 2 * max(zm, 0) * math.tan(math.radians(30))
+        qult = bearing_capacity(l, float(sig_i[i_m]) if undrained else max(s0, 0.0), B_eff)
+        total_load = float(dmax_mid) + float(sig_i[i_m])
+        fs = qult / max(total_load, 1e-6)
+        rows.append(dict(name=l["name"], type=l["type"], z0=zt0, z1=zb0, E=l["E"], c=l["c"], phi=l["phi"], d_top=float(d[0]), d_mid=dmax_mid, d_bot=float(d[2]),
+                         sigma_eff0=s0, ratio=dmax_mid / max(s0, 1e-6), undrained=undrained, du=dmax_mid if undrained else 0.0, qult=qult, fs=fs))
+    return dict(layers=L, patches=patches_all, rows=rows, z=zs, prof=prof, crit=(xc, yc), init=dict(z=z_i, sig=sig_i, u=u_i, eff=eff_i), peak_q=max(p["q"] for p in patches_all))
+
+
+# ---------------------------------------------------------------- bidang peta
+def plan_field(patches, layers, depth, bbox, n=161):
+    x1, x2, y1, y2 = bbox
+    gx = np.linspace(x1, x2, n)
+    gy = np.linspace(y1, y2, n)
+    GX, GY = np.meshgrid(gx, gy, indexing="ij")
+    return gx, gy, stress_field(patches, GX, GY, depth, layers)
+
+
+def section_field(patches, layers, axis, pos, lo, hi, zmax, nx=181, nz=110):
+    """Penampang vertikal: axis='x' -> garis sejajar sumbu X pada y=pos; axis='y' -> sejajar Y pada x=pos."""
+    g = np.linspace(lo, hi, nx)
+    zz = np.linspace(0.05, zmax, nz)
+    G, Z = np.meshgrid(g, zz, indexing="ij")
+    if axis == "x":
+        F = stress_field(patches, G, np.full_like(G, pos), Z, layers)
+    else:
+        F = stress_field(patches, np.full_like(G, pos), G, Z, layers)
+    return g, zz, F
+
+
+def interaction_curve(unit1, state1, unit2, state2, layers, depth, heading=90.0, spacings=None, dyn=1.0, axis_dir=(1.0, 0.0), n=0.25):
+    """Puncak delta sigma pada kedalaman 'depth' untuk 1 unit vs 2 unit sebagai fungsi jarak pusat-ke-pusat (searah axis_dir = sepanjang crest).
+    Return (spacings, peak_single1, peak_pair, peak_added_pct)."""
+    spacings = np.arange(2.0, 60.1, 1.0) if spacings is None else np.asarray(spacings, float)
+    L = prep_layers(layers)
+    p1 = unit_patches(unit1, state1, (0.0, 0.0, heading), dyn)
+    ext = max(max(p["size"]) for p in p1) + 20
+    gx = np.arange(-ext - spacings.max(), ext + spacings.max() + 1e-9, n * 2)
+    gy = np.arange(-ext, ext + 1e-9, n * 2)
+    GX, GY = np.meshgrid(gx, gy, indexing="ij")
+    f1 = stress_field(p1, GX, GY, depth, L)
+    base = float(f1.max())
+    pair, single2 = [], []
+    for s in spacings:
+        pose2 = (axis_dir[0] * s, axis_dir[1] * s, heading)
+        p2 = unit_patches(unit2, state2, pose2, dyn)
+        f2 = stress_field(p2, GX, GY, depth, L)
+        pair.append(float((f1 + f2).max()))
+        single2.append(float(f2.max()))
+    pair = np.array(pair)
+    ref = np.maximum(base, np.array(single2))
+    return spacings, base, pair, 100.0 * (pair / ref - 1.0)
+
+
+def rear_offset(unit, state):
+    """Jarak (m) dari pusat acuan unit ke as belakang / ujung belakang track (searah sumbu mundur)."""
+    if unit["kind"] == "truck":
+        fr = unit["front_loaded"] if state == "loaded" else unit["front_empty"]
+        return unit["wheelbase"] * fr + 0.5 * 0.6
+    return 0.5 * unit["track_len"]
+
+
+# ---------------------------------------------------------------- adegan 3D animasi (three.js)
+LAYER_COLORS = {"timbunan": "#b78b4a", "pasir": "#f2d675", "lumpur": "#6b442a", "lempung": "#7a8a6a", "batuan": "#8d8d8d"}
+LABELS_ID = dict(layer="Lapisan", unit="Unit", loaded="berisi", empty="kosong", work="bekerja", spacing="Jarak antar unit", b_reset="Reset", b_side="Samping", b_top="Atas",
+                 layers="Lapisan & tampilan", l_layers="Blok lapisan tanah", l_secA="Penampang ⟂ crest (di unit 1)", l_secB="Penampang ∥ crest (di as belakang)", l_radar="Radar tegangan di permukaan/kedalaman",
+                 l_water="Air", depth="Kedalaman radar", loop="Ulangi")
+
+
+def build_unit_scene_html(A, ulist, zw, template_html, three_inline=None, three_cdn=None, title="Beban Unit 3D", subtitle="", labels=None, delay=0.0, depth0=None):
+    """A = hasil analyse(); ulist = list dict(unit, state, pose=(x,y,hd), name). Return html mandiri."""
+    import json
+    Lp = A["layers"]
+    zt = Lp[-1]["z1"]
+    z_i, sig_i = A["init"]["z"], A["init"]["sig"]
+    layers = []
+    for l, r in zip(Lp, A["rows"]):
+        zm = 0.5 * (l["z0"] + l["z1"])
+        layers.append(dict(name=l["name"], h=l["h"], z0=l["z0"], z1=l["z1"], E=l["E"], color=LAYER_COLORS.get(l["type"], "#999"), eff0=float(r["sigma_eff0"]),
+                           qult=float(r["qult"]), sig0=float(np.interp(zm, z_i, sig_i)), undrained=bool(r["undrained"])))
+    units = []
+    for i, u in enumerate(ulist):
+        spec = u["unit"]
+        x, y, hd = u["pose"]
+        isT = spec["kind"] == "truck"
+        nm = u.get("name") or ("HD" if isT else "Unit")
+        hd_use = 90.0 if isT else 270.0
+
+        def loc(state):
+            ps = unit_patches(spec, state, (0.0, 0.0, 0.0), A.get("dyn", 1.0))
+            return [dict(u=p["center"][0], v=p["center"][1], L=p["size"][0], B=p["size"][1], q=p["q"]) for p in ps], sum(p["force"] for p in ps)
+        pe, We = loc("empty")
+        pl, Wl = loc("loaded") if isT else (None, We)
+        pat = pl or pe
+        rear = min(p["u"] for p in pat) if isT else -0.5 * max(p["L"] for p in pat)
+        units.append(dict(kind=("truck" if isT else ("dozer" if "Dozer" in nm else "excavator")), name=nm, x=float(x), ystop=float(y), yfar=float(y + 34.0), yrear=float(y + rear), rear_off=float(rear),
+                          hd=hd_use, state=u["state"] if isT else "empty", wid=float(spec.get("wid_m", 4.0)), wheel_r=1.65 if spec.get("tire_w", 0.69) < 0.8 else 1.9,
+                          patches_empty=pe, patches_loaded=pl, We=We, Wl=Wl, delay=float(delay if i == 1 else 0.0)))
+    xs = [u["x"] for u in units]
+    x0 = max(26.0, (max(xs) - min(xs)) / 2 + 24.0)
+    # geser agar pusat X = 0 (kamera/sumbu simetris)
+    cx = 0.5 * (max(xs) + min(xs))
+    for u in units:
+        u["x"] -= cx
+    payload = dict(layers=layers, zt=float(zt), units=units, x0=float(x0), zfar=float(max(u["yfar"] for u in units) + 8.0), slope_m=1.5, zw=float(zw), pmax=float(0.35 * A["peak_q"]),
+                   depth0=float(depth0 if depth0 is not None else 0.5 * min(Lp[0]["z1"], zt)), fill_color=LAYER_COLORS.get(Lp[0]["type"], "#b78b4a"), title=title, subtitle=subtitle,
+                   labels={**LABELS_ID, **(labels or {})}, three_cdn=three_cdn or [], t0=0.0)
+    js = json.dumps(payload, separators=(",", ":")).replace("</", "<\\/")
+    html = template_html.replace("/*__PAYLOAD__*/null", js).replace("/*__THREE_INLINE__*/", (three_inline or "").replace("</script", "<\\/script"))
+    return html
+'''
+
+_UNITLOAD_VIEWER_TEMPLATE = r'''<!doctype html>
+<html lang="id"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Beban Unit 3D</title>
+<style>
+:root{--bg:#0c1118;--panel:rgba(16,22,31,.88);--fg:#eaf0f6;--mut:#9fb1c4;--acc:#f2b61c;--bad:#ff6a5c;--ok:#5fd38d;--line:rgba(255,255,255,.14)}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:12.5px/1.35 system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;overflow:hidden}
+#wrap{position:relative;width:100%;height:100%;background:radial-gradient(ellipse at 50% 20%,#2a3a4d 0%,#0c1118 72%)}
+canvas#gl{display:block;width:100%;height:100%;outline:none;touch-action:none;cursor:grab}
+.panel{position:absolute;background:var(--panel);border:1px solid var(--line);border-radius:10px;-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+#hud{left:10px;top:10px;padding:8px 12px;width:min(360px,calc(100% - 20px));max-height:calc(100% - 90px);overflow:auto}
+#hud .ttl{font-weight:650;font-size:13.5px} #hud .sub{color:var(--mut);font-size:11.5px}
+#hud .tm{margin-top:5px} #hud .tm b{font-variant-numeric:tabular-nums;font-size:18px;color:#ffe08a}
+#hud table{width:100%;border-collapse:collapse;margin-top:6px;font-variant-numeric:tabular-nums;font-size:11.5px}
+#hud th{color:var(--mut);font-weight:500;text-align:right;padding:1px 3px} #hud th:first-child,#hud td:first-child{text-align:left}
+#hud td{padding:2px 3px;text-align:right;border-top:1px solid var(--line)}
+.ok{color:var(--ok)} .wa{color:#ffd166} .bd{color:var(--bad);font-weight:700}
+#hud .un{margin-top:6px;color:var(--mut)} #hud .un b{color:var(--fg);font-weight:600}
+#lgd{margin-top:7px;height:10px;border-radius:5px;border:1px solid var(--line)} #lgt{display:flex;justify-content:space-between;color:var(--mut);font-size:10.5px}
+#side{right:10px;top:10px;width:228px;max-height:calc(100% - 84px);overflow:auto;padding:6px 10px 8px}
+#side summary{cursor:pointer;font-weight:600;padding:3px 0;outline:none}
+#side label.row{display:flex;align-items:center;gap:7px;margin:3px 0;cursor:pointer;user-select:none}
+#side .sl{margin:6px 0 2px} #side .sl span{display:flex;justify-content:space-between;color:var(--mut);font-size:11.5px} #side input[type=range]{width:100%;margin:1px 0}
+.tb{position:absolute;right:250px;top:10px;display:flex;gap:5px}
+button{background:rgba(255,255,255,.08);color:var(--fg);border:1px solid var(--line);border-radius:7px;padding:4px 9px;cursor:pointer;font:inherit}
+button:hover{background:rgba(242,182,28,.3)}
+#bar{left:10px;right:10px;bottom:10px;padding:7px 10px;display:flex;gap:9px;align-items:center}
+#bar #play{min-width:34px;font-size:14px} #bar input[type=range]{flex:1;min-width:80px}
+#bar select{background:rgba(255,255,255,.08);color:var(--fg);border:1px solid var(--line);border-radius:7px;padding:3px 4px;font:inherit} #bar select option{color:#000}
+#bar .lp{display:flex;align-items:center;gap:4px;color:var(--mut);user-select:none}
+#err{position:absolute;inset:0;display:none;align-items:center;justify-content:center;text-align:center;padding:24px;background:rgba(8,12,18,.94);z-index:9;font-size:14px}
+@media (max-width:700px){#side{width:170px}.tb{right:190px}}
+</style></head>
+<body>
+<div id="wrap">
+  <canvas id="gl" tabindex="0"></canvas>
+  <div id="hud" class="panel"><div class="ttl" id="hT"></div><div class="sub" id="hS"></div><div class="tm"><b id="hTm">0 s</b> <span id="hPh"></span></div>
+    <div class="un" id="hUn"></div><table id="hTab"></table><div id="lgd"></div><div id="lgt"></div></div>
+  <div class="tb"><button id="bReset"></button><button id="bSide"></button><button id="bTop"></button><button id="bShot"></button></div>
+  <div id="side" class="panel"><details open><summary id="sL"></summary><div id="lay"></div></details></div>
+  <div id="bar" class="panel"><button id="play">▶</button><input type="range" id="tl" min="0" max="1000" value="0"><select id="spd"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select><label class="lp"><input type="checkbox" id="loop" checked><span id="loopT"></span></label></div>
+  <div id="err"><div id="errT"></div></div>
+</div>
+<script>/*__THREE_INLINE__*/</script>
+<script>window.__UL__ = /*__PAYLOAD__*/null;</script>
+<script>
+(function(){
+"use strict";
+var P = window.__UL__, L = P.labels;
+function $(id){return document.getElementById(id);}
+function showErr(m){var e=$('err');e.style.display='flex';$('errT').innerHTML=m;}
+function loadThree(cb){ if (window.THREE) return cb(); var urls=P.three_cdn||[], i=0; (function next(){ if(i>=urls.length){showErr('three.js tidak dapat dimuat');return;} var s=document.createElement('script'); s.src=urls[i++]; s.onload=function(){ if(window.THREE) cb(); else next(); }; s.onerror=next; document.head.appendChild(s); })(); }
+function f1(v,d){ return (isFinite(v)?v:0).toFixed(d===undefined?1:d); }
+function start(){
+try{
+var T=THREE, LY=P.layers, ZT=P.zt, UN=P.units, X0=P.x0, ZF=P.zfar, SM=P.slope_m, H1=LY[0].h;
+var canvas=$('gl'), renderer=new T.WebGLRenderer({canvas:canvas, antialias:true, preserveDrawingBuffer:true}); renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,2));
+var scene=new T.Scene(); scene.background=null; renderer.setClearColor(0x0c1118,0);
+var cam=new T.PerspectiveCamera(45,1,0.1,2000);
+scene.add(new T.HemisphereLight(0xdfe9f5,0x445060,0.9)); var dl=new T.DirectionalLight(0xffffff,0.8); dl.position.set(30,60,-25); scene.add(dl);
+var world=new T.Group(); scene.add(world);
+
+// ---------- geometri lapisan (X sepanjang crest, Z tegak lurus crest, Y = elevasi)
+var Zmin=-(H1*SM+30), Zmax=ZF;
+function slab(pts, color, op){ // pts di bidang (Z,E); ekstrusi sepanjang X
+  pts=pts.map(function(p){ return [-p[0],p[1]]; });   // rotateY(+90°) memetakan x bentuk -> -Z dunia
+  var sh=new T.Shape(); sh.moveTo(pts[0][0],pts[0][1]); for(var i=1;i<pts.length;i++) sh.lineTo(pts[i][0],pts[i][1]);
+  var g=new T.ExtrudeGeometry(sh,{depth:2*X0,bevelEnabled:false});
+  g.translate(0,0,-X0); g.rotateY(Math.PI/2);        // (x,y,z)->( z, y, -x ) : bentuk (Z,E) tetap, ekstrusi sepanjang X
+  var m=new T.Mesh(g,new T.MeshLambertMaterial({color:color,transparent:op<1,opacity:op,side:T.DoubleSide,depthWrite:op>=1}));
+  var e=new T.LineSegments(new T.EdgesGeometry(g),new T.LineBasicMaterial({color:0xffffff,transparent:true,opacity:0.25})); m.add(e); return m; }
+var layMeshes=[];
+LY.forEach(function(l,k){
+  var pts;
+  if (k===0) pts=[[-(l.h*SM),-l.h],[0,0],[Zmax,0],[Zmax,-l.h]];
+  else pts=[[Zmin,-l.z0],[Zmax,-l.z0],[Zmax,-l.z1],[Zmin,-l.z1]];
+  var m=slab(pts,l.color,0.28); m.renderOrder=1; world.add(m); layMeshes.push(m);
+});
+// air di depan lereng
+var wl=Math.min(-P.zw,0); var water=null;
+if (P.zw<H1){ var wy=Math.min(-P.zw,-0.02); water=new T.Mesh(new T.PlaneGeometry(2*X0, Math.abs(Zmin)),new T.MeshLambertMaterial({color:0x2f9bdb,transparent:true,opacity:0.45,side:T.DoubleSide,depthWrite:false}));
+  water.rotation.x=-Math.PI/2; water.position.set(0,wy,Zmin/2); world.add(water); }
+// tepi crest
+var edge=new T.Mesh(new T.BoxGeometry(2*X0,0.12,0.25),new T.MeshBasicMaterial({color:0xff4d4d})); edge.position.set(0,0.08,0); world.add(edge);
+// ---------- tekstur tegangan
+function turbo(t){ t=Math.min(Math.max(t,0),1); var r=34.61+t*(1172.33-t*(10793.56-t*(33300.12-t*(38394.49-t*14825.05)))), g=23.31+t*(557.33+t*(1225.33-t*(3574.96-t*(1073.77+t*707.56)))), b=27.2+t*(3211.1-t*(15327.97-t*(27814-t*(22569.18-t*6838.66)))); return [Math.min(255,Math.max(0,r)),Math.min(255,Math.max(0,g)),Math.min(255,Math.max(0,b))]; }
+var PMAX=P.pmax;
+function cmap(v){ var t=Math.pow(Math.min(v/PMAX,1),0.4); return turbo(0.08+0.9*t); }
+function mkTex(nx,ny){ var d=new Uint8Array(nx*ny*4); var t=new T.DataTexture(d,nx,ny,T.RGBAFormat); t.magFilter=T.LinearFilter; t.minFilter=T.LinearFilter; t.needsUpdate=true; return t; }
+function eqDepth(zs){ // kedalaman ekuivalen Odemark; modulus acuan = terlunak dari permukaan s.d. lapisan
+  var out=new Float32Array(zs.length);
+  for (var i=0;i<zs.length;i++){ var z=zs[i], k=LY.length-1; for (var j=0;j<LY.length;j++){ if (z<LY[j].z1){k=j;break;} }
+    var En=1e9; for (var j2=0;j2<=k;j2++) En=Math.min(En,LY[j2].E); var acc=0; for (var j3=0;j3<k;j3++) acc+=LY[j3].h*0.9*Math.pow(LY[j3].E/En,1/3);
+    out[i]=Math.max(acc+(z-LY[k].z0)*Math.pow(LY[k].E/En,1/3),0.02); }
+  return out; }
+function cI(a,b,z){ var s=((a<0)?-1:1)*((b<0)?-1:1); a=Math.abs(a); b=Math.abs(b); var m=a/z,n=b/z,m2=m*m,n2=n*n,r=Math.sqrt(m2+n2+1);
+  return s*((2*m*n*r/(m2+n2+m2*n2+1))*((m2+n2+2)/(m2+n2+1))+Math.atan2(2*m*n*r,m2+n2-m2*n2+1))/(4*Math.PI); }
+var PT=[];   // patch dunia aktif: {cx,cz,c,s,L,B,q}
+function sig(X,Z,ze){ var tot=0; for (var i=0;i<PT.length;i++){ var p=PT[i], dx=X-p.cx, dz=Z-p.cz; if (dx*dx+dz*dz>6400) continue;
+    var U=dx*p.c+dz*p.s, V=-dx*p.s+dz*p.c, hl=p.L/2, hb=p.B/2;
+    tot+=p.q*(cI(hl-U,hb-V,ze)-cI(-hl-U,hb-V,ze)-cI(hl-U,-hb-V,ze)+cI(-hl-U,-hb-V,ze)); } return tot; }
+// bidang A: tegak lurus crest di X unit 1 ; B: sejajar crest di Z as belakang unit 1 ; C: denah
+var NA=[84,44], NB=[84,44], NC=[88,88];
+var zsRows=function(n){ var a=new Float32Array(n); for (var j=0;j<n;j++) a[j]=0.05+(ZT-0.05)*(n-1-j)/(n-1); return a; };   // baris 0 = dasar bidang (dalam)
+var zeA=eqDepth(zsRows(NA[1])), zeB=eqDepth(zsRows(NB[1]));
+var texA=mkTex(NA[0],NA[1]), texB=mkTex(NB[0],NB[1]), texC=mkTex(NC[0],NC[1]);
+var maxStop=Math.max.apply(null,UN.map(function(u){return u.ystop;})), xsp=Math.max.apply(null,UN.map(function(u){return Math.abs(u.x);}));
+var ZA0=-(H1*SM+14), ZA1=maxStop+16, ZAc=(ZA0+ZA1)/2, WA=ZA1-ZA0, WB=2*(xsp+14), WC=WB, HC=ZA1;
+var plA=new T.Mesh(new T.PlaneGeometry(WA,ZT),new T.MeshBasicMaterial({map:texA,transparent:true,opacity:1,side:T.DoubleSide})); plA.geometry.rotateY(Math.PI/2); plA.position.set(UN[0].x,-ZT/2,ZAc); plA.renderOrder=3; world.add(plA);
+var plB=new T.Mesh(new T.PlaneGeometry(WB,ZT),new T.MeshBasicMaterial({map:texB,transparent:true,opacity:1,side:T.DoubleSide})); plB.position.set(0,-ZT/2,UN[0].yrear); plB.renderOrder=4; world.add(plB);
+var plC=new T.Mesh(new T.PlaneGeometry(WC,HC),new T.MeshBasicMaterial({map:texC,transparent:true,opacity:0.85,side:T.DoubleSide,depthWrite:false})); plC.geometry.rotateX(-Math.PI/2); plC.position.set(0,0.04,HC/2); plC.renderOrder=5; world.add(plC);
+// garis batas lapisan di bidang A & B
+function lineH(w,y,col){ var g=new T.BufferGeometry().setFromPoints([new T.Vector3(-w/2,0,0),new T.Vector3(w/2,0,0)]); return new T.Line(g,new T.LineBasicMaterial({color:col,transparent:true,opacity:0.8})); }
+var bndA=new T.Group(), bndB=new T.Group();
+LY.forEach(function(l){ var a=lineH(WA,0,0xffffff); a.rotation.y=Math.PI/2; a.position.set(UN[0].x+0.02,-l.z1,ZAc); bndA.add(a); var b=lineH(WB,0,0xffffff); b.position.set(0,-l.z1,UN[0].yrear+0.02); bndB.add(b); });
+world.add(bndA); world.add(bndB);
+var dsl=P.depth0;
+
+// ---------- model unit
+function box(w,h,d,col,x,y,z){ var m=new T.Mesh(new T.BoxGeometry(w,h,d),new T.MeshLambertMaterial({color:col})); m.position.set(x,y,z); return m; }
+function cyl(r,w,col,x,y,z){ var m=new T.Mesh(new T.CylinderGeometry(r,r,w,20),new T.MeshLambertMaterial({color:col})); m.rotation.x=Math.PI/2; m.position.set(x,y,z); return m; }
+// ===== UNITS3D: model 3D unit tambang yang lebih realistis (HD artikulasi, dozer, excavator) =====
+// Konvensi: sumbu +x = depan unit, +y = atas, z = lebar; y=0 = permukaan tanah. Satuan meter.
+var UNITS3D = (function(T){
+  function mat(c, o){ o = o || {}; return new T.MeshPhongMaterial({color:c, specular:(o.sp===undefined?0x2a2a2a:o.sp), shininess:(o.sh||36), transparent:!!o.tr, opacity:(o.op===undefined?1:o.op), emissive:(o.em||0x000000)}); }
+  var M = {};
+  function mats(col){
+    return { body:mat(col), body2:mat(new T.Color(col).multiplyScalar(0.78).getHex()), dark:mat(0x2a2d31,{sp:0x111111,sh:12}), steel:mat(0x7b8289,{sh:60,sp:0x555555}),
+      rubber:mat(0x151618,{sp:0x050505,sh:6}), glass:mat(0x20384a,{sp:0xaad4ff,sh:90,tr:true,op:0.82}), lamp:mat(0xfff3c4,{em:0xffe9a0}), red:mat(0xb3261e,{em:0x300808}), hub:mat(0x9aa1a8,{sh:50}), grille:mat(0x1b1d20,{sh:8}) };
+  }
+  function box(w,h,d,m,x,y,z){ var b = new T.Mesh(new T.BoxGeometry(w,h,d), m); b.position.set(x||0,y||0,z||0); return b; }
+  function cyl(r,len,m,x,y,z,seg){ var g = new T.CylinderGeometry(r,r,len,seg||18); g.rotateX(Math.PI/2); var c = new T.Mesh(g,m); c.position.set(x||0,y||0,z||0); return c; }   // sumbu sepanjang z
+  function extrude(pts, depth, m, x, y, z){ var sh = new T.Shape(); sh.moveTo(pts[0][0],pts[0][1]); for (var i=1;i<pts.length;i++) sh.lineTo(pts[i][0],pts[i][1]); sh.closePath();
+    var g = new T.ExtrudeGeometry(sh,{depth:depth,bevelEnabled:false}); g.translate(0,0,-depth/2); var me = new T.Mesh(g,m); me.position.set(x||0,y||0,z||0); return me; }
+  function hull(P){ P = P.slice().sort(function(a,b){ return a[0]-b[0] || a[1]-b[1]; }); function cr(o,a,b){ return (a[0]-o[0])*(b[1]-o[1])-(a[1]-o[1])*(b[0]-o[0]); }
+    var lo = [], up = [], i; for (i=0;i<P.length;i++){ while (lo.length>=2 && cr(lo[lo.length-2],lo[lo.length-1],P[i])<=0) lo.pop(); lo.push(P[i]); }
+    for (i=P.length-1;i>=0;i--){ while (up.length>=2 && cr(up[up.length-2],up[up.length-1],P[i])<=0) up.pop(); up.push(P[i]); } up.pop(); lo.pop(); return lo.concat(up); }
+  function circPts(cx,cy,r,n){ var o=[]; for (var i=0;i<n;i++){ var a=i/n*Math.PI*2; o.push([cx+r*Math.cos(a), cy+r*Math.sin(a)]); } return o; }
+  // jalur track (hull dari beberapa lingkaran roda) -> rangka + grouser + roda; circles=[[cx,cy,r],...]
+  function trackAssembly(circles, tw, S, grouserEvery){
+    var g = new T.Group(), P = []; circles.forEach(function(c){ P = P.concat(circPts(c[0],c[1],c[2],20)); });
+    var H = hull(P); g.add(extrude(H, tw, S.rubber, 0,0,0));
+    // grouser sepanjang keliling
+    var per = [], tot = 0, i; for (i=0;i<H.length;i++){ var a=H[i], b=H[(i+1)%H.length], l=Math.hypot(b[0]-a[0], b[1]-a[1]); per.push({a:a,b:b,l:l,s:tot}); tot += l; }
+    var step = grouserEvery || 0.34, n = Math.max(12, Math.round(tot/step)), gm = new T.BoxGeometry(0.11, 0.07, tw*1.04), inst = new T.InstancedMesh(gm, S.dark, n), q = new T.Matrix4(), e = new T.Euler(), p = new T.Vector3(), sc = new T.Vector3(1,1,1), qq = new T.Quaternion();
+    for (i=0;i<n;i++){ var s = (i+0.5)/n*tot, k = 0; while (k<per.length-1 && per[k].s+per[k].l < s) k++; var sg = per[k], u = (s-sg.s)/sg.l, ang = Math.atan2(sg.b[1]-sg.a[1], sg.b[0]-sg.a[0]);
+      p.set(sg.a[0]+(sg.b[0]-sg.a[0])*u, sg.a[1]+(sg.b[1]-sg.a[1])*u, 0); e.set(0,0,ang); qq.setFromEuler(e); q.compose(p,qq,sc); inst.setMatrixAt(i,q); }
+    g.add(inst);
+    // roda & sprocket tampak di sisi luar
+    circles.forEach(function(c, k){ var w = cyl(c[2]*0.82, 0.05, S.steel, c[0], c[1], tw/2+0.03, 14); g.add(w); var w2 = cyl(c[2]*0.82, 0.05, S.steel, c[0], c[1], -tw/2-0.03, 14); g.add(w2); });
+    return g;
+  }
+  function link(m, A, B){ var dx = B[0]-A[0], dy = B[1]-A[1]; m.position.set(A[0],A[1],A[2]===undefined?m.position.z:A[2]); m.rotation.z = Math.atan2(dy,dx); m.scale.set(Math.hypot(dx,dy),1,1); }
+  function cylUnit(r, m, z){ var g = new T.CylinderGeometry(r,r,1,12); g.rotateZ(-Math.PI/2); g.translate(0.5,0,0); var c = new T.Mesh(g,m); c.position.z = z||0; return c; }   // panjang 1 sepanjang +x
+
+  // =========================================================== HD (Cat 777 / HD785 / 785 style)
+  M.makeHD = function(o){
+    var L=o.L, W=o.W, H=o.H, S = mats(o.color||0xf2b61c), G = new T.Group(), out = {group:G, wheels:[], L:L, W:W, H:H};
+    var r = H*0.335, tw = W*0.115, ax1 = L*0.27, ax2 = L*0.735;
+    // rangka & poros
+    G.add(box(L*0.86, H*0.085, W*0.40, S.dark, L*0.49, H*0.27, 0));
+    G.add(box(L*0.12, H*0.12, W*0.36, S.dark, L*0.03, H*0.30, 0));
+    G.add(cyl(H*0.06, W*0.80, S.dark, ax1, r, 0, 12)); G.add(cyl(H*0.045, W*0.80, S.dark, ax2, r, 0, 12));
+    // ban (dual belakang, tunggal depan) dengan tapak
+    function tyre(x, z){
+      var wg = new T.Group(); wg.position.set(x, r, z);
+      wg.add(cyl(r*0.99, tw*0.78, S.rubber, 0,0,0, 28));
+      wg.add(cyl(r*0.86, tw, S.rubber, 0,0,0, 28));
+      var lug = new T.BoxGeometry(r*0.18, r*0.12, tw*0.96), im = new T.InstancedMesh(lug, S.rubber, 24), m4 = new T.Matrix4(), qq = new T.Quaternion(), e = new T.Euler(), p = new T.Vector3(), sc = new T.Vector3(1,1,1);
+      for (var i=0;i<24;i++){ var a = i/24*Math.PI*2; p.set(Math.cos(a)*r*1.0, Math.sin(a)*r*1.0, 0); e.set(0,0,a+Math.PI/2); qq.setFromEuler(e); m4.compose(p,qq,sc); im.setMatrixAt(i,m4); }
+      wg.add(im);
+      wg.add(cyl(r*0.52, tw*1.04, S.hub, 0,0,0, 20)); wg.add(cyl(r*0.22, tw*1.1, S.dark, 0,0,0, 12));
+      for (var k=0;k<8;k++){ var bolt = box(r*0.07, r*0.07, 0.02, S.dark, Math.cos(k/8*6.283)*r*0.36, Math.sin(k/8*6.283)*r*0.36, tw*0.54); wg.add(bolt); }
+      G.add(wg); out.wheels.push(wg); }
+    [-1,1].forEach(function(s){ tyre(ax1, s*W*0.405); tyre(ax1, s*W*0.29); tyre(ax2, s*W*0.405); });
+    // bumper, grille, lampu, kap mesin
+    G.add(box(L*0.03, H*0.07, W*0.56, S.dark, L*0.995, H*0.15, 0));
+    G.add(box(L*0.16, H*0.19, W*0.36, S.body, L*0.905, H*0.45, 0));              // kap mesin
+    G.add(box(L*0.02, H*0.17, W*0.30, S.grille, L*0.987, H*0.45, 0));
+    for (var gi=0; gi<5; gi++) G.add(box(L*0.012, H*0.012, W*0.31, S.steel, L*0.995, H*0.38+gi*H*0.04, 0));
+    [-1,1].forEach(function(s){ G.add(box(L*0.015, H*0.035, W*0.07, S.lamp, L*0.99, H*0.54, s*W*0.13)); G.add(box(L*0.015, H*0.03, W*0.035, S.lamp, L*0.992, H*0.33, s*W*0.2)); });
+    // dek + pagar
+    G.add(box(L*0.2, H*0.02, W*0.62, S.dark, L*0.80, H*0.37, 0));
+    // kabin (kiri/-z)
+    var cx = L*0.80, cz = -W*0.27;
+    G.add(box(L*0.14, H*0.27, W*0.17, S.body, cx, H*0.52, cz));
+    G.add(box(L*0.003, H*0.17, W*0.14, S.glass, cx+L*0.0715, H*0.56, cz));        // kaca depan
+    G.add(box(L*0.11, H*0.15, W*0.003, S.glass, cx, H*0.56, cz-W*0.0865));          // kaca samping luar
+    G.add(box(L*0.11, H*0.15, W*0.003, S.glass, cx, H*0.56, cz+W*0.0865));
+    G.add(box(L*0.16, H*0.018, W*0.2, S.body2, cx, H*0.665, cz));                   // atap kabin
+    // tangga + pegangan
+    var lx = L*0.915, lz = -W*0.40;
+    [-1,1].forEach(function(s){ G.add(box(L*0.006, H*0.34, L*0.006, S.steel, lx+s*L*0.014, H*0.19, lz)); });
+    for (var ri=0; ri<5; ri++) G.add(box(L*0.03, H*0.01, W*0.012, S.steel, lx, H*0.06+ri*H*0.055, lz));
+    G.add(box(L*0.2, H*0.012, W*0.012, S.steel, L*0.80, H*0.43, -W*0.33)); G.add(box(L*0.2, H*0.012, W*0.012, S.steel, L*0.80, H*0.40, -W*0.33));
+    // tangki (kanan), knalpot
+    G.add(box(L*0.14, H*0.18, W*0.075, S.body2, L*0.60, H*0.40, W*0.31));
+    G.add(cyl(H*0.012, H*0.34, S.dark, L*0.85, H*0.55, W*0.12, 8).rotateX(Math.PI/2));
+    // bak (pivot di belakang) --------------------------------------------------------------
+    var pv = new T.Group(); pv.position.set(L*0.04, H*0.345, 0); G.add(pv); out.bed = pv;
+    var bl = L*0.64, bh = H*0.43, bw = W*0.80;
+    pv.add(extrude([[0,H*0.01],[bl*0.08,-bh*0.04],[bl*0.62,-bh*0.04],[bl*0.96,bh*0.34],[bl*1.0,bh*0.98],[0,bh*0.86]], bw, S.body, 0,0,0));
+    // rusuk samping
+    for (var k=1;k<=6;k++){ var xx = bl*(0.1+0.16*k), hh = bh*(0.9 + 0.1*(xx/bl)); [-1,1].forEach(function(s){ pv.add(box(L*0.012, hh*0.78, W*0.012, S.body2, xx, hh*0.46, s*(bw/2+W*0.005))); }); }
+    [-1,1].forEach(function(s){ pv.add(box(bl*1.0, bh*0.07, W*0.03, S.body2, bl*0.5, bh*0.93, s*(bw/2))); });   // rel atas
+    pv.add(box(L*0.012, bh*0.95, bw*1.0, S.body2, bl*0.02, bh*0.46, 0));                                     // pintu belakang
+    // kanopi
+    pv.add(extrude([[bl*0.86,bh*1.0],[bl*1.26,bh*1.02-H*0.02],[bl*1.26,bh*1.0-H*0.02],[bl*0.86,bh*0.90]], bw*0.93, S.body2, 0,0,0));
+    // muatan (origin di lantai, di-scale oleh viewer)
+    var ld = extrude([[bl*0.06,0],[bl*0.62,0],[bl*0.93,bh*0.32],[bl*0.93,bh*0.8],[bl*0.7,bh*1.18],[bl*0.4,bh*1.28],[bl*0.12,bh*1.02],[bl*0.06,bh*0.6]], bw*0.9, new T.MeshLambertMaterial({color:o.loadColor||0x7a6a55}), 0, -bh*0.03, 0);
+    pv.add(ld); out.load = ld; out.loadBase = -bh*0.03; out.bedLen = bl; out.bedH = bh; out.bedW = bw;
+    // silinder hoist (2)
+    out.hoist = []; [-1,1].forEach(function(s){ var c = cylUnit(H*0.028, S.steel, s*W*0.2); G.add(c); out.hoist.push(c); var c2 = cylUnit(H*0.04, S.dark, s*W*0.2); G.add(c2); out.hoist.push(c2); });
+    out.hoistA = [L*0.24, H*0.30]; out.hoistB = [bl*0.34, -bh*0.02];
+    out.setBed = function(ang){ pv.rotation.z = ang; var ca = Math.cos(ang), sa = Math.sin(ang), bx = pv.position.x + out.hoistB[0]*ca - out.hoistB[1]*sa, by = pv.position.y + out.hoistB[0]*sa + out.hoistB[1]*ca;
+      for (var i=0;i<out.hoist.length;i+=2){ var t = (i===0)?1:0; link(out.hoist[i], out.hoistA, [bx,by]); out.hoist[i].position.z = out.hoist[i].position.z; var Lx = Math.hypot(bx-out.hoistA[0], by-out.hoistA[1]); out.hoist[i].scale.x = Lx; out.hoist[i+1].position.copy(out.hoist[i].position); out.hoist[i+1].rotation.z = out.hoist[i].rotation.z; out.hoist[i+1].scale.x = Lx*0.55; } };
+    out.setSpin = function(a){ out.wheels.forEach(function(w){ w.rotation.z = -a; }); };
+    out.wheelR = r; out.setBed(0);
+    return out;
+  };
+
+  // =========================================================== DOZER (Cat D8 / D6 style)
+  M.makeDozer = function(o){
+    var L=o.L, W=o.W, H=o.H, S = mats(o.color||0xf2b61c), G = new T.Group(), out = {group:G, L:L, W:W, H:H};
+    var tw = W*0.17, tz = W*0.40, rr = H*0.17;
+    [-1,1].forEach(function(s){
+      var tr = trackAssembly([[ L*0.50, rr, rr ],[ -L*0.10, rr, rr*0.9 ],[ -L*0.44, rr*2.05, rr*1.15 ]], tw, S, 0.34); tr.position.z = s*tz; G.add(tr);
+      G.add(box(L*1.0, H*0.025, tw*1.25, S.body2, L*0.02, H*0.50, s*tz));            // fender
+    });
+    // badan
+    G.add(box(L*0.50, H*0.20, W*0.46, S.dark, -L*0.02, H*0.33, 0));
+    G.add(extrude([[ -L*0.06,H*0.43],[ L*0.46,H*0.43],[ L*0.46,H*0.58],[ L*0.20,H*0.69],[ -L*0.06,H*0.69]], W*0.44, S.body, 0,0,0));  // kap mesin
+    G.add(box(L*0.015, H*0.14, W*0.30, S.grille, L*0.465, H*0.52, 0));
+    for (var i=0;i<4;i++) G.add(box(L*0.012, H*0.01, W*0.31, S.steel, L*0.47, H*0.47+i*H*0.035, 0));
+    [-1,1].forEach(function(s){ G.add(box(L*0.015, H*0.03, W*0.05, S.lamp, L*0.46, H*0.64, s*W*0.14)); });
+    // kabin + ROPS
+    var cx = -L*0.26;
+    G.add(box(L*0.30, H*0.28, W*0.40, S.body, cx, H*0.66+H*0.0, 0));
+    G.add(box(L*0.003, H*0.22, W*0.36, S.glass, cx+L*0.1515, H*0.70, 0));
+    G.add(box(L*0.26, H*0.22, W*0.003, S.glass, cx, H*0.70, -W*0.201)); G.add(box(L*0.26, H*0.22, W*0.003, S.glass, cx, H*0.70, W*0.201));
+    G.add(box(L*0.003, H*0.22, W*0.36, S.glass, cx-L*0.1515, H*0.70, 0));
+    G.add(box(L*0.38, H*0.03, W*0.5, S.body2, cx, H*0.985, 0));
+    [[-1,-1],[-1,1],[1,-1],[1,1]].forEach(function(p){ G.add(box(L*0.018, H*0.32, L*0.018, S.dark, cx+p[0]*L*0.17, H*0.82, p[1]*W*0.21)); });
+    G.add(cyl(H*0.02, H*0.30, S.dark, L*0.22, H*0.83, -W*0.12, 8).rotateX(Math.PI/2));   // knalpot
+    // ripper (belakang)
+    var rip = new T.Group(); rip.position.set(-L*0.60, H*0.34, 0); G.add(rip); out.ripper = rip;
+    rip.add(box(L*0.07, H*0.12, W*0.62, S.dark, -L*0.02, 0, 0)); [-1,0,1].forEach(function(s){ rip.add(box(L*0.025, H*0.34, L*0.03, S.steel, -L*0.03, -H*0.16, s*W*0.2)); rip.add(box(L*0.04, H*0.05, L*0.035, S.dark, -L*0.015, -H*0.35, s*W*0.2)); });
+    // push-arm + blade (pivot di samping badan)
+    var arm = new T.Group(); arm.position.set(-L*0.02, H*0.30, 0); G.add(arm); out.arm = arm;
+    var armLen = L*0.76, bladeX = armLen + L*0.07, Wb = W*1.22, Hb = H*0.56;
+    [-1,1].forEach(function(s){ arm.add(box(armLen, H*0.07, W*0.045, S.body, armLen*0.5, 0, s*W*0.505)); });
+    arm.add(box(L*0.06, H*0.10, W*0.95, S.body2, armLen*0.05, 0, 0));
+    var bl = new T.Group(); bl.position.set(bladeX, 0, 0); arm.add(bl); out.blade = bl;
+    var arc = [], N = 7, R = Hb*1.25; for (var j=0;j<=N;j++){ var a = -0.1+1.0*j/N; arc.push([ R*(1-Math.cos(a))*0.9, -Hb*0.34 + R*Math.sin(a)*0.95 ]); }   // profil cembung ke depan
+    var pts = []; arc.forEach(function(p){ pts.push([p[0]+L*0.0, p[1]]); }); arc.slice().reverse().forEach(function(p){ pts.push([p[0]-L*0.018, p[1]]); });
+    bl.add(extrude(pts, Wb, S.body, 0, 0, 0));
+    bl.add(box(L*0.03, Hb*0.06, Wb*1.0, S.steel, L*0.0, -Hb*0.34, 0));          // cutting edge
+    bl.add(box(L*0.03, Hb*0.05, Wb*1.0, S.steel, R*(1-Math.cos(0.9))*0.9, -Hb*0.34 + R*Math.sin(0.9)*0.95, 0));
+    [-1,1].forEach(function(s){ bl.add(extrude([[ -L*0.02,-Hb*0.34],[ L*0.09,-Hb*0.34],[ L*0.09,Hb*0.2],[ -L*0.02,Hb*0.6]], W*0.03, S.body2, 0,0,s*Wb/2)); });
+    // silinder angkat blade
+    var hc = cylUnit(H*0.028, S.steel, W*0.28), hc2 = cylUnit(H*0.028, S.steel, -W*0.28); G.add(hc); G.add(hc2); out.lift = [hc,hc2];
+    out.setBlade = function(a){ arm.rotation.z = a; var ca=Math.cos(a), sa=Math.sin(a), B=[arm.position.x + armLen*0.7*ca, arm.position.y + armLen*0.7*sa + H*0.05]; link(hc,[L*0.36, H*0.52],B); link(hc2,[L*0.36,H*0.52],B); hc.position.z = W*0.28; hc2.position.z = -W*0.28; };
+    out.bladeW = Wb; out.bladeH = Hb; out.bladeX = bladeX; out.setBlade(0);
+    return out;
+  };
+
+  // =========================================================== EXCAVATOR (Cat 349 / PC450 style)
+  M.makeExcavator = function(o){
+    var L=o.L, W=o.W, H=o.H, S = mats(o.color||0xf2b61c), G = new T.Group(), out = {group:G, L:L, W:W, H:H};
+    var tw = W*0.19, tz = W*0.40, rr = H*0.14;
+    [-1,1].forEach(function(s){ var tr = trackAssembly([[ L*0.46, rr, rr ],[ -L*0.46, rr, rr ],[ -L*0.10, rr*0.95, rr*0.8 ],[ L*0.10, rr*0.95, rr*0.8 ]], tw, S, 0.36); tr.position.z = s*tz; G.add(tr); });
+    G.add(box(L*0.62, H*0.13, W*0.62, S.dark, 0, H*0.20, 0));                                      // carbody
+    G.add(cyl(L*0.26, H*0.07, S.steel, 0, H*0.29, 0, 24).rotateX(Math.PI/2));
+    var hs = new T.Group(); hs.position.set(0, H*0.31, 0); G.add(hs); out.house = hs;
+    // dek + counterweight
+    hs.add(box(L*0.86, H*0.05, W*0.86, S.body2, -L*0.08, H*0.03, 0));
+    hs.add(extrude([[ -L*0.50,0],[ -L*0.50,H*0.46],[ -L*0.42,H*0.50],[ -L*0.22,H*0.44],[ -L*0.22,0]], W*0.80, S.dark, 0,0,0));
+    hs.add(box(L*0.003, H*0.30, W*0.78, S.body2, -L*0.505, H*0.24, 0));
+    // kap mesin + grille
+    hs.add(box(L*0.28, H*0.30, W*0.74, S.body, -L*0.30+L*0.14-L*0.14, H*0.20, 0).translateX(-L*0.06));
+    for (var i=0;i<5;i++) hs.add(box(L*0.2, H*0.012, W*0.002, S.dark, -L*0.17, H*0.12+i*H*0.045, W*0.371));
+    hs.add(box(L*0.12, H*0.06, W*0.74, S.body2, -L*0.06, H*0.37, 0));
+    // kabin kiri depan
+    hs.add(box(L*0.24, H*0.50, W*0.30, S.body, L*0.20, H*0.30, -W*0.28));
+    hs.add(box(L*0.003, H*0.40, W*0.27, S.glass, L*0.322, H*0.34, -W*0.28));
+    hs.add(box(L*0.20, H*0.38, W*0.003, S.glass, L*0.2, H*0.34, -W*0.43)); hs.add(box(L*0.20, H*0.38, W*0.003, S.glass, L*0.2, H*0.34, -W*0.13));
+    hs.add(box(L*0.28, H*0.03, W*0.34, S.body2, L*0.21, H*0.56, -W*0.28));
+    hs.add(box(L*0.003, H*0.07, W*0.30, S.glass, L*0.23, H*0.58, -W*0.28).rotateZ(0.3));
+    hs.add(cyl(H*0.02, H*0.30, S.dark, -L*0.10, H*0.58, W*0.28, 8).rotateX(Math.PI/2));
+    hs.add(box(L*0.25, H*0.012, W*0.012, S.steel, L*0.02, H*0.12, W*0.43)); hs.add(box(L*0.25, H*0.012, W*0.012, S.steel, L*0.02, H*0.09, W*0.43));
+    // boom
+    var fx = L*0.31, fy = H*0.12; out.foot = [fx, fy + hs.position.y];
+    var lb = o.lb || L*1.30, ls = o.ls || L*0.66, lk = o.lk || L*0.32; out.lb=lb; out.ls=ls; out.lk=lk;
+    var bm = new T.Group(); bm.position.set(fx, fy, 0); hs.add(bm); out.boom = bm;
+    var bt = H*0.10; bm.add(extrude([[0,-bt],[lb*0.35,lb*0.20-bt],[lb*0.72,lb*0.16-bt],[lb,-bt*0.4],[lb,bt*0.5],[lb*0.72,lb*0.16+bt*1.3],[lb*0.35,lb*0.20+bt*1.6],[0,bt]], W*0.12, S.body, 0,0,0));
+    var sk = new T.Group(); sk.position.set(lb, 0, 0); bm.add(sk); out.stick = sk;
+    var st = H*0.065; sk.add(extrude([[-bt*0.5,-st],[ls*0.5,-st*1.1],[ls,-st*0.6],[ls,st*0.7],[ls*0.5,st*1.8],[0,st*1.5]], W*0.09, S.body, 0,0,0));
+    var bk = new T.Group(); bk.position.set(ls, 0, 0); sk.add(bk); out.bucket = bk;
+    var bw = o.bw || W*0.55, bh = lk*0.9;
+    bk.add(extrude([[0,0.05],[lk*0.45,-bh*0.55],[lk*1.0,-bh*0.95],[lk*1.05,-bh*0.80],[lk*0.8,-bh*0.28],[lk*0.55,bh*0.0],[lk*0.2,bh*0.18]], bw, S.dark, 0,0,0));
+    for (var ti=0; ti<5; ti++) bk.add(box(lk*0.14, bh*0.10, bw*0.07, S.steel, lk*1.08, -bh*0.86, -bw*0.4+ti*bw*0.2));
+    bk.add(box(lk*0.5, bh*0.08, bw*1.0, S.steel, lk*0.32, -bh*0.32, 0).rotateZ(-0.5));
+    bk.add(box(lk*0.5, bh*0.08, bw*1.02, S.body, lk*0.30, -bh*0.2, 0));
+    out.bucketW = bw; out.bucketH = bh;
+    // silinder
+    var cb = cylUnit(H*0.045, S.steel, W*0.12), cb2 = cylUnit(H*0.065, S.dark, W*0.12), cb3 = cylUnit(H*0.045, S.steel, -W*0.12), cb4 = cylUnit(H*0.065, S.dark, -W*0.12);
+    [cb,cb2,cb3,cb4].forEach(function(c){ hs.add(c); }); out.cylB=[cb,cb2,cb3,cb4];
+    var cs = cylUnit(H*0.04, S.steel, 0), cs2 = cylUnit(H*0.055, S.dark, 0); bm.add(cs); bm.add(cs2); out.cylS=[cs,cs2];
+    var ck = cylUnit(H*0.032, S.steel, 0), ck2 = cylUnit(H*0.045, S.dark, 0); sk.add(ck); sk.add(ck2); out.cylK=[ck,ck2];
+    out.pose = {swing:0, boom:0.7, stick:-1.1, bucket:-1.0};
+    out.setPose = function(sw, b, s, c){
+      out.pose = {swing:sw, boom:b, stick:s, bucket:c}; hs.rotation.y = sw; bm.rotation.z = b; sk.rotation.z = s; bk.rotation.z = c;
+      function R(a, p){ return [p[0]*Math.cos(a)-p[1]*Math.sin(a), p[0]*Math.sin(a)+p[1]*Math.cos(a)]; }
+      // silinder boom (di bingkai house)
+      var bB = R(b, [lb*0.30, bt*2.8]); bB = [fx+bB[0], fy+bB[1]];
+      [[cb,cb2,W*0.12],[cb3,cb4,-W*0.12]].forEach(function(p){ link(p[0], [fx-L*0.12, fy-H*0.04], bB); p[0].position.z = p[2]; var ln = Math.hypot(bB[0]-fx+L*0.12, bB[1]-fy+H*0.04); p[0].scale.x = ln; link(p[1],[fx-L*0.12, fy-H*0.04], bB); p[1].position.z = p[2]; p[1].scale.x = ln*0.55; });
+      // silinder stick (di bingkai boom)
+      var sB = R(s, [ls*0.16, st*3.2]); sB = [lb + sB[0], sB[1]]; link(cs, [lb*0.55, bt*4.2], sB); link(cs2, [lb*0.55, bt*4.2], sB); cs2.scale.x *= 0.55;
+      // silinder bucket (di bingkai stick)
+      var kB = R(c, [lk*0.25, lk*0.2]); kB = [ls + kB[0], kB[1]]; link(ck, [ls*0.28, st*2.6], kB); link(ck2, [ls*0.28, st*2.6], kB); ck2.scale.x *= 0.55;
+    };
+    // IK: ujung gigi bucket pada (r, y) relatif sumbu house & permukaan tanah; phi = sudut absolut gigi bucket
+    out.ik = function(r, y, phi){
+      var tipL = bh*0.95, tipAng = Math.atan2(-bh*0.95, lk*1.0), kd = Math.hypot(lk*1.0, bh*0.95);      // jarak pivot->gigi, arah relatif bucket
+      var ab = phi + 0, px = r - kd*Math.cos(ab + tipAng), py = (y - hs.position.y) - kd*Math.sin(ab + tipAng);
+      var dx = px - fx, dy = py - fy, d = Math.min(Math.hypot(dx,dy), lb+ls-0.05); d = Math.max(d, Math.abs(lb-ls)+0.05);
+      var a0 = Math.atan2(dy, dx), cosA = (lb*lb + d*d - ls*ls)/(2*lb*d), A = Math.acos(Math.max(-1,Math.min(1,cosA)));
+      var bAbs = a0 + A; var tx = fx + lb*Math.cos(bAbs), ty = fy + lb*Math.sin(bAbs), sAbs = Math.atan2(py - ty, px - tx);
+      return {boom:bAbs, stick:sAbs - bAbs, bucket:ab - sAbs};
+    };
+    out.tipAt = function(sw, b, s, c){ var bAbs = b, sAbs = b + s, kAbs = b + s + c, kd = Math.hypot(lk, bh*0.95), ang = Math.atan2(-bh*0.95, lk);
+      var x = fx + lb*Math.cos(bAbs) + ls*Math.cos(sAbs) + kd*Math.cos(kAbs+ang), y = hs.position.y + fy + lb*Math.sin(bAbs) + ls*Math.sin(sAbs) + kd*Math.sin(kAbs+ang); return [x, y]; };
+    out.setPose(0, 0.7, -1.1, -1.0);
+    return out;
+  };
+  return M;
+})(THREE);
+
+var models=UN.map(function(u){
+  var g=new T.Group(), o={g:g, wheels:[], bed:null, load:null, boom:null, house:null, kind:u.kind};
+  var pat=(u.patches_loaded||u.patches_empty);
+  if (u.kind==='truck'){
+    var ur=1e9, uf=-1e9; pat.forEach(function(p){ ur=Math.min(ur,p.u); uf=Math.max(uf,p.u); });
+    var x0=ur-1.5, x1=uf+2.7, Lb=x1-x0;
+    var hd=UNITS3D.makeHD({L:Lb, W:u.wid*1.12, H:Math.max(4.6,Lb*0.53), loadColor:P.fill_color});
+    hd.group.position.x=x0; g.add(hd.group); o.hd=hd; o.load=hd.load; o.bh=hd.bedH;
+  } else {
+    var tl=pat[0].L, Lm=tl*1.12;
+    if (u.kind==='dozer'){ var dz=UNITS3D.makeDozer({L:Lm, W:u.wid, H:Lm*0.59}); g.add(dz.group); o.dz=dz; }
+    else { var ex=UNITS3D.makeExcavator({L:tl*1.15, W:u.wid, H:tl*1.15*0.62}); g.add(ex.group); o.ex=ex; o.ikA=ex.ik(tl*1.15*1.9, -0.2, -1.1); o.ikB=ex.ik(tl*1.15*1.2, 1.4, -0.4); }
+  }
+  world.add(g); return o; });
+
+// ---------- skenario waktu
+var APP=14, SET=2, WORK=9, LEAVE=12, TT=APP+SET+WORK+LEAVE+3;
+function ease(x){ x=Math.min(Math.max(x,0),1); return x*x*(3-2*x); }
+function unitState(i,t){ var u=UN[i], ts=t-(u.delay||0), ph, s=0, tipf=0, ang=0, wk=0, y;
+  if (ts<0){ ph='tunggu'; y=u.yfar; }
+  else if (ts<APP){ ph='mundur'; var a=ease(ts/APP); y=u.yfar+(u.ystop-u.yfar)*a; }
+  else if (ts<APP+SET){ ph='posisi'; y=u.ystop; }
+  else if (ts<APP+SET+WORK){ ph=(u.kind==='truck'?'mencurah':'bekerja'); y=u.ystop; wk=(ts-APP-SET)/WORK; }
+  else if (ts<APP+SET+WORK+LEAVE){ ph='keluar'; var b=ease((ts-APP-SET-WORK)/LEAVE); y=u.ystop+(u.yfar-u.ystop)*b; wk=1; }
+  else { ph='selesai'; y=u.yfar; wk=1; }
+  return {ph:ph, y:y, wk:wk, moving:(ph==='mundur'||ph==='keluar')}; }
+var sts=[];
+function place(t){
+  PT.length=0; var info=[];
+  UN.forEach(function(u,i){ var st=unitState(i,t), m=models[i]; sts[i]=st;
+    var th=u.hd*Math.PI/180; m.g.position.set(u.x,0,st.y); m.g.rotation.y=-th;
+    var frac=0, qs=1, pat;
+    if (u.kind==='truck'){
+      var up=Math.min(Math.max((st.wk-0.0)/0.35,0),1), dn=Math.min(Math.max((1-st.wk)/0.25,0),1); var ang=(u.state==='loaded'? Math.min(ease(up),ease(dn))*0.85:0);
+      m.hd.setBed(ang); frac=(u.state==='loaded')? 1-Math.min(Math.max((st.wk-0.12)/0.6,0),1):0; m.load.visible=frac>0.03; m.load.scale.y=Math.max(frac,0.02); m.load.position.y=m.hd.loadBase;
+      if (u.state==='loaded'){ pat=u.patches_loaded; qs=(u.We+frac*(u.Wl-u.We))/u.Wl; } else { pat=u.patches_empty; qs=1; }
+      m.hd.setSpin(st.moving ? st.y*0.55 : (m.hd._sp||0)); if (st.moving) m.hd._sp = st.y*0.55;
+    } else { pat=u.patches_empty; qs=1;
+      if (m.ex){ var wkk=(st.ph==='bekerja')?1:0, cyc=0.5-0.5*Math.cos(st.wk*6.2832*3), sw=Math.sin(st.wk*6.2832*1.5)*0.6*wkk;
+        var A=m.ikA, B=m.ikB, mix=wkk*cyc; m.ex.setPose(sw, A.boom+(B.boom-A.boom)*mix, A.stick+(B.stick-A.stick)*mix, A.bucket+(B.bucket-A.bucket)*mix); }
+      if (m.dz){ m.dz.setBlade(st.ph==='bekerja' ? -0.04+0.1*Math.sin(st.wk*6.2832*2) : 0.12); } }
+    var c=Math.cos(th), s=Math.sin(th);
+    pat.forEach(function(p){ var cx=u.x+p.u*c-p.v*s, cz=st.y+p.u*s+p.v*c; PT.push({cx:cx,cz:cz,c:c,s:s,L:p.L,B:p.B,q:p.q*qs}); });
+    info.push({ph:st.ph,frac:frac,state:u.state});
+  });
+  return info; }
+function fillTex(tex,n0,n1,fn){ var d=tex.image.data, k=0; for (var j=0;j<n1;j++) for (var i=0;i<n0;i++){ var v=fn(i,j), c=cmap(v), o=(j*n0+i)*4; d[o]=c[0]; d[o+1]=c[1]; d[o+2]=c[2]; d[o+3]=Math.round(255*Math.min(1,Math.max(0,(v/PMAX-0.004)/0.03))); } tex.needsUpdate=true; }
+var peakLy=[];
+function updateStress(){
+  var xA=UN[0].x, zB=UN[0].yrear_cur||UN[0].yrear;
+  var maxA=new Float32Array(LY.length), cnt;
+  var nA=NA[0], mA=NA[1];
+  var sA=new Float32Array(nA*mA);
+  fillTex(texA,nA,mA,function(i,j){ var xl=-WA/2+WA*i/(nA-1); var Zw=ZAc-xl; var v=sig(xA,Zw,zeA[j]); sA[j*nA+i]=v; return v; });
+  var nB=NB[0], mB=NB[1], sB=new Float32Array(nB*mB);
+  var zrear=UN[0].yrear_cur;
+  fillTex(texB,nB,mB,function(i,j){ var Xw=-WB/2+WB*i/(nB-1); var v=sig(Xw,zrear,zeB[j]); sB[j*nB+i]=v; return v; });
+  plB.position.z=zrear; bndB.children.forEach(function(c){ c.position.z=zrear+0.02; });
+  var zc=eqDepth([dsl])[0], nC=NC[0], mC=NC[1];
+  fillTex(texC,nC,mC,function(i,j){ var Xw=-WC/2+WC*i/(nC-1); var yl=-HC/2+HC*j/(mC-1); var Zw=HC/2-yl; if (Zw<0) return 0; return sig(Xw,Zw,zc); });
+  // maks per lapisan (tengah) dari bidang A & B
+  for (var k=0;k<LY.length;k++){ var zm=0.5*(LY[k].z0+LY[k].z1), jj=Math.min(mA-1,Math.max(0,Math.round((1-(zm-0.05)/(ZT-0.05))*(mA-1))));
+    var mx=0; for (var i=0;i<nA;i++) mx=Math.max(mx,sA[jj*nA+i]); for (var i2=0;i2<nB;i2++) mx=Math.max(mx,sB[jj*nB+i2]); maxA[k]=mx; }
+  return maxA; }
+function hud(maxA,info,t){
+  var rows='<tr><th>'+L.layer+'</th><th>Δσ kPa</th><th>Δσ/σ′v0</th><th>FS</th></tr>';
+  LY.forEach(function(l,k){ var ds=maxA[k], ratio=ds/Math.max(l.eff0,1e-6), fs=l.qult/Math.max(ds+l.sig0,1e-6), cls=fs<1.3?'bd':(fs<1.5?'wa':'ok');
+    rows+='<tr><td>'+l.name+'</td><td>'+f1(ds,1)+'</td><td class="'+(l.undrained&&ratio>0.5?'bd':'')+'">'+f1(ratio,2)+'</td><td class="'+cls+'">'+f1(fs,2)+'</td></tr>'; });
+  $('hTab').innerHTML=rows;
+  var u='';
+  UN.forEach(function(x,i){ var s=sts[i]; u+='<div>'+L.unit+' '+(i+1)+': <b>'+x.name+'</b> · '+(x.kind==='truck'?(info[i].state==='loaded'&&info[i].frac>0.03?L.loaded+' '+Math.round(info[i].frac*100)+'%':L.empty):L.work)+' · '+s.ph+' · y='+f1(s.y,1)+' m</div>'; });
+  if (UN.length>1) u+='<div>'+L.spacing+': <b>'+f1(Math.abs(UN[1].x-UN[0].x),1)+' m</b></div>';
+  $('hUn').innerHTML=u; $('hTm').textContent=f1(t,1)+' s'; $('hPh').textContent=''; }
+
+// ---------- kamera orbit
+function HOME(){ return {tx:UN[0].x/2+ (UN.length>1?UN[1].x/2:0)*0, ty:-ZT*0.25, tz:UN[0].ystop*0.6, r:Math.max(48,(X0*1.7)), az:2.55, pol:1.15}; }
+var cs=HOME();
+function setCam(){ cam.position.set(cs.tx+cs.r*Math.sin(cs.pol)*Math.sin(cs.az), cs.ty+cs.r*Math.cos(cs.pol), cs.tz+cs.r*Math.sin(cs.pol)*Math.cos(cs.az)); cam.lookAt(cs.tx,cs.ty,cs.tz); dirty=true; }
+var dirty=true, drag=null;
+canvas.addEventListener('pointerdown',function(e){ canvas.setPointerCapture(e.pointerId); drag={x:e.clientX,y:e.clientY,pan:(e.buttons&2)||e.shiftKey}; });
+canvas.addEventListener('pointermove',function(e){ if(!drag) return; var dx=e.clientX-drag.x, dy=e.clientY-drag.y; drag.x=e.clientX; drag.y=e.clientY;
+  if (drag.pan){ var k=cs.r*0.0016; cs.tx-= (Math.cos(cs.az)*dx)*k; cs.tz+= (Math.sin(cs.az)*dx)*k; cs.ty+=dy*k; } else { cs.az-=dx*0.006; cs.pol=Math.min(Math.max(cs.pol-dy*0.006,0.05),1.55); } setCam(); });
+canvas.addEventListener('pointerup',function(){ drag=null; }); canvas.addEventListener('contextmenu',function(e){e.preventDefault();});
+canvas.addEventListener('wheel',function(e){ e.preventDefault(); cs.r=Math.min(Math.max(cs.r*Math.exp(e.deltaY*0.0012),8),900); setCam(); },{passive:false});
+$('bReset').textContent=L.b_reset; $('bSide').textContent=L.b_side; $('bTop').textContent=L.b_top; $('bShot').textContent='PNG';
+$('bReset').onclick=function(){ cs=HOME(); setCam(); };
+$('bSide').onclick=function(){ cs.az=Math.PI/2; cs.pol=1.5; cs.tx=UN[0].x; setCam(); };
+$('bTop').onclick=function(){ cs.pol=0.08; cs.r=Math.max(60,ZF*1.2); setCam(); };
+$('bShot').onclick=function(){ renderer.render(scene,cam); var a=document.createElement('a'); a.href=canvas.toDataURL('image/png'); a.download='beban_unit_3d.png'; document.body.appendChild(a); a.click(); document.body.removeChild(a); };
+// panel lapisan
+$('hT').textContent=P.title; $('hS').textContent=P.subtitle; $('sL').textContent=L.layers; $('loopT').textContent=L.loop;
+function addCheck(lbl,chk,fn){ var l=document.createElement('label'); l.className='row'; var c=document.createElement('input'); c.type='checkbox'; c.checked=chk; c.onchange=function(){ fn(c.checked); dirty=true; }; l.appendChild(c); l.appendChild(document.createTextNode(lbl)); $('lay').appendChild(l); }
+addCheck(L.l_layers,true,function(v){ layMeshes.forEach(function(m){m.visible=v;}); });
+addCheck(L.l_secA,true,function(v){ plA.visible=v; bndA.visible=v; }); addCheck(L.l_secB,true,function(v){ plB.visible=v; bndB.visible=v; }); addCheck(L.l_radar,true,function(v){ plC.visible=v; });
+if (water) addCheck(L.l_water,true,function(v){ water.visible=v; });
+var sd=document.createElement('div'); sd.className='sl'; sd.innerHTML='<span><b>'+L.depth+'</b><i id="dv"></i></span><input type="range" id="dr" min="0.1" max="'+ZT+'" step="0.1" value="'+dsl+'">'; $('lay').appendChild(sd);
+$('dr').oninput=function(){ dsl=parseFloat(this.value); $('dv').textContent=f1(dsl,1)+' m'; lastStress=-1; dirty=true; }; $('dv').textContent=f1(dsl,1)+' m';
+var gd=''; for (var q=0;q<=20;q++){ var c=cmap(q/20*PMAX); gd+= 'rgb('+Math.round(c[0])+','+Math.round(c[1])+','+Math.round(c[2])+') '+(q*5)+'%'+(q<20?',':''); }
+$('lgd').style.background='linear-gradient(90deg,'+gd+')'; $('lgt').innerHTML='<span>0</span><span>'+f1(PMAX*0.25,0)+'</span><span>'+f1(PMAX*0.5,0)+'</span><span>'+f1(PMAX,0)+' kPa</span>';
+// ---------- loop
+var tNow=0, playing=false, lastTs=0, lastStress=-1, maxA=new Float32Array(LY.length), info=[];
+function setT(t){ tNow=Math.min(Math.max(t,0),TT); var inf=place(tNow); info=inf; UN[0].yrear_cur=sts[0].y+UN[0].rear_off;
+  // sinkronkan posisi bidang B & kamera target X
+  if (Math.abs(tNow-lastStress)>0.18||lastStress<0){ maxA=updateStress(); lastStress=tNow; } hud(maxA,info,tNow); $('tl').value=Math.round(tNow/TT*1000); dirty=true; }
+$('tl').oninput=function(){ playing=false; $('play').textContent='▶'; setT(parseFloat(this.value)/1000*TT); };
+$('play').onclick=function(){ playing=!playing; $('play').textContent=playing?'❚❚':'▶'; lastTs=performance.now(); if (playing && tNow>=TT-0.05) setT(0); };
+function resize(){ var w=$('wrap').clientWidth,h=$('wrap').clientHeight; renderer.setSize(w,h,false); cam.aspect=w/h; cam.updateProjectionMatrix(); dirty=true; }
+window.addEventListener('resize',resize); resize();
+function frame(ts){ requestAnimationFrame(frame);
+  if (playing){ var dt=Math.min((ts-lastTs)/1000,0.1); lastTs=ts; var n=tNow+dt*parseFloat($('spd').value); if (n>=TT){ if ($('loop').checked) n=0; else { n=TT; playing=false; $('play').textContent='▶'; } } setT(n); }
+  if (dirty){ renderer.render(scene,cam); dirty=false; } }
+UN[0].rear_off=P.units[0].rear_off; setCam(); setT(P.t0||0); requestAnimationFrame(frame);
+window.__ulv={dbg2:function(){ function st(t){ var d=t.image.data,c=0,m=0,r=[0,0,0]; for(var i=0;i<d.length;i+=4){ if(d[i+3]>0){c++; r[0]=Math.max(r[0],d[i]);r[1]=Math.max(r[1],d[i+1]);r[2]=Math.max(r[2],d[i+2]);} } return {c:c,n:d.length/4,mx:r}; } return {A:st(texA),B:st(texB),C:st(texC),pa:plA.position.toArray(),pb:plB.position.toArray(),wa:WA}; },dbg:function(){ var d=texC.image.data,m=0,c=0; for(var i=3;i<d.length;i+=4){ if(d[i]>0)c++; m=Math.max(m,d[i-3]);} return {c:c,m:m,n:PT.length,plc:plC.visible,pos:plC.position.toArray()}; },setT:setT,TT:TT,setCam:function(o){ for (var k in o) cs[k]=o[k]; setCam(); }};
+} catch(e){ showErr('Gagal: '+e.message+'<br><small>'+(e.stack||'')+'</small>'); }
+}
+loadThree(start);
+})();
+</script></body></html>
+'''
+
+
+def _unitload_load():
+    import sys as _sys, types as _types, hashlib as _hl
+    nm = "_eroslope_unit_load_" + _hl.md5(_UNITLOAD_SRC.encode("utf-8")).hexdigest()[:10]
+    if nm not in _sys.modules:
+        m = _types.ModuleType(nm)
+        m.__dict__["__file__"] = "<unit_load>"
+        _sys.modules[nm] = m
+        exec(compile(_UNITLOAD_SRC, "<unit_load>", "exec"), m.__dict__)
+    return _sys.modules[nm]
+
+
+def _unitload_tab():
+    ul = _unitload_load()
+    _sub_header(_t("Beban Unit & Distribusi Tegangan ke Lapisan", "Unit Load & Stress Distribution into the Layers"))
+    st.caption(_t(
+        "Pilih unit (HD berisi/kosong, dozer, excavator), susun lapisan dari permukaan yang dipijak ke bawah (timbunan, lumpur, tanah asli, muka air), lalu lihat "
+        "bagaimana beban roda/track menyebar ke bawah dan saling berpengaruh bila dua unit berdekatan di crest. Ada peta denah seperti radar, penampang tegangan, "
+        "profil terhadap kedalaman, dan jarak aman antar unit.",
+        "Pick the unit (loaded/empty truck, dozer, excavator), stack the layers from the stood-on surface downward (fill, mud, original ground, water table) and see how "
+        "wheel/track loads spread downward and interact when two units work close together on the crest. Includes a radar-like plan view, a stress section, depth profiles and a safe spacing."))
+    _ui_warning(_t(
+        "Model INDIKATIF: tegangan Boussinesq beban persegi (ban/track) + koreksi kekakuan berlapis (Odemark) + kapasitas dukung sederhana. Spesifikasi unit adalah perkiraan "
+        "(ubah sesuai brosur/timbang). Bukan pengganti analisis geoteknik (FEM/LEM) dan tidak memodelkan lereng crest secara penuh.",
+        "INDICATIVE model: Boussinesq stress of rectangular loads (tyre/track) + layered stiffness correction (Odemark) + simple bearing capacity. Unit specs are approximate "
+        "(edit them to match the brochure/weighbridge). Not a substitute for FEM/LEM analysis and does not fully model the crest slope."))
+
+    # ---------------- 1. unit
+    _sub_header(_t("1. Unit & penempatan di crest", "1. Units & placement on the crest"))
+    nU = st.radio(_t("Jumlah unit bekerja bersamaan", "Units working at the same time"), [1, 2], horizontal=True, key="ul_n")
+    names = list(ul.UNITS.keys())
+    units = []
+    cols = st.columns(nU)
+    for i in range(nU):
+        with cols[i]:
+            st.markdown(f"**{_t('Unit', 'Unit')} {i + 1}**")
+            un = st.selectbox(_t("Tipe unit", "Unit type"), names, index=0, key=f"ul_unit_{i}")
+            u0 = dict(ul.UNITS[un])
+            stt = "empty"
+            if u0["kind"] == "truck":
+                stt = st.radio(_t("Kondisi", "State"), ["loaded", "empty"], horizontal=True, key=f"ul_state_{i}",
+                               format_func=lambda c: _t("Berisi (loaded)", "Loaded") if c == "loaded" else _t("Kosong (empty)", "Empty"))
+            with st.expander(_t("Ubah spesifikasi", "Edit specification")):
+                u0["empty_t"] = st.number_input(_t("Berat kosong (ton)", "Empty weight (t)"), 5.0, 600.0, float(u0["empty_t"]), 0.5, key=f"ul_ew_{i}_{un}")
+                if u0["kind"] == "truck":
+                    u0["payload_t"] = st.number_input("Payload (ton)", 0.0, 600.0, float(u0["payload_t"]), 1.0, key=f"ul_pl_{i}_{un}")
+                    u0["p_kpa"] = st.number_input(_t("Tekanan ban (kPa)", "Tyre pressure (kPa)"), 300.0, 1200.0, float(u0["p_kpa"]), 25.0, key=f"ul_tp_{i}_{un}")
+                    u0["tire_w"] = st.number_input(_t("Lebar ban (m)", "Tyre width (m)"), 0.3, 1.2, float(u0["tire_w"]), 0.01, key=f"ul_tw_{i}_{un}")
+                else:
+                    u0["track_len"] = st.number_input(_t("Panjang track menapak (m)", "Track ground length (m)"), 1.0, 8.0, float(u0["track_len"]), 0.1, key=f"ul_tl_{i}_{un}")
+                    u0["shoe_w"] = st.number_input(_t("Lebar sepatu (m)", "Shoe width (m)"), 0.3, 1.2, float(u0["shoe_w"]), 0.01, key=f"ul_sw_{i}_{un}")
+            st.caption(u0["note"])
+            units.append((u0, stt))
+    dyn = st.number_input(_t("Faktor dinamis (1,0 = statis; 1,2–1,5 saat bergerak/dumping)", "Dynamic factor (1.0 = static; 1.2–1.5 moving/dumping)"), 1.0, 2.0, 1.2, 0.05, key="ul_dyn")
+    pc1, pc2, pc3 = st.columns(3)
+    ar = pc1.number_input(_t("Jarak as belakang ke tepi crest (m)", "Rear axle to crest edge (m)"), 0.0, 60.0, 3.0, 0.5, key="ul_ar",
+                          help=_t("Tepi crest = garis Y=0; unit mundur membelakangi tepi (arah maju ke +Y).", "Crest edge = the line Y=0; units reverse toward the edge (forward is +Y)."))
+    sp = pc2.number_input(_t("Jarak antar unit sepanjang crest (m)", "Spacing between units along the crest (m)"), 3.0, 80.0, 12.0, 0.5, key="ul_sp") if nU == 2 else 0.0
+    lag = pc3.number_input(_t("Selisih posisi maju-mundur unit 2 (m)", "Unit 2 fore/aft offset (m)"), -30.0, 30.0, 0.0, 0.5, key="ul_lag") if nU == 2 else 0.0
+    poses = []
+    for i, (u0, stt) in enumerate(units):
+        cy = ar + ul.rear_offset(u0, stt) + (lag if i == 1 else 0.0)
+        poses.append((i * sp, cy, 90.0))
+    ulist = [dict(unit=u0, state=stt, pose=poses[i]) for i, (u0, stt) in enumerate(units)]
+
+    # ---------------- 2. lapisan
+    _sub_header(_t("2. Lapisan dari permukaan yang dipijak ke bawah", "2. Layers from the stood-on surface downward"))
+    P = ul.LAYER_PRESETS
+    default_rows = [("Timbunan", "Timbunan (claystone/sandstone padat)", 3.0), ("Lumpur", "Lumpur (soft)", 4.0), ("Tanah asli", "Lempung kaku", 8.0)]
+    base = pd.DataFrame([dict(Nama=n, Jenis=P[k]["type"], Tebal=h, Gamma=P[k]["gamma"], GammaSat=P[k]["gamma_sat"], c=P[k]["c"], phi=P[k]["phi"], E_MPa=P[k]["E"]) for n, k, h in default_rows])
+    pr1, pr2 = st.columns([3, 1])
+    pick = pr1.selectbox(_t("Tambah lapisan dari preset (isi nilai lalu edit di tabel)", "Add a layer from a preset (then edit the table)"), list(P.keys()), key="ul_preset")
+    if "ul_layers" not in st.session_state:
+        st.session_state["ul_layers"] = base
+    if pr2.button(_t("+ Tambah", "+ Add"), key="ul_addbtn"):
+        k = P[pick]
+        cur0 = st.session_state.get("ul_last_ed", st.session_state["ul_layers"])
+        st.session_state["ul_layers"] = pd.concat([cur0, pd.DataFrame([dict(Nama=pick.split(" (")[0], Jenis=k["type"], Tebal=2.0, Gamma=k["gamma"], GammaSat=k["gamma_sat"], c=k["c"], phi=k["phi"], E_MPa=k["E"])])], ignore_index=True)
+        st.session_state.pop("ul_ed", None)
+    if pr2.button(_t("Reset", "Reset"), key="ul_resetbtn"):
+        st.session_state["ul_layers"] = base
+        st.session_state.pop("ul_ed", None)
+    ed = st.data_editor(st.session_state["ul_layers"], num_rows="dynamic", key="ul_ed", width="stretch", hide_index=True, column_config={
+        "Jenis": st.column_config.SelectboxColumn(_t("Jenis", "Type"), options=["timbunan", "pasir", "lumpur", "lempung", "batuan"]),
+        "Tebal": st.column_config.NumberColumn(_t("Tebal (m)", "Thick. (m)"), min_value=0.1, max_value=200.0),
+        "Gamma": st.column_config.NumberColumn("γ (kN/m³)"), "GammaSat": st.column_config.NumberColumn("γsat (kN/m³)"),
+        "c": st.column_config.NumberColumn("c / cu (kPa)"), "phi": st.column_config.NumberColumn("φ (°)"), "E_MPa": st.column_config.NumberColumn("E (MPa)", min_value=0.1)})
+    st.session_state["ul_last_ed"] = ed.copy()
+    ed = ed.dropna(subset=["Tebal", "E_MPa"]) if len(ed) else ed
+    if len(ed) == 0:
+        _ui_info(_t("Tambahkan minimal satu lapisan.", "Add at least one layer."))
+        return
+    wc1, wc2 = st.columns(2)
+    zw = wc1.number_input(_t("Kedalaman muka air tanah dari permukaan (m; negatif = air di atas permukaan)", "Groundwater depth below the surface (m; negative = water above)"), -20.0, 200.0, 1.5, 0.1, key="ul_zw")
+    hwa = max(-zw, 0.0)
+    wc2.caption(_t("Lapisan di bawah muka air memakai γsat dan menghitung tekanan pori; lapisan lempung/lumpur diperlakukan undrained saat pembebanan cepat.",
+                   "Layers below the water level use γsat and carry pore pressure; clay/mud layers are treated as undrained under rapid loading."))
+    layers = [dict(name=str(r.Nama), type=str(r.Jenis), h=float(r.Tebal), gamma=float(r.Gamma), gamma_sat=float(r.GammaSat), c=float(r.c), phi=float(r.phi), E=float(r.E_MPa), nu=0.3) for r in ed.itertuples()]
+    try:
+        A = ul.analyse(ulist, layers, zw=float(zw), hw_above=hwa, dyn=float(dyn))
+    except Exception as e:
+        st.error(_t(f"Perhitungan gagal: {e}", f"Calculation failed: {e}"))
+        return
+    Lp = A["layers"]
+    zt = Lp[-1]["z1"]
+
+    # ---------------- 3. hasil
+    _sub_header(_t("3. Hasil", "3. Results"))
+    tot_w = sum(p["force"] for p in A["patches"])
+    m1, m2, m3 = st.columns(3)
+    _metric_card(_t("Total beban unit", "Total unit load"), f"{tot_w / 9.81 / 1.0:,.0f} t".replace(",", "."), help_text=_t("Termasuk faktor dinamis.", "Includes the dynamic factor."), container=m1)
+    _metric_card(_t("Tekanan kontak maks.", "Max contact pressure"), f"{A['peak_q']:.0f} kPa", container=m2)
+    worst = min(A["rows"], key=lambda r: r["fs"])
+    _metric_card(_t("FS indikatif terendah", "Lowest indicative FS"), f"{worst['fs']:.2f}", help_text=_t(f"Pada lapisan: {worst['name']}", f"In layer: {worst['name']}"), container=m3)
+    rows = []
+    for r in A["rows"]:
+        stat = (_t("KRITIS", "CRITICAL") if r["fs"] < 1.3 else _t("Waspada", "Watch") if r["fs"] < 1.5 else _t("Aman", "OK"))
+        rows.append({_t("Lapisan", "Layer"): r["name"], _t("Kedalaman (m)", "Depth (m)"): f"{r['z0']:.1f}–{r['z1']:.1f}", "E (MPa)": r["E"],
+                     _t("Δσ atas (kPa)", "Δσ top (kPa)"): round(r["d_top"], 1), _t("Δσ tengah maks. (kPa)", "Δσ mid max (kPa)"): round(r["d_mid"], 1), _t("Δσ bawah (kPa)", "Δσ bottom (kPa)"): round(r["d_bot"], 1),
+                     _t("σ'v awal (kPa)", "σ'v0 (kPa)"): round(r["sigma_eff0"], 1), "Δσ/σ'v0": round(r["ratio"], 2),
+                     _t("Δu undrained (kPa)", "Undrained Δu (kPa)"): round(r["du"], 1), "q_ult (kPa)": round(r["qult"]), "FS": round(r["fs"], 2), "Status": stat})
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+    for r in A["rows"]:
+        if r["undrained"] and r["ratio"] > 0.5:
+            _ui_warning(_t(f"Lapisan '{r['name']}' (undrained) menerima Δσ ≈ {r['ratio']:.1f}× tegangan efektif awal: tekanan pori berlebih besar, rawan deformasi/geser sampai terkonsolidasi.",
+                           f"Layer '{r['name']}' (undrained) takes Δσ ≈ {r['ratio']:.1f}× its initial effective stress: large excess pore pressure, prone to deformation/shear until consolidated."))
+
+    # --- simulasi 3D bergerak
+    _sub_header(_t("Simulasi 3D (unit bergerak, tegangan mengikuti)", "3D simulation (moving units, live stress)"))
+    v1, v2 = st.columns(2)
+    dly = v1.number_input(_t("Unit 2 mulai terlambat (detik)", "Unit 2 start delay (s)"), 0.0, 30.0, 0.0, 1.0, key="ul_delay") if nU == 2 else 0.0
+    v2.caption(_t("Unit mundur ke tepi crest, mencurah (HD berisi → kosong, beban turun), lalu keluar. Warna = Δσz: radar di permukaan/kedalaman, dan dua penampang vertikal (⟂ crest di unit 1, ∥ crest di as belakang). "
+                  "Tabel di pojok kiri memperbarui Δσ, rasio, dan FS tiap lapisan secara langsung.",
+                  "Units reverse to the crest edge, tip (loaded → empty, load drops) and leave. Colours = Δσz: a radar at the surface/depth and two vertical sections (⟂ crest at unit 1, ∥ crest at the rear axle). "
+                  "The table at the top-left updates Δσ, ratio and FS of each layer live."))
+    try:
+        _dsm, _dsc = _dump_load_modules()
+        A["dyn"] = float(dyn)
+        _names = [{"Cat 777": "Cat 777"}.get(k, k) for k in [None]]
+        _ul = [dict(unit=u["unit"], state=u["state"], pose=u["pose"], name=nm.split(" (")[0]) for u, nm in zip(ulist, [st.session_state.get(f"ul_unit_{i}", "Unit") for i in range(len(ulist))])]
+        _html = ul.build_unit_scene_html(A, _ul, float(zw), _UNITLOAD_VIEWER_TEMPLATE, three_inline=_wsim_find_local_three(), three_cdn=_dsc.THREE_CDN,
+                                         title=_t("Beban unit & tegangan ke lapisan", "Unit load & stress into the layers"), subtitle=" + ".join(x["name"] for x in _ul),
+                                         labels=dict(layer=_t("Lapisan", "Layer"), unit=_t("Unit", "Unit"), loaded=_t("berisi", "loaded"), empty=_t("kosong", "empty"), work=_t("bekerja", "working"),
+                                                     spacing=_t("Jarak antar unit", "Unit spacing"), b_reset="Reset", b_side=_t("Samping", "Side"), b_top=_t("Atas", "Top"), layers=_t("Lapisan & tampilan", "Layers & display"),
+                                                     l_layers=_t("Blok lapisan tanah", "Soil layer blocks"), l_secA=_t("Penampang ⟂ crest (unit 1)", "Section ⟂ crest (unit 1)"), l_secB=_t("Penampang ∥ crest (as belakang)", "Section ∥ crest (rear axle)"),
+                                                     l_radar=_t("Radar tegangan (denah)", "Stress radar (plan)"), l_water=_t("Air", "Water"), depth=_t("Kedalaman radar", "Radar depth"), loop=_t("Ulangi", "Loop")),
+                                         delay=float(dly))
+        if hasattr(st, "iframe"):
+            st.iframe(_html, width="stretch", height=720)
+        else:
+            import streamlit.components.v1 as _ulc
+            _ulc.html(_html, height=720, scrolling=False)
+        st.download_button(_t("Unduh simulasi 3D (HTML mandiri)", "Download the 3D simulation (standalone HTML)"), data=_html.encode("utf-8"), file_name="beban_unit_3d.html", mime="text/html", key="ul_dl3d")
+    except Exception as _e3:
+        st.error(_t(f"Simulasi 3D gagal dibuat: {_e3}", f"Could not build the 3D simulation: {_e3}"))
+
+    pts = [c for p in A["patches"] for c in p["poly"]]
+    bx = (min(c[0] for c in pts) - 8, max(c[0] for c in pts) + 8, max(min(c[1] for c in pts) - 8, -6), max(c[1] for c in pts) + 8)
+
+    # --- peta denah 'radar'
+    depth = st.slider(_t("Kedalaman peta denah (m di bawah permukaan)", "Plan-view depth (m below the surface)"), 0.1, float(zt), float(min(Lp[0]["z1"], zt)), 0.1, key="ul_depth")
+    gx, gy, F = ul.plan_field(A["patches"], Lp, depth, bx, 181)
+    fig = go.Figure()
+    mx = float(F.max())
+    fig.add_trace(go.Contour(x=gx, y=gy, z=F.T, colorscale="Turbo", contours=dict(start=0.05 * mx, end=mx, size=0.95 * mx / 10, coloring="heatmap", showlines=True), line=dict(width=0.6, color="rgba(255,255,255,0.6)"),
+                             colorbar=dict(title="kPa", thickness=10), hovertemplate="X %{x:.1f}<br>Y %{y:.1f}<br>Δσ %{z:.1f} kPa<extra></extra>"))
+    for p in A["patches"]:
+        xs_ = [q[0] for q in p["poly"]] + [p["poly"][0][0]]
+        ys_ = [q[1] for q in p["poly"]] + [p["poly"][0][1]]
+        fig.add_trace(go.Scatter(x=xs_, y=ys_, mode="lines", line=dict(color="white", width=1.5), showlegend=False, hoverinfo="skip"))
+    fig.add_trace(go.Scatter(x=[bx[0], bx[1]], y=[0, 0], mode="lines", line=dict(color="#ff4d4d", width=3, dash="dash"), name=_t("Tepi crest", "Crest edge")))
+    fig.update_layout(height=470, margin=dict(l=8, r=8, t=30, b=8), title=_t(f"Radar tegangan pada kedalaman {depth:.1f} m (Δσz)", f"Stress radar at {depth:.1f} m depth (Δσz)"),
+                      xaxis=dict(scaleanchor="y", scaleratio=1, title=_t("Sepanjang crest X (m)", "Along the crest X (m)")), yaxis=dict(title=_t("Tegak lurus crest Y (m)", "Normal to crest Y (m)")), legend=dict(orientation="h", y=-0.12))
+    st.plotly_chart(fig, width="stretch")
+
+    # --- penampang
+    sc1, sc2 = st.columns(2)
+    sax = sc1.radio(_t("Arah penampang", "Section direction"), ["x", "y"], horizontal=True, key="ul_sax",
+                    format_func=lambda c: _t("Sepanjang crest (memotong ban kiri-kanan)", "Along the crest (cutting left-right tyres)") if c == "x" else _t("Tegak lurus crest (memanjang unit)", "Normal to the crest (along the unit)"))
+    ctr = A["crit"]
+    if sax == "x":
+        pos = sc2.slider(_t("Posisi Y penampang (m)", "Section Y position (m)"), float(bx[2]), float(bx[3]), float(np.clip(ctr[1], bx[2], bx[3])), 0.25, key="ul_spos_x")
+        g, zz, S = ul.section_field(A["patches"], Lp, "x", pos, bx[0], bx[1], zt, 181, 110)
+    else:
+        pos = sc2.slider(_t("Posisi X penampang (m)", "Section X position (m)"), float(bx[0]), float(bx[1]), float(np.clip(ctr[0], bx[0], bx[1])), 0.25, key="ul_spos_y")
+        g, zz, S = ul.section_field(A["patches"], Lp, "y", pos, bx[2], bx[3], zt, 181, 110)
+    fig2 = go.Figure()
+    ms = float(S.max())
+    fig2.add_trace(go.Contour(x=g, y=zz, z=S.T, colorscale="Turbo", contours=dict(start=0.02 * ms, end=ms, size=ms / 14, coloring="heatmap", showlines=True), line=dict(width=0.5, color="rgba(255,255,255,0.55)"),
+                              colorbar=dict(title="kPa", thickness=10), hovertemplate="%{x:.1f} m<br>z %{y:.2f} m<br>Δσ %{z:.1f} kPa<extra></extra>"))
+    for l in Lp:
+        fig2.add_hline(y=l["z1"], line=dict(color="white", width=1.2, dash="dot"), annotation_text=f"{l['name']} (E={l['E']:g} MPa)", annotation_position="bottom right", annotation_font_size=10)
+    if zw >= 0 and zw < zt:
+        fig2.add_hline(y=zw, line=dict(color="#4dc3ff", width=2), annotation_text=_t("muka air", "water level"), annotation_position="top left", annotation_font_color="#4dc3ff")
+    if sax == "y":
+        fig2.add_vline(x=0, line=dict(color="#ff4d4d", width=3, dash="dash"), annotation_text=_t("tepi crest", "crest edge"))
+    for p in A["patches"]:
+        cxy = p["center"][0] if sax == "x" else p["center"][1]
+        off = p["center"][1] if sax == "x" else p["center"][0]
+        if abs(off - pos) <= (p["size"][1] if True else 0) + 0.3 + p["size"][0]:
+            fig2.add_trace(go.Scatter(x=[cxy], y=[0.0], mode="markers", marker=dict(symbol="triangle-down", size=11, color="white"), showlegend=False, hoverinfo="skip"))
+    fig2.update_layout(height=470, margin=dict(l=8, r=8, t=30, b=8), title=_t("Penampang tegangan vertikal tambahan (bulb tegangan)", "Section of added vertical stress (pressure bulb)"),
+                       xaxis=dict(title=_t("Jarak (m)", "Distance (m)")), yaxis=dict(title=_t("Kedalaman (m)", "Depth (m)"), autorange="reversed"))
+    st.plotly_chart(fig2, width="stretch")
+
+    # --- profil kedalaman: unit 1, unit 2, gabungan
+    xc, yc = A["crit"]
+    zs = A["z"]
+    fig3 = go.Figure()
+    for l in Lp:
+        fig3.add_hrect(y0=l["z0"], y1=l["z1"], fillcolor={"timbunan": "#b78b4a", "pasir": "#f2d675", "lumpur": "#6b442a", "lempung": "#7a8a6a", "batuan": "#8d8d8d"}.get(l["type"], "#999"), opacity=0.18, line_width=0,
+                       annotation_text=l["name"], annotation_position="top right", annotation_font_size=10)
+    if nU == 2:
+        for i in range(2):
+            pi = ul.unit_patches(ulist[i]["unit"], ulist[i]["state"], ulist[i]["pose"], float(dyn))
+            fig3.add_trace(go.Scatter(x=ul.stress_field(pi, xc, yc, zs, Lp), y=zs, mode="lines", name=_t(f"Unit {i + 1} saja", f"Unit {i + 1} alone"), line=dict(width=1.5, dash="dot")))
+    fig3.add_trace(go.Scatter(x=A["prof"], y=zs, mode="lines", name=_t("Gabungan", "Combined"), line=dict(width=3, color="#e5322d")))
+    fig3.add_trace(go.Scatter(x=A["init"]["eff"], y=A["init"]["z"], mode="lines", name=_t("σ'v awal (tegangan efektif)", "Initial σ'v"), line=dict(width=1.5, color="#333", dash="dash")))
+    fig3.update_layout(height=420, margin=dict(l=8, r=8, t=30, b=8), title=_t("Profil Δσz terhadap kedalaman pada titik paling terbebani", "Δσz profile with depth at the most loaded point"),
+                       xaxis=dict(title="kPa"), yaxis=dict(title=_t("Kedalaman (m)", "Depth (m)"), autorange="reversed"), legend=dict(orientation="h", y=-0.2))
+    st.plotly_chart(fig3, width="stretch")
+
+    # --- interaksi dua unit
+    if nU == 2:
+        _sub_header(_t("4. Jarak pengaruh antar unit", "4. Interaction distance between the units"))
+        soft = next((l for l in Lp if l["type"] in ("lumpur", "lempung") and l["E"] < 15), None)
+        d0 = float(min(max(soft["z0"] + 0.05 if soft else Lp[0]["z1"], 0.2), zt))
+        dz = st.slider(_t("Kedalaman evaluasi (m)", "Evaluation depth (m)"), 0.2, float(zt), d0, 0.1, key="ul_idepth",
+                       help=_t("Default: puncak lapisan lunak pertama (mis. lumpur).", "Default: top of the first soft layer (e.g. mud)."))
+        spc, base1, pair, pct = ul.interaction_curve(ulist[0]["unit"], ulist[0]["state"], ulist[1]["unit"], ulist[1]["state"], Lp, float(dz), heading=90.0, dyn=float(dyn))
+        thr = st.number_input(_t("Batas tambahan tegangan dianggap tak berpengaruh (%)", "Added stress regarded as negligible (%)"), 1.0, 30.0, 5.0, 1.0, key="ul_thr")
+        ok = np.where(pct <= thr)[0]
+        s_inf = None
+        for i0 in range(len(spc)):
+            if np.all(pct[i0:] <= thr):
+                s_inf = float(spc[i0])
+                break
+        fig4 = go.Figure()
+        fig4.add_trace(go.Scatter(x=spc, y=pct, mode="lines", line=dict(width=3, color="#e5322d"), name=_t("Tambahan puncak Δσ (%)", "Added peak Δσ (%)")))
+        fig4.add_hline(y=thr, line=dict(color="#18a058", dash="dash"), annotation_text=f"{thr:.0f} %")
+        fig4.add_vline(x=sp, line=dict(color="#333", dash="dot"), annotation_text=_t("jarak sekarang", "current spacing"))
+        fig4.update_layout(height=340, margin=dict(l=8, r=8, t=30, b=8), title=_t(f"Pengaruh unit 2 terhadap puncak Δσ pada kedalaman {dz:.1f} m", f"Effect of unit 2 on the peak Δσ at {dz:.1f} m depth"),
+                           xaxis=dict(title=_t("Jarak pusat-ke-pusat sepanjang crest (m)", "Centre-to-centre spacing along the crest (m)")), yaxis=dict(title="%"))
+        st.plotly_chart(fig4, width="stretch")
+        cur = float(np.interp(sp, spc, pct))
+        if s_inf is not None:
+            st.success(_t(f"Jarak pengaruh pada kedalaman {dz:.1f} m ≈ {s_inf:.0f} m: lebih jauh dari itu unit saling tidak menambah tegangan (> {thr:.0f} %). Pada jarak sekarang ({sp:.0f} m) tambahannya {cur:.1f} %.",
+                          f"Interaction distance at {dz:.1f} m depth ≈ {s_inf:.0f} m: beyond it the units do not add stress (> {thr:.0f} %). At the current spacing ({sp:.0f} m) the addition is {cur:.1f} %."))
+        else:
+            st.warning(_t("Dalam rentang 2–60 m pengaruh antar unit masih di atas batas; perlu jarak lebih besar atau tinjau ulang.", "Within 2–60 m the interaction stays above the limit; use a larger spacing or review."))
+        st.dataframe(pd.DataFrame({_t("Jarak (m)", "Spacing (m)"): spc[::2], _t("Puncak Δσ gabungan (kPa)", "Combined peak Δσ (kPa)"): np.round(pair[::2], 1), _t("Tambahan (%)", "Added (%)"): np.round(pct[::2], 1)}), width="stretch", hide_index=True)
+
+    # --- perbandingan berisi vs kosong
+    _sub_header(_t("5. Berisi vs kosong (satu unit)", "5. Loaded vs empty (single unit)") if nU == 1 else _t("5. Berisi vs kosong (unit 1)", "5. Loaded vs empty (unit 1)"))
+    u1 = ulist[0]["unit"]
+    cmp_rows = []
+    for stt in (["loaded", "empty"] if u1["kind"] == "truck" else ["empty"]):
+        pp = ul.unit_patches(u1, stt, ulist[0]["pose"], float(dyn))
+        row = {_t("Kondisi", "State"): (_t("Berisi", "Loaded") if stt == "loaded" else _t("Kosong", "Empty") if u1["kind"] == "truck" else _t("Operasi", "Operating")),
+               _t("Berat (t)", "Weight (t)"): round(sum(p["force"] for p in pp) / 9.81 / float(dyn), 1), _t("Tekanan kontak (kPa)", "Contact pressure (kPa)"): round(max(p["q"] for p in pp))}
+        for l in Lp:
+            xc1, yc1 = pp[0]["center"]
+            row[f"Δσ {l['name']} (kPa)"] = round(float(ul.stress_field(pp, pp[-1]["center"][0], pp[-1]["center"][1], 0.5 * (l["z0"] + l["z1"]), Lp)), 1)
+        cmp_rows.append(row)
+    st.dataframe(pd.DataFrame(cmp_rows), width="stretch", hide_index=True)
+    st.download_button(_t("Unduh tabel hasil per lapisan (CSV)", "Download per-layer results (CSV)"), data=pd.DataFrame(rows).to_csv(index=False).encode("utf-8"), file_name="beban_unit_per_lapisan.csv", mime="text/csv", key="ul_dl")
+    st.caption(_t("Pada batas lapisan keras ke lunak, Δσ turun tiba-tiba (efek pelat keras) karena metode Odemark; baca nilai di atas dan di bawah batas secara terpisah.", "At a stiff-to-soft interface Δσ drops abruptly (stiff-slab effect) because of the Odemark method; read the values just above and below the interface separately."))
+    st.caption(_t("Catatan: Δσ dihitung pada titik/kolom dengan nilai terbesar di tengah tiap lapisan; FS adalah rasio q_ult (c·Nc + σ·Nq + 0,5·γ·B·Nγ, lebar efektif ban/track + sebaran 30°) terhadap beban total di titik itu -- indikatif saja.",
+                  "Note: Δσ is the largest value at mid-layer; FS is the ratio of q_ult (c·Nc + σ·Nq + 0.5·γ·B·Nγ, effective tyre/track width + 30° spread) to the total load at that point -- indicative only."))
+
+with tabE:
+    _unitload_tab()
+
+
+# =========================================================
+# ====== MODUL: KETAHANAN SEKATAN (tekanan air & lumpur) =====
+# =========================================================
+_BUND_SRC = r'''"""
+Mesin ketahanan sekatan (bund / tanggul sekat) terhadap air & lumpur kolam -- ILUSTRATIF / indikatif.
+
+Model:
+  * Medan: DEM kolam (z0) + permukaan desain sekatan (zd). Badan sekatan = sel dengan zd > z0.
+  * Muatan fluida pada muka basah sekatan: air (gamma_w) + lumpur sebagai fluida berat (gamma_m, faktor K) di bawah muka lumpur:
+        p(z) = gw*(Lw - z)                              untuk z >= Lm
+        p(z) = gw*(Lw - Lm) + K*gm*(Lm - z)             untuk z <  Lm
+    Hanya sel permukaan sekatan yang terendam dan terhubung ke kolam (flood fill dari titik kolam) yang menerima tekanan.
+  * Gaya vektor per sel: F = p * (zx, zy, -1) dA (tekanan menekan ke dalam badan sekatan).
+  * Stabilitas per stasiun sepanjang sumbu sekatan (penampang tegak lurus sumbu): berat badan, tekanan muka (horizontal & vertikal),
+    uplift trapesium (kepala hulu -> hilir/tailwater), FS geser, FS guling terhadap kaki hilir, eksentrisitas & tegangan dasar.
+"""
+import math
+import numpy as np
+
+GW = 9.81
+
+
+# ---------------------------------------------------------------- domain
+def prepare(xs, ys, z, zd_fn, n_target=130, margin_m=30.0, min_body=0.10):
+    """Potong domain di sekitar sekatan lalu turunkan resolusi. xs, ys: sumbu grid DEM; z[nx,ny]; zd_fn(X,Y)-> elevasi desain (nan di luar)."""
+    xs = np.asarray(xs, float); ys = np.asarray(ys, float); z = np.asarray(z, float)
+    GX, GY = np.meshgrid(xs, ys, indexing="ij")
+    zd = np.asarray(zd_fn(GX, GY), float)
+    body = np.isfinite(zd) & np.isfinite(z) & ((zd - z) > min_body)
+    if body.sum() < 6:
+        raise ValueError("Desain sekatan tidak berada di atas kontur kolam (tidak ada badan sekatan).")
+    ii, jj = np.nonzero(body)
+    x0, x1 = xs[ii.min()] - margin_m, xs[ii.max()] + margin_m
+    y0, y1 = ys[jj.min()] - margin_m, ys[jj.max()] + margin_m
+    span = max(x1 - x0, y1 - y0)
+    h = max(span / n_target, 0.5)
+    X = np.arange(x0, x1 + 1e-9, h)
+    Y = np.arange(y0, y1 + 1e-9, h)
+    from scipy.interpolate import RegularGridInterpolator
+    fz = np.where(np.isfinite(z), z, np.nanmean(z))
+    itp = RegularGridInterpolator((xs, ys), fz, bounds_error=False, fill_value=None)
+    GXn, GYn = np.meshgrid(X, Y, indexing="ij")
+    z0 = itp(np.stack([GXn.ravel(), GYn.ravel()], axis=1)).reshape(GXn.shape)
+    zdn = np.asarray(zd_fn(GXn, GYn), float)
+    bodyn = np.isfinite(zdn) & ((zdn - z0) > min_body)
+    zdn = np.where(bodyn, zdn, z0)
+    return dict(X=X, Y=Y, dx=float(h), z0=z0, zd=zdn, body=bodyn, nx=len(X), ny=len(Y))
+
+
+def _flood(allowed, seed):
+    from scipy import ndimage as ndi
+    lab, n = ndi.label(allowed)
+    if not allowed[seed]:
+        return np.zeros_like(allowed)
+    return lab == lab[seed]
+
+
+def default_seed(dom):
+    """Titik kolam otomatis: elevasi terendah dalam jarak 45 m dari badan sekatan (di luar badan)."""
+    from scipy import ndimage as ndi
+    near = ndi.binary_dilation(dom["body"], iterations=max(2, int(45 / dom["dx"]))) & ~dom["body"]
+    z = np.where(near, dom["z0"], np.inf)
+    return np.unravel_index(int(np.argmin(z)), z.shape)
+
+
+def wet_cells(dom, level, seed):
+    """Sel terendam (permukaan = max(z0, zd) < level) yang terhubung ke titik kolam."""
+    surf = np.maximum(dom["z0"], np.where(dom["body"], dom["zd"], dom["z0"]))
+    allowed = surf < level
+    # titik kolam harus terendam: kalau tidak, naikkan 'allowed' di seed
+    if not allowed[seed]:
+        return np.zeros_like(allowed)
+    return _flood(allowed, seed)
+
+
+def pressure_at(zs, Lw, Lm, gm, K):
+    """Tekanan fluida (kPa) pada elevasi zs."""
+    zs = np.asarray(zs, float)
+    pw = np.where(zs < Lw, GW * (Lw - zs), 0.0)
+    if Lm is None or Lm <= -1e8:
+        return pw
+    d = np.where(zs < Lm, (GW * (Lw - Lm) if Lw > Lm else 0.0) + K * gm * (Lm - zs), pw)
+    return np.where(zs >= Lm, pw, d)
+
+
+# ---------------------------------------------------------------- sumbu & stasiun
+def axis_frame(dom, seed, n_stat=28):
+    """Sumbu utama sekatan (PCA footprint) + arah silang menuju hilir (menjauh dari kolam)."""
+    ii, jj = np.nonzero(dom["body"])
+    P = np.stack([dom["X"][ii], dom["Y"][jj]], axis=1)
+    c0 = P.mean(axis=0)
+    w, v = np.linalg.eigh(np.cov((P - c0).T))
+    a = v[:, 1]
+    cvec = np.array([-a[1], a[0]])
+    pond = np.array([dom["X"][seed[0]], dom["Y"][seed[1]]])
+    if np.dot(c0 - pond, cvec) < 0:
+        cvec = -cvec            # c menunjuk dari kolam menuju sekatan/hilir
+    t = (P - c0) @ a
+    s = (P - c0) @ cvec
+    return dict(c0=c0, a=a, c=cvec, t=(float(t.min()), float(t.max())), s=(float(s.min()), float(s.max())), n=n_stat)
+
+
+def _profile(dom, fr, i_stat, ds):
+    """Profil penampang stasiun i: s (silang), z0, zd rata-rata per bin silang."""
+    t0, t1 = fr["t"]
+    dt = (t1 - t0) / fr["n"]
+    ta, tb = t0 + i_stat * dt, t0 + (i_stat + 1) * dt
+    ii, jj = np.nonzero(dom["body"])
+    P = np.stack([dom["X"][ii], dom["Y"][jj]], axis=1)
+    Q = (P - fr["c0"])
+    t = Q @ fr["a"]
+    m = (t >= ta) & (t < tb + (1e-9 if i_stat == fr["n"] - 1 else 0))
+    if m.sum() < 2:
+        return None
+    s = (Q[m] @ fr["c"])
+    s_all = np.arange(s.min() - 4 * ds, s.max() + 4 * ds + 1e-9, ds)
+    # profil dari semua sel (termasuk tanah di luar badan) dalam pita yang sama
+    GX, GY = np.meshgrid(dom["X"], dom["Y"], indexing="ij")
+    Qa = np.stack([GX.ravel() - fr["c0"][0], GY.ravel() - fr["c0"][1]], axis=1)
+    ta_ = Qa @ fr["a"]
+    sa_ = Qa @ fr["c"]
+    mm = (ta_ >= ta) & (ta_ < tb)
+    z0f = dom["z0"].ravel()[mm]
+    zdf = dom["zd"].ravel()[mm]
+    sf = sa_[mm]
+    idx = np.clip(np.round((sf - s_all[0]) / ds).astype(int), 0, len(s_all) - 1)
+    cnt = np.bincount(idx, minlength=len(s_all)).astype(float)
+    z0p = np.bincount(idx, weights=z0f, minlength=len(s_all)) / np.maximum(cnt, 1)
+    zdp = np.bincount(idx, weights=zdf, minlength=len(s_all)) / np.maximum(cnt, 1)
+    ok = cnt > 0
+    if ok.sum() < 3:
+        return None
+    return dict(s=s_all[ok], z0=z0p[ok], zd=zdp[ok], tmid=0.5 * (ta + tb), width=tb - ta)
+
+
+def station_stability(prof, Lw, Lm, gm, K, gb, phi_b, c_b, tail, uplift=True):
+    """Gaya & FS per meter panjang untuk satu profil. s meningkat ke hilir (menjauhi kolam). Return dict."""
+    s, z0, zd = prof["s"], prof["z0"], prof["zd"]
+    body = (zd - z0) > 0.05
+    if body.sum() < 2:
+        return None
+    ib = np.nonzero(body)[0]
+    i0, i1 = ib.min(), ib.max()
+    s0, s1 = s[i0], s[i1]
+    B = max(s1 - s0, 0.5)
+    ds = float(np.median(np.diff(s))) if len(s) > 1 else 1.0
+    th = np.where(body, zd - z0, 0.0)
+    W = float(np.sum(th) * ds * gb)
+    sc = float(np.sum(th * s) / max(np.sum(th), 1e-9))
+    z_toe = float(z0[i1])           # kaki hilir
+    z_up = float(z0[i0])
+    # tekanan muka: segmen permukaan antara i0-1..i1 pada sisi hulu (s kecil) yang terendam; naik ke puncak
+    zt = int(np.argmax(zd))
+    Fh = Mov = V = Mv = 0.0
+    zs_prof = np.where(body, zd, z0)
+    # sisi hulu: dari i0 sampai puncak, z naik; segmen terendam bila zmid < Lw
+    for i in range(max(i0 - 1, 0), zt):
+        za, zb = zs_prof[i], zs_prof[i + 1]
+        if zb <= za:
+            continue
+        zm = 0.5 * (za + zb)
+        if zm >= Lw:
+            # bagian atas segmen mungkin sebagian terendam
+            if za >= Lw:
+                continue
+            zb = min(zb, Lw)
+            zm = 0.5 * (za + zb)
+        p = float(pressure_at(zm, Lw, Lm, gm, K))
+        dz = zb - za
+        dsh = (s[i + 1] - s[i]) * (dz / max(zs_prof[i + 1] - zs_prof[i], 1e-9))
+        dF = p * dz                  # horizontal ke hilir
+        dV = p * dsh                 # vertikal ke bawah
+        sm = 0.5 * (s[i] + s[i + 1])
+        Fh += dF
+        Mov += dF * (zm - z_toe)
+        V += dV
+        Mv += dV * (s1 - sm)
+    # uplift trapesium
+    U = Mu = 0.0
+    if uplift:
+        p1 = float(GW * max(Lw - z_up, 0.0))
+        p2 = float(GW * max((tail if tail is not None else z_toe) - z_toe, 0.0))
+        U = 0.5 * (p1 + p2) * B
+        xu = B * (p1 + 2 * p2) / (3 * (p1 + p2)) if (p1 + p2) > 1e-9 else B / 2
+        Mu = U * (B - xu)        # lengan terhadap kaki hilir (xu dari kaki hulu)
+    N = W + V - U
+    Mres = W * (s1 - sc) + Mv
+    Mot = Mov + Mu
+    FS_s = (c_b * B + max(N, 0.0) * math.tan(math.radians(phi_b))) / max(Fh, 1e-6) if Fh > 1e-6 else 99.0
+    FS_o = Mres / max(Mot, 1e-6) if Mot > 1e-6 else 99.0
+    # eksentrisitas terhadap tengah dasar
+    xr = (Mres - Mot) / max(N, 1e-6)      # jarak resultan dari kaki hilir
+    e = B / 2 - xr
+    qmax = N / B * (1 + 6 * e / B) if N > 0 else 0.0
+    qmin = N / B * (1 - 6 * e / B) if N > 0 else 0.0
+    return dict(Fh=Fh, V=V, W=W, U=U, N=N, FS_s=min(FS_s, 99.0), FS_o=min(FS_o, 99.0), e=e, B=B, qmax=qmax, qmin=qmin, Mov=Mot, Mres=Mres, h=float(np.max(th)))
+
+
+# ---------------------------------------------------------------- simulasi skenario
+def level_series(w0, w1, m0, m1, mode, n):
+    """Skenario muka air/lumpur: naik / turun / naik lalu turun / turun lalu naik."""
+    u = np.linspace(0, 1, n)
+    if mode == "naik":
+        f = u
+    elif mode == "turun":
+        f = u
+    elif mode == "naik-turun":
+        f = np.where(u < 0.5, 2 * u, 2 - 2 * u)
+    else:
+        f = np.where(u < 0.5, 2 * u, 2 - 2 * u)
+    if mode == "turun":
+        return w0 + (w1 - w0) * f, m0 + (m1 - m0) * f      # w0 awal, w1 akhir (diisi pengguna lebih rendah)
+    return w0 + (w1 - w0) * f, m0 + (m1 - m0) * f
+
+
+def run(dom, Lw_t, Lm_t, gm=15.0, K=1.0, gb=19.0, phi_b=30.0, c_b=0.0, tail=None, uplift=True, seed=None, n_stat=28, progress=None):
+    seed = seed or default_seed(dom)
+    fr = axis_frame(dom, seed, n_stat)
+    ds = dom["dx"]
+    profs = [_profile(dom, fr, i, ds) for i in range(fr["n"])]
+    X, Y, z0, zd, body = dom["X"], dom["Y"], dom["z0"], dom["zd"], dom["body"]
+    dx = dom["dx"]
+    gz_x, gz_y = np.gradient(zd, dx, dx)
+    nT = len(Lw_t)
+    _GXg, _GYg = np.meshgrid(X, Y, indexing="ij")
+    _Sg = (_GXg - fr["c0"][0]) * fr["c"][0] + (_GYg - fr["c0"][1]) * fr["c"][1]
+    _sbmax = float(_Sg[body].max())
+    PF = np.zeros((nT, dom["nx"], dom["ny"]), np.uint8)
+    pmax = 0.0
+    Pall = []
+    series = []
+    stats = []
+    WET = np.zeros((nT, dom["nx"], dom["ny"]), np.uint8)
+    MUD = np.zeros((nT, dom["nx"], dom["ny"]), np.uint8)
+    for k in range(nT):
+        Lw, Lm = float(Lw_t[k]), float(Lm_t[k])
+        wet = wet_cells(dom, Lw, seed)
+        WET[k] = wet
+        # lumpur: sel basah dengan z0 < Lm (terhubung)
+        mud = wet & (np.maximum(z0, np.where(body, zd, z0)) < Lm) if Lm > -1e8 else np.zeros_like(wet)
+        MUD[k] = mud
+        face = body & wet
+        P = np.where(face, pressure_at(zd, Lw, Lm if Lm > -1e8 else None, gm, K), 0.0)
+        Pall.append(P)
+        pmax = max(pmax, float(P.max()))
+        dA = dx * dx
+        Fx = float(np.sum(P * gz_x) * dA); Fy = float(np.sum(P * gz_y) * dA); Fz = float(-np.sum(P) * dA)
+        Fn = Fx * fr["c"][0] + Fy * fr["c"][1]     # dorong ke hilir (arah c)
+        st_k = []
+        for i, pf in enumerate(profs):
+            if pf is None:
+                st_k.append(None)
+                continue
+            r = station_stability(pf, Lw, Lm if Lm > -1e8 else None, gm, K, gb, phi_b, c_b, tail, uplift)
+            if r is not None:
+                r["t"] = pf["tmid"]
+                r["width"] = pf["width"]
+            st_k.append(r)
+        stats.append(st_k)
+        valid = [r for r in st_k if r]
+        fs_s = min([r["FS_s"] for r in valid]) if valid else 99.0
+        fs_o = min([r["FS_o"] for r in valid]) if valid else 99.0
+        tot = float(P.sum())
+        if tot > 0:
+            GXg, GYg = np.meshgrid(X, Y, indexing="ij")
+            ccx, ccy, ccz = float((P * GXg).sum() / tot), float((P * GYg).sum() / tot), float((P * zd).sum() / tot)
+        else:
+            ccx = ccy = ccz = None
+        series.append(dict(k=k, Lw=Lw, Lm=Lm, Fx=Fx, Fy=Fy, Fz=Fz, Fn=Fn, Fres=float(math.hypot(Fx, Fy)), FS_s=fs_s, FS_o=fs_o,
+                           cx=ccx, cy=ccy, cz=ccz, pmax=float(P.max()), bypass=bool((wet & (_Sg > _sbmax + 2 * dx)).any()),
+                           wet_area=float(wet.sum() * dA), face_area=float(face.sum() * dA),
+                           Fh_total=float(sum((r["Fh"] * r["width"]) for r in valid)) if valid else 0.0))
+        if progress:
+            progress((k + 1) / nT)
+    pmax = max(pmax, 1e-6)
+    for k in range(nT):
+        PF[k] = np.rint(255 * np.clip(Pall[k] / pmax, 0, 1)).astype(np.uint8)
+    return dict(dom=dom, fr=fr, seed=seed, series=series, stats=stats, PF=PF, WET=WET, MUD=MUD, pmax=pmax, profs=profs, Lw=np.asarray(Lw_t), Lm=np.asarray(Lm_t),
+                params=dict(gm=gm, K=K, gb=gb, phi_b=phi_b, c_b=c_b, tail=tail, uplift=uplift))
+
+
+# ---------------------------------------------------------------- desain sekatan dari garis sumbu
+def bund_surface_fn(polylines, crest_z, crest_w=4.0, slope_up=2.0, slope_dn=2.0, side_ref=None):
+    """Permukaan desain sekatan trapesium dari garis sumbu (list polyline [(x,y)...]); crest_z = elevasi puncak (m).
+    Lereng H:V (slope_*). Kembalikan fungsi zd(X,Y) (nan di luar). Jarak ke sumbu dihitung per segmen."""
+    segs = []
+    for pl in polylines:
+        for a, b in zip(pl[:-1], pl[1:]):
+            segs.append((a[0], a[1], b[0], b[1]))
+    segs = np.array(segs, float)
+
+    def fn(X, Y):
+        X = np.asarray(X, float); Y = np.asarray(Y, float)
+        best = np.full(X.shape, np.inf)
+        for ax, ay, bx, by in segs:
+            vx, vy = bx - ax, by - ay
+            L2 = vx * vx + vy * vy
+            t = np.clip(((X - ax) * vx + (Y - ay) * vy) / max(L2, 1e-9), 0, 1)
+            d = np.hypot(X - (ax + t * vx), Y - (ay + t * vy))
+            best = np.minimum(best, d)
+        d = np.maximum(best - crest_w / 2.0, 0.0)
+        z = crest_z - d / max(0.5 * (slope_up + slope_dn), 0.1)
+        return np.where(best < crest_w / 2.0 + 40.0 * max(slope_up, slope_dn), z, np.nan)
+    return fn
+
+
+# ---------------------------------------------------------------- penampang & distribusi tekanan (2D)
+def section_pressure(res, k, i_stat):
+    """Data penampang stasiun i pada langkah k: profil tanah/badan, tekanan di muka basah (kPa) sepanjang profil. None bila stasiun kosong."""
+    pf = res["profs"][i_stat]
+    if pf is None:
+        return None
+    Lw, Lm = float(res["Lw"][k]), float(res["Lm"][k])
+    Lm_ = Lm if Lm > -1e8 else None
+    gm, K = res["params"]["gm"], res["params"]["K"]
+    s, z0, zd = pf["s"], pf["z0"], pf["zd"]
+    body = (zd - z0) > 0.05
+    zs = np.where(body, zd, z0)
+    zt = int(np.argmax(zd))
+    ib = np.nonzero(body)[0]
+    pts = []
+    if ib.size:
+        for i in range(max(ib.min() - 1, 0), zt + 1):
+            if zs[i] < Lw:
+                pts.append((float(s[i]), float(zs[i]), float(pressure_at(zs[i], Lw, Lm_, gm, K))))
+    return dict(s=s, z0=z0, zd=zd, body=body, face=pts, Lw=Lw, Lm=Lm, t=pf["tmid"])
+
+
+def pressure_profile_vs_depth(Lw, Lm, gm, K, z_base, n=60):
+    """Diagram tekanan hidrostatik klasik pada dinding vertikal: z dari z_base sampai Lw (kPa)."""
+    zz = np.linspace(z_base, Lw, n)
+    return zz, pressure_at(zz, Lw, Lm if (Lm is not None and Lm > -1e8) else None, gm, K)
+
+
+def build_scene_html(res, template_html, three_inline=None, three_cdn=None, title="Ketahanan Sekatan", subtitle="", labels=None, ve=1.0, fps=6.0, max_frames=60):
+    import json, base64
+    dom = res["dom"]
+    nT = len(res["series"])
+    sel = np.unique(np.linspace(0, nT - 1, min(nT, max_frames)).round().astype(int))
+    X, Y = dom["X"], dom["Y"]
+    zc = float(np.nanmean(dom["z0"]))
+    cx0, cy0 = float(0.5 * (X[0] + X[-1])), float(0.5 * (Y[0] + Y[-1]))
+    def enc(a):
+        return base64.b64encode(np.ascontiguousarray(a).astype(np.uint8).tobytes()).decode()
+    ser = []
+    for kk in sel:
+        s = dict(res["series"][kk])
+        s["label"] = f"t={kk}"
+        ser.append({q: (None if v is None else (float(v) if isinstance(v, (int, float, np.floating)) else v)) for q, v in s.items()})
+    for q in ser:
+        q["Lm"] = float(q["Lm"])
+    payload = dict(nx=int(dom["nx"]), ny=int(dom["ny"]), nT=int(len(sel)), dx=float(dom["dx"]), X=[round(float(v), 3) for v in X], Y=[round(float(v), 3) for v in Y],
+                   z0=[round(float(v), 3) for v in dom["z0"].ravel()], zd=[round(float(v), 3) for v in dom["zd"].ravel()],
+                   body=enc(dom["body"]), pf=enc(res["PF"][sel]), wet=enc(res["WET"][sel]), mud=enc(res["MUD"][sel]),
+                   series=ser, cx=cx0, cy=cy0, zc=zc, ve=float(ve), fps=float(fps), pmax=float(res["pmax"]), arrow_step=max(1, int(round(2.5 / dom["dx"]))),
+                   fscale=float(max(1.0, max(q["Fres"] for q in ser))), side_az=float(math.atan2(-res["fr"]["c"][0], res["fr"]["c"][1])),
+                   title=title, subtitle=subtitle, labels=labels or {}, three_cdn=three_cdn or [], f0=0)
+    js = json.dumps(payload, separators=(",", ":")).replace("</", "<\\/")
+    return template_html.replace("/*__PAYLOAD__*/null", js).replace("/*__THREE_INLINE__*/", (three_inline or "").replace("</script", "<\\/script"))
+
+
+def surface_from_dxf_axis(polylines, **kw):
+    return bund_surface_fn(polylines, **kw)
+
+
+def section_dxf(res, k, i_stat, title="Penampang sekatan - tekanan fluida"):
+    """DXF R2010 penampang stasiun: tanah, badan sekatan, air, lumpur, diagram tekanan (skala: 1 kPa = 0.1 m gambar)."""
+    import ezdxf, io
+    sp = section_pressure(res, k, i_stat)
+    if sp is None:
+        raise ValueError("Stasiun kosong")
+    doc = ezdxf.new("R2010")
+    for nm, col in (("TANAH", 8), ("SEKATAN", 7), ("AIR", 5), ("LUMPUR", 30), ("TEKANAN", 1), ("TEKS", 2)):
+        doc.layers.add(nm, color=col)
+    msp = doc.modelspace()
+    s, z0, zd = sp["s"], sp["z0"], sp["zd"]
+    msp.add_lwpolyline([(float(a), float(b)) for a, b in zip(s, z0)], dxfattribs={"layer": "TANAH"})
+    msp.add_lwpolyline([(float(a), float(b)) for a, b in zip(s, np.maximum(zd, z0))], dxfattribs={"layer": "SEKATAN"})
+    Lw, Lm = sp["Lw"], sp["Lm"]
+    sx0, sx1 = float(s.min()), float(s.max())
+    msp.add_line((sx0, Lw), (sx1, Lw), dxfattribs={"layer": "AIR"})
+    if Lm > -1e8:
+        msp.add_line((sx0, Lm), (sx1, Lm), dxfattribs={"layer": "LUMPUR"})
+    sc = 0.1
+    env = []
+    for (sa, za, p) in sp["face"]:
+        env.append((sa - p * sc, za))
+        msp.add_line((sa - p * sc, za), (sa, za), dxfattribs={"layer": "TEKANAN"})
+    if len(env) > 1:
+        msp.add_lwpolyline(env, dxfattribs={"layer": "TEKANAN"})
+    r = res["series"][k]
+    msp.add_text(f"{title}  Lw={Lw:.2f}  Lm={(Lm if Lm > -1e8 else float('nan')):.2f}  skala tekanan 1 kPa = {sc} m", dxfattribs={"layer": "TEKS", "height": 0.6}).set_placement((sx0, float(z0.max()) + 4))
+    buf = io.StringIO()
+    doc.write(buf)
+    return buf.getvalue().encode("utf-8")
+
+
+# ================================================================ REMBESAN & ZONA JENUH (badan sekatan)
+MATERIALS = {
+    "Lempung padat (k ≈ 1e-9 m/s)": dict(k=1e-9, n=0.38, sres=0.30, hc=3.0, kratio=1.0),
+    "Lanau lempungan (k ≈ 1e-8 m/s)": dict(k=1e-8, n=0.40, sres=0.25, hc=2.0, kratio=2.0),
+    "Lanau pasiran (k ≈ 1e-6 m/s)": dict(k=1e-6, n=0.40, sres=0.15, hc=1.0, kratio=3.0),
+    "Timbunan batuan lapuk campur (k ≈ 1e-5 m/s)": dict(k=1e-5, n=0.35, sres=0.10, hc=0.6, kratio=3.0),
+    "Pasir halus (k ≈ 1e-4 m/s)": dict(k=1e-4, n=0.38, sres=0.08, hc=0.4, kratio=2.0),
+    "Pasir / kerikil (k ≈ 1e-3 m/s)": dict(k=1e-3, n=0.35, sres=0.05, hc=0.2, kratio=1.5),
+}
+
+
+def _seep_station(prof, Lw_t, Lm_t, mat, mud, dt_s, thr, spinup_s, dxg, tail, progress=None):
+    from scipy import ndimage as ndi
+    import scipy.sparse as sp
+    from scipy.sparse.linalg import spsolve
+    s, z0, zd = prof["s"], prof["z0"], prof["zd"]
+    body = (zd - z0) > 0.05
+    ib = np.nonzero(body)[0]
+    if ib.size < 2:
+        return None
+    sa, sb = float(s[ib.min()]), float(s[ib.max()])
+    ns = max(int(round((sb - sa) / dxg)), 6)
+    dx = (sb - sa) / ns
+    sc = sa + (np.arange(ns) + 0.5) * dx
+    zb = np.interp(sc, s, z0)
+    zt = np.interp(sc, s, zd)
+    zlo, zhi = float(zb.min()), float(zt.max())
+    nz = max(int(np.ceil((zhi - zlo) / dx)), 4)
+    zc = zlo + (np.arange(nz) + 0.5) * dx
+    mask = (zc[:, None] >= zb[None, :]) & (zc[:, None] <= zt[None, :])
+    # pastikan tiap kolom punya minimal satu sel
+    for i in range(ns):
+        if not mask[:, i].any() and zt[i] - zb[i] > 0.05:
+            mask[int(np.clip(round((0.5 * (zt[i] + zb[i]) - zlo) / dx - 0.5), 0, nz - 1)), i] = True
+    N = int(mask.sum())
+    idx = -np.ones(mask.shape, int)
+    idx[mask] = np.arange(N)
+    J, I = np.nonzero(mask)
+    Zc, Sc = zc[J], sc[I]
+    crest = zt >= zt.max() - 0.51 * dx
+    cr0, cr1 = int(np.nonzero(crest)[0].min()), int(np.nonzero(crest)[0].max())
+    pad = np.pad(mask, 1)
+    left = ~pad[1:-1, :-2][J, I]
+    right = ~pad[1:-1, 2:][J, I]
+    top = ~pad[2:, 1:-1][J, I]
+    wu = (left & (I <= cr0)).astype(float) + (top & (I < cr0)).astype(float)
+    wd = (right & (I >= cr1)).astype(float) + (top & (I > cr1)).astype(float)
+    kh = float(mat["k"]); kv = kh / max(float(mat.get("kratio", 1.0)), 1e-3)
+    n_, sres, a_ = float(mat["n"]), float(mat["sres"]), 1.0 / max(float(mat["hc"]), 0.05)
+    ss = float(mat.get("ss", 1e-4))
+    kmud, tmud = float(mud.get("k", 1e-8)), float(mud.get("t", 1.0))
+    # pasangan sel tetangga
+    pr = np.nonzero(mask[:, :-1] & mask[:, 1:])
+    pa_h, pb_h = idx[pr[0], pr[1]], idx[pr[0], pr[1] + 1]
+    pu = np.nonzero(mask[:-1, :] & mask[1:, :])
+    pa_v, pb_v = idx[pu[0], pu[1]], idx[pu[0] + 1, pu[1]]
+    ARX = (dx * dx)
+
+    def props(h):
+        psi = h - Zc
+        sat = psi >= 0
+        e = np.exp(a_ * np.minimum(psi, 0.0))
+        kr = np.where(sat, 1.0, np.maximum(1e-4, e))
+        Sr = np.where(sat, 1.0, sres + (1 - sres) * e)
+        C = np.where(sat, ss, np.maximum(n_ * (1 - sres) * a_ * e, ss))
+        return psi, kr, Sr, C
+
+    def step(hn, Lw, Lm, dt, iters=14):
+        _, _, Srn, _ = props(hn)
+        thn = n_ * Srn
+        h = hn.copy()
+        for it in range(iters):
+            psi, kr, Sr, C = props(h)
+            th = n_ * Sr
+            Gh = 2 * (kh * kr[pa_h]) * (kh * kr[pb_h]) / np.maximum(kh * kr[pa_h] + kh * kr[pb_h], 1e-30)
+            Gv = 2 * (kv * kr[pa_v]) * (kv * kr[pb_v]) / np.maximum(kv * kr[pa_v] + kv * kr[pb_v], 1e-30)
+            ia = np.concatenate([pa_h, pa_v]); ib_ = np.concatenate([pb_h, pb_v]); G = np.concatenate([Gh, Gv])
+            diag = C * ARX / dt
+            dg = diag.copy()
+            np.add.at(dg, ia, G); np.add.at(dg, ib_, G)
+            rhs = diag * h - (th - thn) * ARX / dt
+            # batas hulu
+            Kc = kh * kr
+            sub = (Zc < Lw) & (wu > 0)
+            gwat = wu * Kc / (0.5 * dx) * dx
+            if Lm is not None:
+                gm = wu * dx / (tmud / kmud + 0.5 * dx / np.maximum(Kc, 1e-30))
+                gu = np.where(Zc < Lm, np.minimum(gm, gwat), gwat)
+            else:
+                gu = gwat
+            gu = np.where(sub, gu, 0.0)
+            dg += gu; rhs += gu * Lw
+            # batas hilir (muka rembesan / tailwater)
+            Hd = np.where(Zc < tail, tail, Zc) if tail is not None else Zc
+            actd = (wd > 0) & ((h > Hd) | (Zc < (tail if tail is not None else -1e9)))
+            gd = np.where(actd, wd * np.maximum(kh * kr, kh * 1.0 * (psi >= 0)) / (0.5 * dx) * dx, 0.0)
+            dg += gd; rhs += gd * Hd
+            A = sp.coo_matrix((np.concatenate([dg, -G, -G]), (np.concatenate([np.arange(N), ia, ib_]), np.concatenate([np.arange(N), ib_, ia]))), shape=(N, N)).tocsr()
+            hnew = spsolve(A, rhs)
+            err = float(np.max(np.abs(hnew - h)))
+            h = 0.5 * h + 0.5 * hnew if it < 3 else hnew
+            if err < 2e-3:
+                break
+        psi, kr, Sr, C = props(h)
+        qin = float(np.sum(gu * (Lw - h)))
+        qout = float(np.sum(np.where(actd, gd * (h - Hd), 0.0)))
+        return h, qin, qout, gu, actd
+
+    psi0 = -3.0 / a_
+    h = Zc + psi0
+    Lw0 = float(Lw_t[0]); Lm0 = float(Lm_t[0]) if Lm_t[0] > -1e8 else None
+    if spinup_s > 0:
+        dts = np.geomspace(spinup_s / 200.0, spinup_s / 6.0, 10)
+        for d in dts:
+            h, *_ = step(h, Lw0, Lm0, float(d))
+    nT = len(Lw_t)
+    HIST = np.full((nT, nz, ns), np.nan, np.float32)
+    PSI = np.full((nT, nz, ns), np.nan, np.float32)
+    M = dict(area=[], frac=[], radius=[], pen=[], qin=[], qout=[], exit=[], exit_z=[], U=[], zphr=[])
+    wet_prev = None
+    for k in range(nT):
+        Lw = float(Lw_t[k]); Lm = float(Lm_t[k]) if Lm_t[k] > -1e8 else None
+        if k > 0:
+            h, qin, qout, gu, actd = step(h, Lw, Lm, dt_s)
+        else:
+            h, qin, qout, gu, actd = step(h, Lw, Lm, max(dt_s * 1e-3, 1.0), iters=14)
+        psi, kr, Sr, C = props(h)
+        satg = np.zeros(mask.shape, bool); satg[J, I] = Sr >= thr
+        wetface = np.zeros(mask.shape, bool); wetface[J, I] = (wu > 0) & (Zc < Lw)
+        lab, nl = ndi.label(satg)
+        ids = np.unique(lab[wetface & satg]); ids = ids[ids > 0]
+        comp = np.isin(lab, ids) if ids.size else np.zeros_like(satg)
+        if comp.any() and wetface.any():
+            dist = ndi.distance_transform_edt(~wetface) * dx
+            rad = float(dist[comp].max())
+            rows = np.nonzero(comp.any(axis=1))[0]
+            pen = 0.0
+            for j in rows:
+                sf = sc[np.nonzero(mask[j])[0].min()]
+                pen = max(pen, float(sc[np.nonzero(comp[j])[0].max()] - sf))
+        else:
+            rad = pen = 0.0
+        area = float(comp.sum() * dx * dx)
+        ex = (wd > 0) & (psi >= -0.05)
+        # tekanan pori dasar
+        Ub = 0.0
+        for i in range(ns):
+            col = np.nonzero(mask[:, i])[0]
+            if col.size:
+                p = float(h[idx[col.min(), i]] - zb[i])
+                Ub += GW * max(p, 0.0) * dx
+        PSI[k][mask] = psi
+        HIST[k][mask] = Sr
+        M["area"].append(area); M["frac"].append(area / max(mask.sum() * dx * dx, 1e-9)); M["radius"].append(rad); M["pen"].append(pen)
+        M["qin"].append(qin * 86400.0); M["qout"].append(qout * 86400.0)
+        M["exit"].append(bool(ex.any())); M["exit_z"].append(float(Zc[ex].max()) if ex.any() else None); M["U"].append(Ub)
+        if progress:
+            progress((k + 1) / nT)
+    return dict(sc=sc, zc=zc, mask=mask, dx=dx, Sr=HIST, psi=PSI, zb=zb, zt=zt, B=sb - sa, cr=(float(sc[cr0]), float(sc[cr1])), **M)
+
+
+def run_seep(res, mat, mud, T_days, thr=0.9, spinup_days=0.0, dxg=0.5, tail=None, progress=None):
+    """Rembesan transien jenuh-tak-jenuh (Richards, Gardner) pada penampang tiap stasiun; bendung dasar kedap. Level air/lumpur dari skenario res."""
+    nT = len(res["Lw"])
+    dt = float(T_days) * 86400.0 / max(nT - 1, 1)
+    out = {}
+    stn = [i for i, p in enumerate(res["profs"]) if p is not None]
+    for c, i in enumerate(stn):
+        r = _seep_station(res["profs"][i], res["Lw"], res["Lm"], mat, mud, dt, thr, float(spinup_days) * 86400.0, dxg, tail)
+        if r is not None:
+            out[i] = r
+        if progress:
+            progress((c + 1) / len(stn))
+    P = res["params"]
+    fs = {}
+    for k in range(nT):
+        for i, r in out.items():
+            st = res["stats"][k][i]
+            if not st:
+                continue
+            Nn = max(st["W"] + st["V"] - r["U"][k], 0.0)
+            fs[(k, i)] = (P["c_b"] * st["B"] + Nn * math.tan(math.radians(P["phi_b"]))) / max(st["Fh"], 1e-6) if st["Fh"] > 1e-6 else 99.0
+    return dict(stations=out, fs_seep=fs, dt_days=dt / 86400.0, T_days=float(T_days), thr=thr, nT=nT)
+
+
+def _iso_lines(x, y, z, level):
+    """Garis kontur level pada grid z[ny,nx] -> list polyline [(x,y)...]. Sel NaN diabaikan."""
+    try:
+        import contourpy
+        zz = np.ma.masked_invalid(z)
+        cg = contourpy.contour_generator(x, y, zz)
+        out = []
+        for ln in cg.lines(level):
+            ln = np.asarray(ln)
+            if len(ln) > 1:
+                out.append([(float(a), float(b)) for a, b in ln])
+        return out
+    except Exception:
+        return []
+
+
+def seep_section_dxf(res, sr, k, i):
+    """DXF penampang zona jenuh: badan sekatan, batas jenuh (Sr=ambang), garis freatik, muka air & lumpur."""
+    import ezdxf, io
+    q = sr["stations"][i]
+    doc = ezdxf.new("R2010")
+    for nm, col in (("SEKATAN", 7), ("ZONA_JENUH", 5), ("GARIS_FREATIK", 1), ("AIR", 4), ("LUMPUR", 30), ("TEKS", 2)):
+        doc.layers.add(nm, color=col)
+    msp = doc.modelspace()
+    sc, zc, mask, dx = q["sc"], q["zc"], q["mask"], q["dx"]
+    s0 = float(sc.min()) - dx / 2
+    msp.add_lwpolyline([(float(a), float(b)) for a, b in zip(sc, q["zb"])] + [(float(sc[-1]) + dx / 2, float(q["zb"][-1])), (float(sc[-1]) + dx / 2, float(q["zt"][-1]))] + [(float(a), float(b)) for a, b in zip(sc[::-1], q["zt"][::-1])] + [(s0, float(q["zb"][0]))],
+                       dxfattribs={"layer": "SEKATAN"})
+    Sr = np.where(mask, q["Sr"][k], np.nan)
+    psi = np.where(mask, q["psi"][k], np.nan)
+    for ln in _iso_lines(sc, zc, Sr, sr["thr"]):
+        msp.add_lwpolyline(ln, dxfattribs={"layer": "ZONA_JENUH"})
+    for ln in _iso_lines(sc, zc, psi, 0.0):
+        msp.add_lwpolyline(ln, dxfattribs={"layer": "GARIS_FREATIK"})
+    sat = mask & (q["Sr"][k] >= sr["thr"])
+    for j, i2 in zip(*np.nonzero(sat)):          # tepi sel jenuh (cadangan bila kontur gagal / sel tunggal)
+        pass
+    Lw, Lm = float(res["Lw"][k]), float(res["Lm"][k])
+    x1 = s0 + 0.5 * q["B"]
+    msp.add_line((s0 - 2, Lw), (x1, Lw), dxfattribs={"layer": "AIR"})
+    if Lm > -1e8:
+        msp.add_line((s0 - 2, Lm), (x1, Lm), dxfattribs={"layer": "LUMPUR"})
+    msp.add_text(f"Zona jenuh langkah {k}  Lw={Lw:.2f}  radius={q['radius'][k]:.1f} m  penetrasi={q['pen'][k]:.1f} m  Sr>={sr['thr']:.2f}", dxfattribs={"layer": "TEKS", "height": 0.5}).set_placement((s0, float(q["zt"].max()) + 2))
+    buf = io.StringIO(); doc.write(buf)
+    return buf.getvalue().encode("utf-8")
+
+
+def seep_plan_dxf(res, sr, k):
+    """DXF denah (koordinat asli): garis kaki hulu sekatan (muka basah) dan garis batas jenuh = kaki hulu + penetrasi horizontal di tiap titik; juga garis radius."""
+    import ezdxf, io
+    fr = res["fr"]
+    doc = ezdxf.new("R2010")
+    for nm, col in (("MUKA_BASAH", 5), ("BATAS_JENUH", 1), ("RADIUS", 3), ("TEKS", 2)):
+        doc.layers.add(nm, color=col)
+    msp = doc.modelspace()
+    toe, front = [], []
+    for i in sorted(sr["stations"]):
+        q = sr["stations"][i]
+        t = res["profs"][i]["tmid"]
+        s_t = float(q["sc"].min())
+        base = fr["c0"] + fr["a"] * t
+        p0 = base + fr["c"] * s_t
+        p1 = base + fr["c"] * (s_t + q["pen"][k])
+        toe.append((float(p0[0]), float(p0[1]))); front.append((float(p1[0]), float(p1[1])))
+        if q["pen"][k] > 0.05:
+            msp.add_line(toe[-1], front[-1], dxfattribs={"layer": "RADIUS"})
+    if len(toe) > 1:
+        msp.add_lwpolyline(toe, dxfattribs={"layer": "MUKA_BASAH"})
+        msp.add_lwpolyline(front, dxfattribs={"layer": "BATAS_JENUH"})
+    msp.add_text(f"Zona jenuh langkah {k}  Lw={float(res['Lw'][k]):.2f} m  (penetrasi horizontal dari kaki hulu sekatan)", dxfattribs={"layer": "TEKS", "height": 2.0}).set_placement(toe[0] if toe else (0, 0))
+    buf = io.StringIO(); doc.write(buf)
+    return buf.getvalue().encode("utf-8")
+'''
+
+_BUND_VIEWER_TEMPLATE = r'''<!doctype html>
+<html lang="id"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ketahanan Sekatan 3D</title>
+<style>
+:root{--bg:#0c1118;--panel:rgba(16,22,31,.88);--fg:#eaf0f6;--mut:#9fb1c4;--acc:#f2b61c;--bad:#ff6a5c;--ok:#5fd38d;--line:rgba(255,255,255,.14)}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:12.5px/1.35 system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;overflow:hidden}
+#wrap{position:relative;width:100%;height:100%;background:radial-gradient(ellipse at 50% 20%,#2a3a4d 0%,#0c1118 72%)}
+canvas#gl{display:block;width:100%;height:100%;outline:none;touch-action:none;cursor:grab}
+.panel{position:absolute;background:var(--panel);border:1px solid var(--line);border-radius:10px;-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+#hud{left:10px;top:10px;padding:8px 12px;width:min(330px,calc(100% - 20px))}
+#hud .ttl{font-weight:650;font-size:13.5px} #hud .sub{color:var(--mut);font-size:11.5px}
+#hud table{width:100%;border-collapse:collapse;margin-top:6px;font-variant-numeric:tabular-nums;font-size:12px}
+#hud td{padding:2px 3px;border-top:1px solid var(--line)} #hud td:last-child{text-align:right;font-weight:600}
+.ok{color:var(--ok)} .wa{color:#ffd166} .bd{color:var(--bad);font-weight:700}
+#lgd{margin-top:7px;height:10px;border-radius:5px;border:1px solid var(--line)} #lgt{display:flex;justify-content:space-between;color:var(--mut);font-size:10.5px}
+.tb{position:absolute;right:10px;top:10px;display:flex;gap:5px}
+button{background:rgba(255,255,255,.08);color:var(--fg);border:1px solid var(--line);border-radius:7px;padding:4px 9px;cursor:pointer;font:inherit}
+button:hover{background:rgba(242,182,28,.3)}
+#bar{left:10px;right:10px;bottom:10px;padding:7px 10px;display:flex;gap:9px;align-items:center}
+#bar #play{min-width:34px;font-size:14px} #bar input[type=range]{flex:1;min-width:80px}
+#bar select{background:rgba(255,255,255,.08);color:var(--fg);border:1px solid var(--line);border-radius:7px;padding:3px 4px;font:inherit} #bar select option{color:#000}
+#err{position:absolute;inset:0;display:none;align-items:center;justify-content:center;text-align:center;padding:24px;background:rgba(8,12,18,.94);z-index:9;font-size:14px}
+</style></head>
+<body>
+<div id="wrap">
+  <canvas id="gl" tabindex="0"></canvas>
+  <div id="hud" class="panel"><div class="ttl" id="hT"></div><div class="sub" id="hS"></div><table id="hTab"></table><div id="lgd"></div><div id="lgt"></div></div>
+  <div class="tb"><button id="bReset"></button><button id="bSide"></button><button id="bTop"></button></div>
+  <div id="bar" class="panel"><button id="play">▶</button><input type="range" id="tl" min="0" max="1000" value="0"><span id="tt" style="min-width:150px;text-align:right"></span><select id="spd"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select></div>
+  <div id="err"><div id="errT"></div></div>
+</div>
+<script>/*__THREE_INLINE__*/</script>
+<script>window.__BD__ = /*__PAYLOAD__*/null;</script>
+<script>
+(function(){
+"use strict";
+var P = window.__BD__, L = P.labels;
+function $(i){return document.getElementById(i);}
+function showErr(m){ $('err').style.display='flex'; $('errT').textContent=m; }
+function loadThree(cb){ if (window.THREE) return cb(); var urls=P.three_cdn||[], i=0; (function next(){ if(i>=urls.length){showErr('three.js tidak dapat dimuat');return;} var s=document.createElement('script'); s.src=urls[i++]; s.onload=function(){ if(window.THREE) cb(); else next(); }; s.onerror=next; document.head.appendChild(s); })(); }
+function turbo(t){ t=Math.min(Math.max(t,0),1); var r=34.61+t*(1172.33-t*(10793.56-t*(33300.12-t*(38394.49-t*14825.05)))), g=23.31+t*(557.33+t*(1225.33-t*(3574.96-t*(1073.77+t*707.56)))), b=27.2+t*(3211.1-t*(15327.97-t*(27814-t*(22569.18-t*6838.66)))); return [Math.min(255,Math.max(0,r))/255,Math.min(255,Math.max(0,g))/255,Math.min(255,Math.max(0,b))/255]; }
+function b64(s){ var bs=atob(s), n=bs.length, a=new Uint8Array(n); for (var i=0;i<n;i++) a[i]=bs.charCodeAt(i); return a; }
+function start(){
+  var nx=P.nx, ny=P.ny, N=nx*ny, nT=P.nT, VE=P.ve||1.0;
+  var z0=new Float32Array(P.z0), zd=new Float32Array(P.zd), body=b64(P.body);
+  var PF=b64(P.pf), WET=b64(P.wet), MUD=b64(P.mud);
+  var ser=P.series, cx0=P.cx, cy0=P.cy, zc=P.zc;
+  var renderer; try { renderer=new THREE.WebGLRenderer({canvas:$('gl'),antialias:true,preserveDrawingBuffer:true}); } catch(e){ showErr('WebGL tidak tersedia'); return; }
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,2));
+  var scene=new THREE.Scene(); scene.background=new THREE.Color(0x182331); var cam=new THREE.PerspectiveCamera(45,1,0.5,6000);
+  scene.add(new THREE.HemisphereLight(0xcfe3ff,0x3a3326,0.85)); var dl=new THREE.DirectionalLight(0xffffff,0.8); dl.position.set(120,220,90); scene.add(dl);
+  function pos(i,j){ return [P.X[i]-cx0, (0), -(P.Y[j]-cy0)]; }
+  function mk(color,opacity,dbl){ var g=new THREE.BufferGeometry(); var p=new Float32Array(N*3), c=new Float32Array(N*3);
+    for (var i=0;i<nx;i++) for (var j=0;j<ny;j++){ var k=i*ny+j; p[3*k]=P.X[i]-cx0; p[3*k+2]=-(P.Y[j]-cy0); }
+    var idx=[]; for (var i=0;i<nx-1;i++) for (var j=0;j<ny-1;j++){ var a=i*ny+j,b=a+1,c2=a+ny,d=c2+1; idx.push(a,c2,b,b,c2,d); }
+    g.setAttribute('position',new THREE.BufferAttribute(p,3)); g.setAttribute('color',new THREE.BufferAttribute(c,3)); var nm=new Float32Array(N*3); for (var q=0;q<N;q++) nm[3*q+1]=1; g.setAttribute('normal',new THREE.BufferAttribute(nm,3)); g.setIndex(idx);
+    var m=new THREE.MeshLambertMaterial({vertexColors:true,transparent:opacity<1,opacity:opacity,side:dbl?THREE.DoubleSide:THREE.FrontSide,depthWrite:opacity>=1});
+    var mesh=new THREE.Mesh(g,m); scene.add(mesh); return mesh; }
+  var surf=mk(0,1,false), wat=mk(0,0.55,true), mud=mk(0,0.92,true);
+  function setY(mesh,fn){ var p=mesh.geometry.attributes.position.array; for (var k=0;k<N;k++) p[3*k+1]=fn(k)*VE; mesh.geometry.attributes.position.needsUpdate=true; mesh.geometry.computeVertexNormals(); }
+  function ze(k){ return (zd[k]-zc); }
+  setY(surf,ze);
+  // warna dasar tanah / badan sekatan
+  var zmin=1e9,zmax=-1e9; for (var k=0;k<N;k++){ zmin=Math.min(zmin,z0[k]); zmax=Math.max(zmax,zd[k]); }
+  // panah tekanan
+  var SAMP=[]; for (var i=1;i<nx-1;i+=P.arrow_step) for (var j=1;j<ny-1;j+=P.arrow_step){ var k=i*ny+j; if (body[k]) SAMP.push(k); }
+  var ag=new THREE.BufferGeometry(); var ap=new Float32Array(SAMP.length*6), ac=new Float32Array(SAMP.length*6);
+  ag.setAttribute('position',new THREE.BufferAttribute(ap,3)); ag.setAttribute('color',new THREE.BufferAttribute(ac,3));
+  var arrows=new THREE.LineSegments(ag,new THREE.LineBasicMaterial({vertexColors:true})); arrows.frustumCulled=false; scene.add(arrows);
+  var res=new THREE.ArrowHelper(new THREE.Vector3(1,0,0),new THREE.Vector3(0,0,0),10,0xffe14d,4,2.4); scene.add(res);
+  var dx=P.dx;
+  var shown={wat:true,mud:true,arr:true};
+  function frameSet(f){
+    f=Math.max(0,Math.min(nT-1,f)); var s=ser[f], o=f*N, Lw=s.Lw, Lm=s.Lm;
+    var cs=surf.geometry.attributes.color.array, cw=wat.geometry.attributes.color.array, cm=mud.geometry.attributes.color.array, pw=wat.geometry.attributes.position.array, pm=mud.geometry.attributes.position.array;
+    for (var k=0;k<N;k++){
+      var r,g,b, isb=body[k];
+      if (isb){ var p=PF[o+k]; if (p>0){ var c=turbo(0.12+0.88*p/255); r=c[0];g=c[1];b=c[2]; } else { r=0.62;g=0.58;b=0.5; } }
+      else { var t=(z0[k]-zmin)/Math.max(zmax-zmin,1); r=0.34+0.30*t; g=0.28+0.24*t; b=0.18+0.12*t; }
+      cs[3*k]=r; cs[3*k+1]=g; cs[3*k+2]=b;
+      var sf=Math.max(z0[k], isb?zd[k]:z0[k]);
+      var hasM=MUD[o+k]>0, hasW=WET[o+k]>0;
+      pm[3*k+1]=(hasM?Lm-zc:(sf-zc)-0.6)*VE; cm[3*k]=0.42; cm[3*k+1]=0.30; cm[3*k+2]=0.18;
+      pw[3*k+1]=(hasW?Lw-zc:(sf-zc)-0.6)*VE; cw[3*k]=0.22; cw[3*k+1]=0.52; cw[3*k+2]=0.85;
+    }
+    surf.geometry.attributes.color.needsUpdate=true; wat.geometry.attributes.color.needsUpdate=true; mud.geometry.attributes.color.needsUpdate=true;
+    wat.geometry.attributes.position.needsUpdate=true; mud.geometry.attributes.position.needsUpdate=true;
+    wat.visible=shown.wat; mud.visible=shown.mud; arrows.visible=shown.arr;
+    // panah tekanan: menuju ke dalam badan sekatan
+    var nn=0;
+    for (var q=0;q<SAMP.length;q++){ var k=SAMP[q], p=PF[o+k]/255, i=(k/ny)|0, j=k-i*ny;
+      if (p<0.02){ for (var u=0;u<6;u++){ ap[6*q+u]=0; ac[6*q+u]=0; } continue; }
+      var zx=(zd[k+ny]-zd[k-ny])/(2*dx), zy=(zd[k+1]-zd[k-1])/(2*dx);
+      var nxv=-zx, nyv=1, nzv=-(-zy); var nl=Math.sqrt(nxv*nxv+nyv*nyv+nzv*nzv); nxv/=nl; nyv/=nl; nzv/=nl;
+      var len=(3+9*p), x=P.X[i]-cx0, y=(zd[k]-zc)*VE, z=-(P.Y[j]-cy0);
+      ap[6*q]=x+nxv*len; ap[6*q+1]=y+nyv*len; ap[6*q+2]=z+nzv*len; ap[6*q+3]=x; ap[6*q+4]=y; ap[6*q+5]=z;
+      var c2=turbo(0.12+0.88*p); ac[6*q]=c2[0]; ac[6*q+1]=c2[1]; ac[6*q+2]=c2[2]; ac[6*q+3]=c2[0]; ac[6*q+4]=c2[1]; ac[6*q+5]=c2[2]; nn++; }
+    ag.attributes.position.needsUpdate=true; ag.attributes.color.needsUpdate=true;
+    // gaya resultan
+    var fh=Math.hypot(s.Fx,s.Fy);
+    if (fh>1 && s.cx!=null){ res.visible=true; var d=new THREE.Vector3(s.Fx,0,-s.Fy).normalize(); res.setDirection(d); res.position.set(s.cx-cx0-d.x*0*1,(s.cz-zc)*VE+2,-(s.cy-cy0)); var ln=Math.max(8,Math.min(60,fh/P.fscale*40)); res.setLength(ln,Math.min(ln*0.35,10),Math.min(ln*0.2,6)); res.position.addScaledVector(d,-ln); }
+    else res.visible=false;
+    var fsS=s.FS_s, fsO=s.FS_o;
+    function cl(v){ return v<1.0?'bd':(v<1.5?'wa':'ok'); } function fm(v){ return v>=99?'>10':v.toFixed(2); }
+    $('hTab').innerHTML='<tr><td>'+L.lw+'</td><td>'+Lw.toFixed(2)+' m</td></tr><tr><td>'+L.lm+'</td><td>'+(Lm<-1e8?'-':Lm.toFixed(2)+' m')+'</td></tr>'+
+      '<tr><td>'+L.fh+'</td><td>'+(s.Fres/1000>=1?(s.Fres/1000).toFixed(2)+' MN':s.Fres.toFixed(0)+' kN')+'</td></tr><tr><td>'+L.pmax+'</td><td>'+s.pmax.toFixed(0)+' kPa</td></tr>'+
+      '<tr><td>'+L.fss+'</td><td class="'+cl(fsS)+'">'+fm(fsS)+'</td></tr><tr><td>'+L.fso+'</td><td class="'+cl(fsO)+'">'+fm(fsO)+'</td></tr>';
+    $('tt').textContent=(s.label||'')+'  ('+(f+1)+'/'+nT+')';
+  }
+  // kamera
+  var span=Math.max(P.X[nx-1]-P.X[0],P.Y[ny-1]-P.Y[0]);
+  function HOME(){ return {az:0.6,pol:1.0,r:span*1.25,tx:0,ty:0,tz:0}; } var cs=HOME();
+  function setCam(){ cam.position.set(cs.tx+cs.r*Math.sin(cs.pol)*Math.sin(cs.az), cs.ty+cs.r*Math.cos(cs.pol), cs.tz+cs.r*Math.sin(cs.pol)*Math.cos(cs.az)); cam.lookAt(cs.tx,cs.ty,cs.tz); }
+  var canvas=$('gl'), drag=null;
+  canvas.addEventListener('pointerdown',function(e){ drag={x:e.clientX,y:e.clientY,pan:e.button===2||e.shiftKey}; canvas.setPointerCapture(e.pointerId); });
+  canvas.addEventListener('pointerup',function(){drag=null;}); canvas.addEventListener('contextmenu',function(e){e.preventDefault();});
+  canvas.addEventListener('pointermove',function(e){ if(!drag) return; var dx_=e.clientX-drag.x, dy_=e.clientY-drag.y; drag.x=e.clientX; drag.y=e.clientY;
+    if (drag.pan){ var k=cs.r*0.0016; cs.tx-=(Math.cos(cs.az)*dx_)*k; cs.tz+=(Math.sin(cs.az)*dx_)*k; cs.ty+=dy_*k; } else { cs.az-=dx_*0.006; cs.pol=Math.min(Math.max(cs.pol-dy_*0.006,0.05),1.55); } setCam(); });
+  canvas.addEventListener('wheel',function(e){ e.preventDefault(); cs.r=Math.min(Math.max(cs.r*Math.exp(e.deltaY*0.0012),8),5000); setCam(); },{passive:false});
+  $('bReset').textContent=L.b_reset; $('bSide').textContent=L.b_side; $('bTop').textContent=L.b_top;
+  $('bReset').onclick=function(){ cs=HOME(); setCam(); };
+  $('bSide').onclick=function(){ cs.az=P.side_az; cs.pol=1.45; setCam(); };
+  $('bTop').onclick=function(){ cs.pol=0.08; setCam(); };
+  $('hT').textContent=P.title; $('hS').textContent=P.subtitle;
+  var lg=[]; for (var i=0;i<=10;i++){ var c=turbo(0.12+0.88*i/10); lg.push('rgb('+Math.round(c[0]*255)+','+Math.round(c[1]*255)+','+Math.round(c[2]*255)+')'); }
+  $('lgd').style.background='linear-gradient(90deg,'+lg.join(',')+')'; $('lgt').innerHTML='<span>0</span><span>'+L.pressure+' (kPa)</span><span>'+P.pmax.toFixed(0)+'</span>';
+  function resize(){ var w=canvas.clientWidth,h=canvas.clientHeight; renderer.setSize(w,h,false); cam.aspect=w/h; cam.updateProjectionMatrix(); } window.addEventListener('resize',resize); resize();
+  var cur=P.f0||0, playing=false, last=0, tl=$('tl');
+  function setF(f){ cur=Math.max(0,Math.min(nT-1,f)); tl.value=Math.round(1000*cur/Math.max(nT-1,1)); frameSet(Math.round(cur)); }
+  tl.oninput=function(){ playing=false; $('play').textContent='▶'; setF(tl.value/1000*(nT-1)); };
+  $('play').onclick=function(){ playing=!playing; $('play').textContent=playing?'❚❚':'▶'; if(playing&&cur>=nT-1) cur=0; };
+  function loop(t){ var dt=(t-last)/1000; last=t; if (playing){ cur+=dt*P.fps*parseFloat($('spd').value); if(cur>=nT-1){cur=nT-1; playing=false; $('play').textContent='▶';} setF(cur);} renderer.render(scene,cam); requestAnimationFrame(loop); }
+  setCam(); setF(cur); requestAnimationFrame(loop);
+  window.__bdv={setF:setF,setCam:function(o){for(var k in o) cs[k]=o[k]; setCam();}};
+}
+loadThree(start);
+})();
+</script></body></html>
+'''
+
+
+def _bund_load():
+    import sys as _sys, types as _types, hashlib as _hl
+    nm = "_eroslope_bund_sim_" + _hl.md5(_BUND_SRC.encode("utf-8")).hexdigest()[:10]
+    if nm not in _sys.modules:
+        m = _types.ModuleType(nm)
+        m.__dict__["__file__"] = "<bund_sim>"
+        _sys.modules[nm] = m
+        exec(compile(_BUND_SRC, "<bund_sim>", "exec"), m.__dict__)
+    return _sys.modules[nm]
+
+
+def _bund_fs_label(v):
+    return _t("KRITIS", "CRITICAL") if v < 1.0 else (_t("Waspada", "Watch") if v < 1.5 else _t("Aman", "OK"))
+
+
+def _bund_section_fig(bd, res, k, i):
+    sp = bd.section_pressure(res, k, i)
+    fig = go.Figure()
+    if sp is None:
+        return fig
+    s, z0, zd = sp["s"], sp["z0"], sp["zd"]
+    top = np.maximum(zd, z0)
+    zlo = float(min(z0.min(), sp["Lw"] - 1)) - 1.0
+    fig.add_trace(go.Scatter(x=list(s) + list(s[::-1]), y=list(z0) + [zlo] * len(s), fill="toself", fillcolor="rgba(150,120,80,0.55)", line=dict(color="#7a5c36"), name=_t("Tanah dasar", "Ground"), hoverinfo="skip"))
+    fig.add_trace(go.Scatter(x=list(s) + list(s[::-1]), y=list(top) + list(z0[::-1]), fill="toself", fillcolor="rgba(120,120,125,0.85)", line=dict(color="#444"), name=_t("Badan sekatan", "Bund body"), hoverinfo="skip"))
+    sx0, sx1 = float(s.min()), float(s.max())
+    Lw, Lm = sp["Lw"], sp["Lm"]
+    up = s <= (s[int(np.argmax(zd))])
+    if Lw > z0.min():
+        xs_ = s[up]
+        fig.add_trace(go.Scatter(x=[sx0, float(xs_.max())], y=[Lw, Lw], mode="lines", line=dict(color="#2d8de0", width=2, dash="dot"), name=_t("Muka air", "Water level")))
+    if Lm > -1e8:
+        fig.add_trace(go.Scatter(x=[sx0, float(s[up].max())], y=[Lm, Lm], mode="lines", line=dict(color="#8a5a2b", width=2, dash="dot"), name=_t("Muka lumpur", "Mud level")))
+    f = sp["face"]
+    if f:
+        pm = max(p for _, _, p in f) or 1.0
+        span = max(sx1 - sx0, 1.0)
+        scl = 0.30 * span / pm
+        env = [(a - p * scl, b) for a, b, p in f]
+        fig.add_trace(go.Scatter(x=[e[0] for e in env] + [a for a, _, _ in f][::-1], y=[e[1] for e in env] + [b for _, b, _ in f][::-1], fill="toself", fillcolor="rgba(230,70,50,0.35)",
+                                 line=dict(color="#d8402c", width=2), name=_t("Distribusi tekanan", "Pressure distribution"), hovertemplate="p=%{customdata:.1f} kPa<extra></extra>", customdata=[p for _, _, p in f] + [p for _, _, p in f][::-1]))
+        for a, b, p in f[::max(1, len(f) // 14)]:
+            fig.add_annotation(x=a, y=b, ax=a - p * scl, ay=b, xref="x", yref="y", axref="x", ayref="y", showarrow=True, arrowhead=2, arrowsize=1, arrowwidth=1.2, arrowcolor="#d8402c")
+        fig.add_annotation(x=f[0][0] - f[0][2] * scl, y=f[0][1], text=f"{f[0][2]:.0f} kPa", showarrow=False, yshift=-12, font=dict(size=11, color="#d8402c"))
+    fig.update_layout(height=420, margin=dict(l=10, r=10, t=30, b=10), xaxis_title=_t("Jarak tegak lurus sekatan, kolam → hilir (m)", "Distance across the bund, pond → downstream (m)"), yaxis_title=_t("Elevasi (m)", "Elevation (m)"),
+                      yaxis=dict(scaleanchor="x", scaleratio=1.0), legend=dict(orientation="h", y=1.08), title=dict(text=_t("Penampang & tekanan pada muka sekatan", "Section & pressure on the bund face"), font=dict(size=14)))
+    return fig
+
+
+def _bund_seep_ui(bd, res, sr):
+    ser = res["series"]
+    nT = sr["nT"]
+    stn = sorted(sr["stations"])
+    _sub_header(_t("Hasil zona jenuh", "Saturated zone results"))
+    rmax = [max((sr["stations"][i]["radius"][k] for i in stn), default=0.0) for k in range(nT)]
+    amax = [max((sr["stations"][i]["frac"][k] for i in stn), default=0.0) for k in range(nT)]
+    qmax = [max((sr["stations"][i]["qout"][k] for i in stn), default=0.0) for k in range(nT)]
+    kr_ = int(np.argmax(rmax))
+    Bm = float(np.median([sr["stations"][i]["B"] for i in stn]))
+    c1, c2, c3, c4 = st.columns(4)
+    _metric_card(_t("Radius jenuh maks.", "Max saturated radius"), f"{max(rmax):.1f} m", help_text=_t(f"{100 * max(rmax) / max(Bm, 1):.0f}% lebar dasar sekatan (±{Bm:.0f} m)", f"{100 * max(rmax) / max(Bm, 1):.0f}% of the base width (~{Bm:.0f} m)"), container=c1)
+    _metric_card(_t("Badan jenuh maks.", "Max saturated body"), f"{100 * max(amax):.0f}%", container=c2)
+    _metric_card(_t("Debit rembesan hilir maks.", "Max downstream seepage"), f"{max(qmax):.2f} m³/hari/m", container=c3)
+    fs0 = min(s["FS_s"] for s in ser)
+    fss = min(sr["fs_seep"].values()) if sr["fs_seep"] else 99.0
+    _metric_card(_t("FS geser dgn uplift rembesan", "Sliding FS with seepage uplift"), f"{fss:.2f}" if fss < 99 else ">10", help_text=_t(f"Uplift linear: {fs0:.2f}", f"Linear uplift: {fs0:.2f}"), container=c4)
+    ex = [(k, i) for k in range(nT) for i in stn if sr["stations"][i]["exit"][k]]
+    if ex:
+        k0 = min(k for k, _ in ex)
+        st.warning(_t(f"Zona jenuh sudah menembus ke lereng hilir mulai langkah {k0} (muka air {ser[k0]['Lw']:.2f} m): rembesan muncul di muka hilir -- risiko erosi buluh (piping)/longsor lereng hilir. Perlu filter/drain kaki.",
+                      f"The saturated zone reaches the downstream slope from step {k0} (water level {ser[k0]['Lw']:.2f} m): seepage exits on the downstream face -- piping/slope-failure risk. A filter/toe drain is needed."))
+    else:
+        st.success(_t("Zona jenuh tidak menembus lereng hilir pada skenario ini.", "The saturated zone does not reach the downstream slope in this scenario."))
+    _sub_header(_t("Penampang: zona jenuh bergerak mengikuti muka air/lumpur", "Section: the saturated zone moving with the water/mud level"))
+    k = st.slider(_t("Langkah simulasi", "Simulation step"), 0, nT - 1, kr_, 1, key="bz_k")
+    icr = max(stn, key=lambda i: max(sr["stations"][i]["radius"]))
+    ist = st.selectbox(_t("Penampang (titik sepanjang sekatan)", "Section (position along the bund)"), stn, index=stn.index(icr), key="bz_st",
+                       format_func=lambda i: _t(f"Titik {i + 1}", f"Station {i + 1}") + (_t("  (radius terbesar)", "  (largest radius)") if i == icr else ""))
+    q = sr["stations"][ist]
+    sc_, zc_ = q["sc"], q["zc"]
+    mask = q["mask"]
+    x0_ = float(sc_.min())
+
+    def frame(kk):
+        Sr = np.where(mask, q["Sr"][kk], np.nan)
+        Ps = np.where(mask, q["psi"][kk], -50.0)
+        hasm = ser[kk]["Lm"] > -1e8
+        return [go.Heatmap(x=sc_, y=zc_, z=Sr, zmin=0.2, zmax=1.0, colorscale="Blues", colorbar=dict(title="Sr"), hovertemplate="Sr=%{z:.2f}<extra></extra>"),
+                go.Contour(x=sc_, y=zc_, z=Ps, contours=dict(start=0, end=0, size=1, coloring="lines", showlabels=False), colorscale=[[0, "#d8402c"], [1, "#d8402c"]], line=dict(width=3), showscale=False, hoverinfo="skip", name=_t("Garis freatik", "Phreatic line")),
+                go.Scatter(x=[x0_ - 1, x0_ + 0.4 * q["B"]], y=[ser[kk]["Lw"]] * 2, mode="lines", line=dict(color="#2d8de0", width=3, dash="dot"), name=_t("Muka air", "Water level")),
+                go.Scatter(x=[x0_ - 1, x0_ + 0.4 * q["B"]] if hasm else [None, None], y=[ser[kk]["Lm"]] * 2 if hasm else [None, None], mode="lines", line=dict(color="#8a5a2b", width=3, dash="dot"), name=_t("Muka lumpur", "Mud level"))]
+    fig = go.Figure(data=frame(k), frames=[go.Frame(data=frame(kk), name=str(kk)) for kk in range(nT)])
+    fig.update_layout(height=430, margin=dict(l=10, r=10, t=30, b=60), xaxis_title=_t("Jarak tegak lurus sekatan, kolam → hilir (m)", "Distance across the bund, pond → downstream (m)"), yaxis_title=_t("Elevasi (m)", "Elevation (m)"),
+                      yaxis=dict(scaleanchor="x", scaleratio=1.0), legend=dict(orientation="h", y=1.1),
+                      updatemenus=[dict(type="buttons", x=0.0, y=-0.12, buttons=[dict(label="▶", method="animate", args=[None, dict(frame=dict(duration=350, redraw=True), fromcurrent=True)]), dict(label="❚❚", method="animate", args=[[None], dict(frame=dict(duration=0), mode="immediate")])])],
+                      sliders=[dict(active=k, x=0.1, len=0.9, currentvalue=dict(prefix=_t("Langkah ", "Step ")), steps=[dict(method="animate", label=str(kk), args=[[str(kk)], dict(mode="immediate", frame=dict(duration=0, redraw=True))]) for kk in range(nT)])])
+    st.plotly_chart(fig, width="stretch")
+    st.caption(_t("Warna = derajat kejenuhan Sr (biru tua = jenuh); garis merah = garis freatik (tekanan pori 0). Sisi kiri = muka sekatan yang kontak air/lumpur.",
+                  "Colour = degree of saturation Sr (dark blue = saturated); red line = phreatic line (zero pore pressure). The left side is the bund face in contact with water/mud."))
+    rows = [(_t("Muka air (m)", "Water level (m)"), f"{ser[k]['Lw']:.2f}"), (_t("Muka lumpur (m)", "Mud level (m)"), "-" if ser[k]["Lm"] < -1e8 else f"{ser[k]['Lm']:.2f}"),
+            (_t("Radius jenuh dari muka basah (m)", "Saturated radius from the wetted face (m)"), f"{q['radius'][k]:.1f}"), (_t("Penetrasi horizontal (m)", "Horizontal penetration (m)"), f"{q['pen'][k]:.1f}"),
+            (_t("Luas jenuh (m²) / % badan", "Saturated area (m²) / % of body"), f"{q['area'][k]:.1f} / {100 * q['frac'][k]:.0f}%"),
+            (_t("Debit masuk / keluar (m³/hari/m)", "Inflow / outflow (m³/day/m)"), f"{q['qin'][k]:.3f} / {q['qout'][k]:.3f}"),
+            (_t("Rembesan muncul di lereng hilir", "Seepage exits downstream"), (_t("YA, elevasi ", "YES, at ") + f"{q['exit_z'][k]:.2f} m") if q["exit"][k] else _t("Tidak", "No")),
+            (_t("Uplift dari tekanan pori dasar (kN/m)", "Uplift from base pore pressure (kN/m)"), f"{q['U'][k]:.1f}")]
+    fsk = sr["fs_seep"].get((k, ist))
+    if fsk is not None:
+        rows.append((_t("FS geser dgn uplift rembesan", "Sliding FS with seepage uplift"), f"{fsk:.2f}" if fsk < 99 else ">10"))
+    st.dataframe(pd.DataFrame(rows, columns=[_t("Besaran", "Quantity"), _t("Nilai", "Value")]), hide_index=True, width="stretch")
+
+    _sub_header(_t("Radius jenuh terhadap naik-turunnya level", "Saturated radius vs. rising / falling levels"))
+    g = go.Figure()
+    g.add_trace(go.Scatter(x=list(range(nT)), y=[q["radius"][kk] for kk in range(nT)], name=_t("Radius jenuh (m)", "Saturated radius (m)"), line=dict(color="#1f5fa8", width=3)))
+    g.add_trace(go.Scatter(x=list(range(nT)), y=[100 * q["frac"][kk] for kk in range(nT)], name=_t("Badan jenuh (%)", "Saturated body (%)"), line=dict(color="#4aa3df", width=2, dash="dash")))
+    g.add_trace(go.Scatter(x=list(range(nT)), y=[ser[kk]["Lw"] for kk in range(nT)], name=_t("Muka air (m)", "Water level (m)"), yaxis="y2", line=dict(color="#2d8de0", width=2, dash="dot")))
+    if any(s["Lm"] > -1e8 for s in ser):
+        g.add_trace(go.Scatter(x=list(range(nT)), y=[ser[kk]["Lm"] if ser[kk]["Lm"] > -1e8 else None for kk in range(nT)], name=_t("Muka lumpur (m)", "Mud level (m)"), yaxis="y2", line=dict(color="#8a5a2b", width=2, dash="dot")))
+    g.add_vline(x=k, line=dict(color="#888", dash="dot"))
+    g.update_layout(height=320, margin=dict(l=10, r=10, t=30, b=10), xaxis_title=_t(f"Langkah (≈ {sr['dt_days']:.2f} hari/langkah)", f"Step (≈ {sr['dt_days']:.2f} days/step)"), yaxis=dict(title="m / %"), yaxis2=dict(title=_t("Elevasi level (m)", "Level elevation (m)"), overlaying="y", side="right"), legend=dict(orientation="h", y=1.14))
+    st.plotly_chart(g, width="stretch")
+    st.caption(_t("Perhatikan jeda (lag): zona jenuh tertinggal dari muka air saat naik dan tetap basah lama saat air turun -- ini yang tidak terlihat pada analisis geometri/tekanan saja.",
+                  "Note the lag: the saturated zone trails the water level on the way up and stays wet long after it falls -- something the geometry/pressure-only analysis cannot show."))
+    ra = go.Figure()
+    tpos = [res["profs"][i]["tmid"] for i in stn]
+    ra.add_trace(go.Bar(x=tpos, y=[sr["stations"][i]["radius"][k] for i in stn], name=_t("Langkah terpilih", "Selected step"), marker_color="#4a8fd8"))
+    ra.add_trace(go.Scatter(x=tpos, y=[max(sr["stations"][i]["radius"]) for i in stn], mode="lines+markers", name=_t("Maksimum selama skenario", "Maximum during the scenario"), line=dict(color="#d8402c", width=2)))
+    ra.update_layout(height=280, margin=dict(l=10, r=10, t=30, b=10), xaxis_title=_t("Posisi sepanjang sekatan (m)", "Position along the bund (m)"), yaxis_title=_t("Radius jenuh (m)", "Saturated radius (m)"), legend=dict(orientation="h", y=1.14))
+    st.plotly_chart(ra, width="stretch")
+    df = pd.DataFrame([dict(step=kk, titik=i + 1, muka_air_m=ser[kk]["Lw"], muka_lumpur_m=(None if ser[kk]["Lm"] < -1e8 else ser[kk]["Lm"]), radius_jenuh_m=sr["stations"][i]["radius"][kk], penetrasi_horizontal_m=sr["stations"][i]["pen"][kk],
+                            luas_jenuh_m2=sr["stations"][i]["area"][kk], persen_badan_jenuh=100 * sr["stations"][i]["frac"][kk], debit_masuk_m3hari_m=sr["stations"][i]["qin"][kk], debit_keluar_m3hari_m=sr["stations"][i]["qout"][kk],
+                            rembesan_tembus_hilir=sr["stations"][i]["exit"][kk], uplift_kN_m=sr["stations"][i]["U"][kk]) for kk in range(nT) for i in stn])
+    e1, e2, e3 = st.columns(3)
+    e1.download_button(_t("Unduh tabel zona jenuh (CSV)", "Download saturated-zone table (CSV)"), data=df.to_csv(index=False).encode("utf-8"), file_name="zona_jenuh_sekatan.csv", mime="text/csv", key="bz_csv")
+    try:
+        e2.download_button(_t("Unduh penampang jenuh (DXF)", "Download saturated section (DXF)"), data=bd.seep_section_dxf(res, sr, k, ist), file_name=f"zona_jenuh_penampang_s{k}_t{ist + 1}.dxf", mime="application/dxf", key="bz_dxf1",
+                           help=_t("Penampang titik & langkah terpilih: badan sekatan, batas jenuh, garis freatik, muka air/lumpur.", "Selected station & step: bund body, saturated boundary, phreatic line, water/mud levels."))
+        e3.download_button(_t("Unduh garis radius jenuh - denah (DXF)", "Download saturated radius lines - plan (DXF)"), data=bd.seep_plan_dxf(res, sr, k), file_name=f"zona_jenuh_denah_s{k}.dxf", mime="application/dxf", key="bz_dxf2",
+                           help=_t("Denah koordinat asli: garis muka basah, garis batas jenuh, dan garis radius di tiap titik (langkah terpilih).", "Plan in original coordinates: wetted-face line, saturated boundary line and radius lines per station (selected step)."))
+    except Exception as e5:
+        e2.caption(_t(f"DXF tidak tersedia: {e5}", f"DXF unavailable: {e5}"))
+    st.caption(_t("Asumsi: aliran 2D jenuh–tak-jenuh (Richards, kurva Gardner) hanya di dalam badan sekatan, dasar kedap, puncak tanpa infiltrasi hujan, lumpur sebagai lapisan penghambat di muka (k & tebal diinput). "
+                  "Parameter material nyata (k, porositas, kapiler) sangat menentukan hasil -- isi dari uji lab/lapangan.",
+                  "Assumptions: 2D saturated–unsaturated flow (Richards, Gardner curves) inside the bund body only, impervious base, no rain infiltration on the crest, mud as a resisting layer on the face (k & thickness are inputs). "
+                  "Real material parameters (k, porosity, capillarity) govern the result -- use lab/field data."))
+
+
+def _bund_tab():
+    _sub_header(_t("Ketahanan Sekatan: Gaya & Distribusi Tekanan Air / Lumpur", "Bund Resistance: Water / Mud Force & Pressure Distribution"))
+    st.caption(_t(
+        "Masukkan DXF kolam dan DXF desain sekatan, isi muka air & muka lumpur di sisi kolam, lalu naik-turunkan levelnya. Simulasi menghitung gaya yang diterima sekatan, "
+        "distribusi tekanan pada muka yang kontak dengan fluida, serta faktor keamanan geser & guling di tiap titik sepanjang sekatan.",
+        "Provide the pond DXF and the bund design DXF, set water and mud levels on the pond side, then raise/lower them. The simulation computes the force on the bund, the pressure "
+        "distribution on the face in contact with the fluid, and the sliding & overturning safety factors along the bund."))
+    _ui_warning(_t(
+        "Model INDIKATIF: tekanan hidrostatik air + lumpur sebagai fluida berat (γ lumpur, faktor K), gaya angkat (uplift) linear, keseimbangan per meter pada penampang tegak lurus sumbu. "
+        "Tidak memodelkan rembesan nyata, likuifaksi, gelombang/dinamik, atau keruntuhan lereng. Bukan pengganti analisis geoteknik/LEM; cek parameter dengan data lab/lapangan.",
+        "INDICATIVE model: hydrostatic water + mud as a heavy fluid (mud unit weight, K factor), linear uplift, per-metre equilibrium on a section perpendicular to the axis. "
+        "No real seepage, liquefaction, waves/dynamics or slope failure. Not a substitute for geotechnical/LEM analysis; verify parameters with lab/field data."))
+    try:
+        dsm, dsc = _dump_load_modules()
+        bd = _bund_load()
+    except Exception as e:
+        st.error(_t(f"Modul gagal dimuat: {e}", f"Module failed to load: {e}"))
+        return
+
+    # ---------------- 1. kolam
+    _sub_header(_t("1. DXF kolam", "1. Pond DXF"))
+    src = st.radio(_t("Sumber kontur kolam", "Pond contour source"), ["dxf", "seg"], horizontal=True, key="bd_src",
+                   format_func=lambda c: _t("Unggah DXF kolam (kontur/titik/3DFACE berelevasi)", "Upload pond DXF (elevated contours/points/3DFACE)") if c == "dxf" else _t("Dari segmen Erosion Mapping", "From the Erosion Mapping segment"))
+    xs = ys = z = None
+    if src == "dxf":
+        fp = st.file_uploader(_t("DXF kolam", "Pond DXF"), type=["dxf", "txt", "csv"], key="bd_pond_file")
+        if fp is None:
+            _ui_info(_t("Unggah DXF kolam berelevasi (Z), atau pilih sumber dari segmen.", "Upload an elevated pond DXF (Z), or choose the segment source."))
+            return
+        try:
+            data = fp.getvalue()
+            ck = ("pond", fp.name, len(data))
+            if st.session_state.get("bd_pond_ck") != ck:
+                P3, info = dsm.parse_design_file(fp.name, data)
+                P3 = np.asarray(P3, float)
+                if P3.shape[0] < 6:
+                    raise ValueError(_t("Titik elevasi terlalu sedikit di file kolam.", "Too few elevation points in the pond file."))
+                fz = dsm.make_design_fn(P3)
+                x0, x1, y0, y1 = P3[:, 0].min(), P3[:, 0].max(), P3[:, 1].min(), P3[:, 1].max()
+                h = max(max(x1 - x0, y1 - y0) / 220.0, 0.5)
+                gxs, gys = np.arange(x0, x1 + 1e-9, h), np.arange(y0, y1 + 1e-9, h)
+                GX_, GY_ = np.meshgrid(gxs, gys, indexing="ij")
+                gz = fz(GX_, GY_)
+                from scipy import ndimage as _ndi
+                bad = ~np.isfinite(gz)
+                if bad.all():
+                    raise ValueError(_t("Tidak ada elevasi valid di kolam.", "No valid pond elevation."))
+                if bad.any():
+                    idx = _ndi.distance_transform_edt(bad, return_distances=False, return_indices=True)
+                    gz = gz[tuple(idx)]
+                st.session_state["bd_pond_ck"] = ck
+                st.session_state["bd_pond_grid"] = (gxs, gys, gz, int(P3.shape[0]))
+            xs, ys, z, npts = st.session_state["bd_pond_grid"]
+            st.caption(_t(f"Kolam terbaca: {npts:,} titik elevasi, rentang Z {np.nanmin(z):.1f}–{np.nanmax(z):.1f} m.", f"Pond read: {npts:,} elevation points, Z range {np.nanmin(z):.1f}–{np.nanmax(z):.1f} m."))
+        except Exception as e:
+            st.error(_t(f"DXF kolam tidak dapat dibaca: {e}", f"Could not read the pond DXF: {e}"))
+            return
+    else:
+        segs = st.session_state.get("segment_results", {})
+        if not segs:
+            _ui_info(_t("Belum ada hasil RUN ANALYSIS tersimpan. Jalankan 'Erosion Mapping' dulu atau unggah DXF kolam.", "No saved RUN ANALYSIS yet. Run 'Erosion Mapping' first or upload a pond DXF."))
+            return
+        sids = list(segs.keys())
+        sid = st.selectbox(_t("Segmen", "Segment"), sids, format_func=lambda s: segs[s].get("label", s), key="bd_seg")
+        seg = segs[sid]
+        if seg.get("grid_x") is None or seg.get("grid_z") is None:
+            st.error(_t("Grid elevasi segmen tidak tersimpan -- jalankan ulang RUN ANALYSIS.", "Segment elevation grid not stored -- run RUN ANALYSIS again."))
+            return
+        gx, gy, gz = np.asarray(seg["grid_x"], float), np.asarray(seg["grid_y"], float), np.asarray(seg["grid_z"], float)
+        xs, ys, z = gx[:, 0], gy[0, :], gz
+
+    # ---------------- 2. sekatan
+    _sub_header(_t("2. DXF desain sekatan", "2. Bund design DXF"))
+    fb = st.file_uploader(_t("DXF desain sekatan", "Bund design DXF"), type=["dxf", "txt", "csv"], key="bd_bund_file")
+    if fb is None:
+        _ui_info(_t("Unggah DXF sekatan: bisa permukaan 3D berelevasi (3DFACE/garis 3D/titik) atau garis sumbu 2D (lalu diberi elevasi puncak, lebar & kemiringan).",
+                    "Upload the bund DXF: either an elevated 3D surface (3DFACE/3D lines/points) or a 2D axis line (then give crest elevation, width and slopes)."))
+        return
+    bdata = fb.getvalue()
+    try:
+        P3b = np.asarray(dsm.parse_design_file(fb.name, bdata)[0], float)
+    except Exception:
+        P3b = np.zeros((0, 3))
+    has3d = P3b.shape[0] >= 6 and (float(np.ptp(P3b[:, 2])) > 0.3)
+    try:
+        axl = dsm.parse_polylines_dxf(bdata)
+    except Exception:
+        axl = []
+    mode_b = st.radio(_t("Bentuk sekatan", "Bund shape"), ["surf", "axis"], index=0 if has3d else 1, horizontal=True, key=f"bd_bmode_{int(has3d)}",
+                      format_func=lambda c: _t("Permukaan 3D dari DXF (bentuk persis desain)", "3D surface from the DXF (exact design shape)") if c == "surf" else _t("Garis sumbu DXF + penampang trapesium", "DXF axis line + trapezoidal section"))
+    zlo, zhi = float(np.nanmin(z)), float(np.nanmax(z))
+    if mode_b == "surf":
+        if not has3d:
+            st.error(_t("DXF ini tidak berelevasi (Z datar). Pilih 'Garis sumbu + penampang trapesium'.", "This DXF has no elevation (flat Z). Choose 'axis line + trapezoid'."))
+            return
+        zd_fn = dsm.make_design_fn(P3b)
+        crest_z = float(np.nanmax(P3b[:, 2]))
+        st.caption(_t(f"Permukaan sekatan: {P3b.shape[0]:,} titik, elevasi puncak {crest_z:.2f} m.", f"Bund surface: {P3b.shape[0]:,} points, crest elevation {crest_z:.2f} m."))
+    else:
+        if not axl:
+            st.error(_t("Tidak ada garis (LINE/POLYLINE) di DXF sekatan.", "No lines (LINE/POLYLINE) in the bund DXF."))
+            return
+        c1, c2, c3, c4 = st.columns(4)
+        try:
+            from scipy.interpolate import RegularGridInterpolator as _RGI
+            _pp = np.array([p for pl in axl for p in pl], float)
+            _zz = _RGI((xs, ys), np.where(np.isfinite(z), z, np.nanmean(z)), bounds_error=False, fill_value=None)(_pp)
+            _zc0 = float(np.nanmax(_zz)) + 1.5
+        except Exception:
+            _zc0 = zlo + 0.6 * (zhi - zlo)
+        crest_z = c1.number_input(_t("Elevasi puncak (m)", "Crest elevation (m)"), zlo - 20.0, zhi + 50.0, float(round(min(max(_zc0, zlo - 20.0), zhi + 50.0), 1)), 0.1, key="bd_crest",
+                                  help=_t("Default = titik tertinggi tanah di sepanjang sumbu + 1,5 m.", "Default = highest ground along the axis + 1.5 m."))
+        cw = c2.number_input(_t("Lebar puncak (m)", "Crest width (m)"), 1.0, 30.0, 5.0, 0.5, key="bd_cw")
+        su = c3.number_input(_t("Lereng sisi kolam (H:V)", "Pond-side slope (H:V)"), 0.5, 6.0, 2.0, 0.25, key="bd_su")
+        sd = c4.number_input(_t("Lereng sisi hilir (H:V)", "Downstream slope (H:V)"), 0.5, 6.0, 2.0, 0.25, key="bd_sd")
+        zd_fn = bd.bund_surface_fn(axl, crest_z=float(crest_z), crest_w=float(cw), slope_up=float(su), slope_dn=float(sd))
+
+    # ---------------- 3. isi kolam
+    mode = st.radio(_t("Jenis analisis", "Analysis type"), ["force", "seep"], horizontal=True, key="bd_mode",
+                    format_func=lambda c: _t("Gaya & tekanan (geometri + level fluida)", "Force & pressure (geometry + fluid level)") if c == "force" else _t("Zona jenuh / rembesan di badan sekatan (butuh input material)", "Saturated zone / seepage in the bund body (needs material input)"))
+    _sub_header(_t("3. Muka air & muka lumpur (sisi kolam)", "3. Water & mud levels (pond side)"))
+    try:
+        dom = bd.prepare(xs, ys, z, zd_fn, n_target=int(st.session_state.get("bd_q", 110)))
+    except Exception as e:
+        st.error(_t(f"Sekatan tidak berpotongan dengan kontur kolam: {e} Pastikan kedua DXF memakai sistem koordinat yang sama.",
+                    f"The bund does not intersect the pond contour: {e} Make sure both DXFs use the same coordinate system."))
+        return
+    seed0 = bd.default_seed(dom)
+    zbase = float(dom["z0"][seed0])
+    zcr = float(np.nanmax(np.where(dom["body"], dom["zd"], np.nan)))
+    st.caption(_t(f"Sekatan: {int(dom['body'].sum() * dom['dx'] ** 2):,} m² tapak, puncak {zcr:.2f} m. Dasar kolam terendah dekat sekatan ≈ {zbase:.2f} m.",
+                  f"Bund: {int(dom['body'].sum() * dom['dx'] ** 2):,} m² footprint, crest {zcr:.2f} m. Lowest pond floor near the bund ≈ {zbase:.2f} m."))
+    a1, a2, a3 = st.columns(3)
+    nl = a1.checkbox(_t("Ada lumpur", "Mud present"), True, key="bd_hasmud")
+    scen = a2.selectbox(_t("Skenario level", "Level scenario"), ["naik", "turun", "naik-turun"], key="bd_scen",
+                        format_func=lambda c: {"naik": _t("Naik (awal → akhir)", "Rise (start → end)"), "turun": _t("Turun (awal → akhir)", "Fall (start → end)"), "naik-turun": _t("Naik lalu turun kembali", "Rise then fall back")}[c])
+    nstep = int(a3.number_input(_t("Jumlah langkah", "Number of steps"), 6, 60, 24, 2, key="bd_n"))
+    rng = (zbase - 2.0, zcr + 1.5)
+    w1, w2, m1, m2 = st.columns(4)
+    if scen == "turun":
+        dflt = (zcr - 0.5, zbase + 1.0, zbase + 0.5 * (zcr - zbase) * 0.8, zbase + 0.2)
+    else:
+        dflt = (zbase + 0.5 * (zcr - zbase), zcr - 0.4, zbase + 0.15 * (zcr - zbase), zbase + 0.45 * (zcr - zbase))
+    Lw0 = w1.number_input(_t("Muka air awal (m)", "Water start (m)"), *rng, float(round(dflt[0], 1)), 0.1, key=f"bd_w0_{scen}")
+    Lw1 = w2.number_input(_t("Muka air puncak/akhir (m)", "Water peak/end (m)"), *rng, float(round(dflt[1], 1)), 0.1, key=f"bd_w1_{scen}")
+    Lm0 = m1.number_input(_t("Muka lumpur awal (m)", "Mud start (m)"), *rng, float(round(dflt[2], 1)), 0.1, key=f"bd_m0_{scen}", disabled=not nl)
+    Lm1 = m2.number_input(_t("Muka lumpur puncak/akhir (m)", "Mud peak/end (m)"), *rng, float(round(dflt[3], 1)), 0.1, key=f"bd_m1_{scen}", disabled=not nl)
+    with st.expander(_t("Parameter material & stabilitas", "Material & stability parameters")):
+        p1, p2, p3, p4 = st.columns(4)
+        gm = p1.number_input(_t("Berat isi lumpur γ (kN/m³)", "Mud unit weight γ (kN/m³)"), 11.0, 22.0, 15.0, 0.5, key="bd_gm")
+        Km = p2.number_input(_t("Faktor tekanan lumpur K", "Mud pressure factor K"), 0.3, 1.0, 1.0, 0.05, key="bd_K",
+                             help=_t("1,0 = fluida penuh (konservatif, lumpur lunak). <1 bila lumpur sudah mengeras/ada kuat geser.", "1.0 = full fluid (conservative, soft mud). <1 once mud stiffens / has shear strength."))
+        gb = p3.number_input(_t("Berat isi badan sekatan (kN/m³)", "Bund unit weight (kN/m³)"), 14.0, 24.0, 19.0, 0.5, key="bd_gb")
+        phi = p4.number_input(_t("Sudut geser dasar φ (°)", "Base friction angle φ (°)"), 5.0, 45.0, 30.0, 1.0, key="bd_phi")
+        q1, q2, q3, q4 = st.columns(4)
+        cb = q1.number_input(_t("Kohesi dasar c (kPa)", "Base cohesion c (kPa)"), 0.0, 100.0, 0.0, 1.0, key="bd_cb")
+        upl = q2.checkbox(_t("Hitung gaya angkat (uplift)", "Include uplift"), True, key="bd_upl")
+        tw = q3.number_input(_t("Muka air hilir (m, kosong=0 → di bawah kaki)", "Tailwater (m, 0 = below toe)"), 0.0, 9999.0, 0.0, 0.5, key="bd_tw")
+        qual = q4.slider(_t("Resolusi grid", "Grid resolution"), 70, 150, int(st.session_state.get("bd_q", 110)), 10, key="bd_q")
+        pxy1, pxy2 = st.columns(2)
+        pxy1.caption(_t("Titik kolam otomatis (sisi terendah dekat sekatan). Ubah bila kolam terhubung lain.", "Pond point is automatic (lowest ground near the bund). Change it if needed."))
+        sx = pxy1.number_input(_t("X titik kolam", "Pond point X"), float(dom["X"][0]), float(dom["X"][-1]), float(dom["X"][seed0[0]]), 1.0, key="bd_sx")
+        sy = pxy2.number_input(_t("Y titik kolam", "Pond point Y"), float(dom["Y"][0]), float(dom["Y"][-1]), float(dom["Y"][seed0[1]]), 1.0, key="bd_sy")
+    seed = (int(np.argmin(np.abs(dom["X"] - sx))), int(np.argmin(np.abs(dom["Y"] - sy))))
+    mat = mud_ = None
+    seep_p = ()
+    if mode == "seep":
+        with st.expander(_t("Material badan sekatan & durasi (isi sesuai data)", "Bund material & duration (set from your data)"), expanded=True):
+            pre = st.selectbox(_t("Preset material (titik awal, bisa diubah)", "Material preset (starting point, editable)"), list(bd.MATERIALS), index=2, key="bd_mpre")
+            m0 = bd.MATERIALS[pre]
+            s1, s2, s3, s4 = st.columns(4)
+            lk = s1.number_input("log10 k (m/s)", -11.0, -1.0, float(np.log10(m0["k"])), 0.25, key=f"bd_lk_{pre}", help=_t("-9 = lempung, -6 = lanau pasiran, -4 = pasir halus, -3 = kerikil", "-9 clay, -6 sandy silt, -4 fine sand, -3 gravel"))
+            por = s2.number_input(_t("Porositas n", "Porosity n"), 0.2, 0.6, float(m0["n"]), 0.01, key=f"bd_n_{pre}")
+            sres = s3.number_input(_t("Kejenuhan residual Sr0", "Residual saturation Sr0"), 0.0, 0.6, float(m0["sres"]), 0.01, key=f"bd_sr_{pre}")
+            hc = s4.number_input(_t("Tinggi kapiler hc (m)", "Capillary height hc (m)"), 0.1, 6.0, float(m0["hc"]), 0.1, key=f"bd_hc_{pre}")
+            t1, t2, t3, t4 = st.columns(4)
+            kra = t1.number_input(_t("Anisotropi kh/kv", "Anisotropy kh/kv"), 1.0, 30.0, float(m0["kratio"]), 0.5, key=f"bd_ka_{pre}", help=_t("Timbunan dipadatkan per lapis: arah horizontal lebih permeabel.", "Compacted in lifts: horizontal is more permeable."))
+            lkm = t2.number_input(_t("log10 k lumpur (m/s)", "log10 k mud (m/s)"), -11.0, -4.0, -8.0, 0.25, key="bd_lkm")
+            tm = t3.number_input(_t("Tebal kerak lumpur di muka (m)", "Mud cake thickness on the face (m)"), 0.05, 5.0, 1.0, 0.05, key="bd_tm")
+            Tdays = t4.number_input(_t("Durasi skenario (hari)", "Scenario duration (days)"), 0.1, 3650.0, 30.0, 1.0, key="bd_T", help=_t("Waktu dari langkah pertama sampai terakhir. Makin lama, makin dalam zona jenuh.", "Time from first to last step."))
+            u1, u2, u3 = st.columns(3)
+            spin = u1.number_input(_t("Pra-basah di level awal (hari)", "Pre-wetting at the start level (days)"), 0.0, 3650.0, 0.0, 1.0, key="bd_spin", help=_t("0 = badan kering di awal; isi bila sekatan sudah lama terendam.", "0 = dry body at the start; set if the bund has long been submerged."))
+            thr = u2.slider(_t("Ambang dianggap jenuh (Sr)", "Saturation threshold (Sr)"), 0.7, 1.0, 0.9, 0.01, key="bd_thr")
+            dxg = u3.slider(_t("Ukuran sel penampang (m)", "Section cell size (m)"), 0.3, 1.5, 0.5, 0.1, key="bd_dxg")
+        mat = dict(k=10 ** float(lk), n=float(por), sres=float(sres), hc=float(hc), kratio=float(kra), ss=1e-4)
+        mud_ = dict(k=10 ** float(lkm), t=float(tm))
+        seep_p = (float(lk), float(por), float(sres), float(hc), float(kra), float(lkm), float(tm), float(Tdays), float(spin), float(thr), float(dxg))
+    if Lw1 < Lw0 and scen != "turun":
+        _ui_info(_t("Muka air akhir lebih rendah dari awal: gunakan skenario 'Turun' bila itu yang dimaksud.", "End water level is below the start: use the 'Fall' scenario if intended."))
+    if nl and max(Lm0, Lm1) > max(Lw0, Lw1):
+        _ui_info(_t("Muka lumpur melebihi muka air: lumpur dianggap muncul di permukaan (tanpa air di atasnya).", "Mud level exceeds the water level: mud is treated as surfacing (no water above it)."))
+
+    key = ("bd", fb.name, len(bdata), src, scen, nstep, round(Lw0, 3), round(Lw1, 3), round(Lm0, 3), round(Lm1, 3), nl, gm, Km, gb, phi, cb, upl, tw, seed, dom["nx"], round(float(crest_z), 3), mode_b,
+           st.session_state.get("bd_pond_ck"), mode, seep_p)
+    go_run = st.button(_t("Jalankan simulasi sekatan", "Run bund simulation") if mode == "force" else _t("Jalankan simulasi zona jenuh", "Run saturated-zone simulation"), type="primary", key="bd_run")
+    if go_run:
+        Lw_t, Lm_t = bd.level_series(Lw0, Lw1, Lm0 if nl else -1e9, Lm1 if nl else -1e9, scen, nstep)
+        if not nl:
+            Lm_t = np.full(nstep, -1e9)
+        prog = st.progress(0.0)
+        try:
+            res = bd.run(dom, Lw_t, Lm_t, gm=float(gm), K=float(Km), gb=float(gb), phi_b=float(phi), c_b=float(cb), tail=(float(tw) if tw > 0 else None), uplift=bool(upl), seed=seed, progress=prog.progress)
+        except Exception as e:
+            prog.empty()
+            st.error(_t(f"Simulasi gagal: {e}", f"Simulation failed: {e}"))
+            return
+        prog.empty()
+        st.session_state["bd_res"] = (key, res)
+        if mode == "seep":
+            prog2 = st.progress(0.0)
+            try:
+                srr = bd.run_seep(res, mat, mud_, Tdays, thr=float(thr), spinup_days=float(spin), dxg=float(dxg), tail=(float(tw) if tw > 0 else None), progress=prog2.progress)
+            except Exception as e:
+                prog2.empty()
+                st.error(_t(f"Simulasi rembesan gagal: {e}", f"Seepage simulation failed: {e}"))
+                return
+            prog2.empty()
+            st.session_state["bd_seep"] = (key, srr)
+    got = st.session_state.get("bd_res")
+    if not got:
+        return
+    res = got[1]
+    if got[0] != key:
+        _ui_info(_t("Input berubah sejak simulasi terakhir -- klik 'Jalankan simulasi sekatan' untuk memperbarui hasil di bawah.", "Inputs changed since the last run -- click 'Run bund simulation' to refresh the results below."))
+    ser = res["series"]
+    nT = len(ser)
+    if mode == "seep":
+        gs = st.session_state.get("bd_seep")
+        if not gs:
+            return
+        if gs[0] != key:
+            _ui_info(_t("Input berubah -- klik 'Jalankan simulasi zona jenuh' untuk memperbarui.", "Inputs changed -- click 'Run saturated-zone simulation' to refresh."))
+        _bund_seep_ui(bd, res, gs[1])
+        return
+
+    if any(s.get("bypass") for s in ser):
+        _kb = next(i for i, s in enumerate(ser) if s.get("bypass"))
+        st.warning(_t(f"Pada langkah {_kb} air kolam sudah memutari/melewati ujung sekatan dan masuk ke sisi hilir (kolam tidak tertutup oleh sekatan pada level itu). "
+                      "Gaya total 3D dihitung dari kedua sisi (saling meniadakan) dan FS per penampang mengabaikan air di sisi hilir kecuali Anda mengisi 'Muka air hilir'.",
+                      f"At step {_kb} the pond water has gone around/over the end of the bund to the downstream side (the pond is not enclosed at that level). The 3D total force counts both sides "
+                      "(partly cancelling) and the per-section FS ignores downstream water unless you set the tailwater level."))
+    # ---------------- ringkasan
+    _sub_header(_t("Hasil", "Results"))
+    fmax = max(s["Fres"] for s in ser)
+    kpk = int(np.argmax([s["Fres"] for s in ser]))
+    fsS = min(s["FS_s"] for s in ser)
+    fsO = min(s["FS_o"] for s in ser)
+    m1_, m2_, m3_, m4_ = st.columns(4)
+    _metric_card(_t("Gaya resultan maks.", "Max resultant force"), f"{fmax / 1000:.2f} MN" if fmax >= 1000 else f"{fmax:.0f} kN", help_text=_t(f"Pada Lw={ser[kpk]['Lw']:.2f} m", f"At Lw={ser[kpk]['Lw']:.2f} m"), container=m1_)
+    _metric_card(_t("Tekanan maks. pada muka", "Max face pressure"), f"{max(s['pmax'] for s in ser):.0f} kPa", container=m2_)
+    _metric_card(_t("FS geser terendah", "Lowest sliding FS"), f"{fsS:.2f}" if fsS < 99 else ">10", help_text=_bund_fs_label(fsS), container=m3_)
+    _metric_card(_t("FS guling terendah", "Lowest overturning FS"), f"{fsO:.2f}" if fsO < 99 else ">10", help_text=_bund_fs_label(fsO), container=m4_)
+    crit = [s for s in ser if min(s["FS_s"], s["FS_o"]) < 1.5]
+    fail = [s for s in ser if min(s["FS_s"], s["FS_o"]) < 1.0]
+    if fail:
+        st.error(_t(f"FS < 1,0 mulai pada muka air {fail[0]['Lw']:.2f} m" + (f" / lumpur {fail[0]['Lm']:.2f} m" if fail[0]["Lm"] > -1e8 else "") + " -- sekatan tidak stabil pada skenario ini.",
+                    f"FS < 1.0 from water level {fail[0]['Lw']:.2f} m" + (f" / mud {fail[0]['Lm']:.2f} m" if fail[0]["Lm"] > -1e8 else "") + " -- the bund is unstable in this scenario."))
+    elif crit:
+        st.warning(_t(f"FS < 1,5 (waspada) mulai muka air {crit[0]['Lw']:.2f} m.", f"FS < 1.5 (watch) from water level {crit[0]['Lw']:.2f} m."))
+    else:
+        st.success(_t("FS ≥ 1,5 di seluruh skenario (indikatif).", "FS ≥ 1.5 across the whole scenario (indicative)."))
+
+    # ---------------- 3D
+    _sub_header(_t("Simulasi 3D (tekanan pada muka sekatan)", "3D simulation (pressure on the bund face)"))
+    st.caption(_t("Tekan ▶ untuk menaik-turunkan muka air/lumpur. Panah merah-biru = tekanan tegak lurus muka (panjang & warna ∝ tekanan); panah kuning = gaya resultan.",
+                  "Press ▶ to raise/lower the water/mud levels. Arrows = pressure normal to the face (length & colour ∝ pressure); yellow arrow = resultant force."))
+    try:
+        _html = bd.build_scene_html(res, _BUND_VIEWER_TEMPLATE, three_inline=_wsim_find_local_three(), three_cdn=dsc.THREE_CDN,
+                                    title=_t("Ketahanan sekatan", "Bund resistance"), subtitle=_t("Air + lumpur sisi kolam", "Water + mud on the pond side"),
+                                    labels=dict(lw=_t("Muka air", "Water level"), lm=_t("Muka lumpur", "Mud level"), fh=_t("Gaya resultan", "Resultant force"), pmax=_t("Tekanan maks.", "Max pressure"),
+                                                fss=_t("FS geser (min)", "Sliding FS (min)"), fso=_t("FS guling (min)", "Overturning FS (min)"), pressure=_t("Tekanan", "Pressure"),
+                                                b_reset="Reset", b_side=_t("Dari kolam", "From pond"), b_top=_t("Atas", "Top")))
+        if hasattr(st, "iframe"):
+            st.iframe(_html, width="stretch", height=640)
+        else:
+            import streamlit.components.v1 as _bdc
+            _bdc.html(_html, height=640, scrolling=False)
+        st.download_button(_t("Unduh simulasi 3D (HTML mandiri)", "Download 3D simulation (standalone HTML)"), data=_html.encode("utf-8"), file_name="ketahanan_sekatan_3d.html", mime="text/html", key="bd_dl3d")
+    except Exception as e3:
+        st.error(_t(f"Simulasi 3D gagal dibuat: {e3}", f"Could not build the 3D simulation: {e3}"))
+
+    # ---------------- grafik waktu
+    _sub_header(_t("Gaya & faktor keamanan terhadap level", "Force & safety factor vs. level"))
+    xl = [f"{s['Lw']:.2f}" for s in ser]
+    fg = go.Figure()
+    fg.add_trace(go.Scatter(x=list(range(nT)), y=[s["Fres"] for s in ser], name=_t("Gaya resultan (kN)", "Resultant force (kN)"), line=dict(color="#d8402c", width=3), customdata=[(s["Lw"], s["Lm"]) for s in ser],
+                            hovertemplate="step %{x}<br>F=%{y:.0f} kN<br>Lw=%{customdata[0]:.2f} m<extra></extra>"))
+    fg.update_layout(height=300, margin=dict(l=10, r=10, t=30, b=10), xaxis_title=_t("Langkah simulasi", "Simulation step"), yaxis_title="kN", title=dict(text=_t("Gaya total pada sekatan", "Total force on the bund"), font=dict(size=14)))
+    cA, cB = st.columns(2)
+    cA.plotly_chart(fg, width="stretch")
+    fg2 = go.Figure()
+    fg2.add_trace(go.Scatter(x=list(range(nT)), y=[min(s["FS_s"], 5) for s in ser], name=_t("FS geser", "Sliding FS"), line=dict(color="#2d8de0", width=3)))
+    fg2.add_trace(go.Scatter(x=list(range(nT)), y=[min(s["FS_o"], 5) for s in ser], name=_t("FS guling", "Overturning FS"), line=dict(color="#e08a2d", width=3)))
+    fg2.add_hline(y=1.0, line=dict(color="#d8402c", dash="dash")); fg2.add_hline(y=1.5, line=dict(color="#e6b800", dash="dot"))
+    fg2.update_layout(height=300, margin=dict(l=10, r=10, t=30, b=10), xaxis_title=_t("Langkah simulasi", "Simulation step"), yaxis_title="FS", yaxis=dict(range=[0, 5.2]), legend=dict(orientation="h", y=1.12),
+                      title=dict(text=_t("FS terendah sepanjang sekatan (maks. ditampilkan 5)", "Lowest FS along the bund (capped at 5)"), font=dict(size=14)))
+    cB.plotly_chart(fg2, width="stretch")
+
+    # ---------------- penampang & distribusi tekanan
+    _sub_header(_t("Distribusi tekanan pada penampang sekatan", "Pressure distribution on the bund section"))
+    k = st.slider(_t("Langkah simulasi", "Simulation step"), 0, nT - 1, kpk, 1, key="bd_k")
+    st_k = res["stats"][k]
+    valid = [(i, r) for i, r in enumerate(st_k) if r]
+    if not valid:
+        st.warning(_t("Tidak ada penampang valid.", "No valid section."))
+        return
+    icrit = min(valid, key=lambda ir: min(ir[1]["FS_s"], ir[1]["FS_o"]))[0]
+    opts = [i for i, _ in valid]
+    ist = st.selectbox(_t("Penampang (titik sepanjang sekatan)", "Section (position along the bund)"), opts, index=opts.index(icrit), key=f"bd_st_{k}",
+                       format_func=lambda i: _t(f"Titik {i + 1}", f"Station {i + 1}") + (_t("  (paling kritis)", "  (most critical)") if i == icrit else ""))
+    r = st_k[ist]
+    s_k = ser[k]
+    cL, cR = st.columns([3, 2])
+    cL.plotly_chart(_bund_section_fig(bd, res, k, ist), width="stretch")
+    with cR:
+        tab_rows = [(_t("Muka air (m)", "Water level (m)"), f"{s_k['Lw']:.2f}"), (_t("Muka lumpur (m)", "Mud level (m)"), "-" if s_k["Lm"] < -1e8 else f"{s_k['Lm']:.2f}"),
+                    (_t("Gaya horizontal (kN/m)", "Horizontal force (kN/m)"), f"{r['Fh']:.1f}"), (_t("Gaya vertikal pada muka (kN/m)", "Vertical force on face (kN/m)"), f"{r['V']:.1f}"),
+                    (_t("Berat sekatan (kN/m)", "Bund weight (kN/m)"), f"{r['W']:.1f}"), (_t("Gaya angkat (kN/m)", "Uplift (kN/m)"), f"{r['U']:.1f}"),
+                    (_t("FS geser", "Sliding FS"), f"{r['FS_s']:.2f}" if r["FS_s"] < 99 else ">10"), (_t("FS guling", "Overturning FS"), f"{r['FS_o']:.2f}" if r["FS_o"] < 99 else ">10"),
+                    (_t("Eksentrisitas e (m)", "Eccentricity e (m)"), f"{r['e']:.2f} (B/6={r['B'] / 6:.2f})"), (_t("Tegangan dasar maks/min (kPa)", "Base pressure max/min (kPa)"), f"{r['qmax']:.0f} / {r['qmin']:.0f}"),
+                    (_t("Tinggi sekatan (m)", "Bund height (m)"), f"{r['h']:.2f}"), (_t("Lebar dasar B (m)", "Base width B (m)"), f"{r['B']:.1f}")]
+        st.dataframe(pd.DataFrame(tab_rows, columns=[_t("Besaran", "Quantity"), _t("Nilai", "Value")]), hide_index=True, width="stretch")
+        if r["e"] > r["B"] / 6:
+            st.warning(_t("Resultan di luar sepertiga tengah dasar: ada zona tarik/angkat di dasar.", "Resultant outside the middle third: tension/lift-off zone at the base."))
+
+    # sepanjang sekatan
+    ts = [r_["t"] for _, r_ in valid]
+    fa = go.Figure()
+    fa.add_trace(go.Bar(x=ts, y=[r_["Fh"] for _, r_ in valid], marker_color=["#d8402c" if i == icrit else "#e8a090" for i, _ in valid], name=_t("Gaya horizontal (kN/m)", "Horizontal force (kN/m)")))
+    fa.update_layout(height=260, margin=dict(l=10, r=10, t=30, b=10), xaxis_title=_t("Posisi sepanjang sekatan (m)", "Position along the bund (m)"), yaxis_title="kN/m",
+                     title=dict(text=_t("Gaya per meter di tiap titik sepanjang sekatan (langkah terpilih)", "Force per metre along the bund (selected step)"), font=dict(size=14)))
+    st.plotly_chart(fa, width="stretch")
+    st.caption(_t("Penampang diambil tegak lurus sumbu utama sekatan (garis lurus pendekatan). Untuk sekatan melengkung/mengelilingi kolam, titik di tikungan hanya pendekatan.",
+                  "Sections are taken perpendicular to the main bund axis (straight-line approximation). For curved or enclosing bunds, stations at the bends are approximate."))
+
+    # ---------------- unduhan
+    df = pd.DataFrame([dict(step=i, muka_air_m=s["Lw"], muka_lumpur_m=(None if s["Lm"] < -1e8 else s["Lm"]), gaya_resultan_kN=s["Fres"], gaya_Fx_kN=s["Fx"], gaya_Fy_kN=s["Fy"], p_maks_kPa=s["pmax"],
+                            FS_geser_min=s["FS_s"], FS_guling_min=s["FS_o"], luas_basah_m2=s["face_area"]) for i, s in enumerate(ser)])
+    d1, d2 = st.columns(2)
+    d1.download_button(_t("Unduh tabel hasil (CSV)", "Download result table (CSV)"), data=df.to_csv(index=False).encode("utf-8"), file_name="ketahanan_sekatan.csv", mime="text/csv", key="bd_csv")
+    try:
+        d2.download_button(_t("Unduh penampang terpilih (DXF)", "Download selected section (DXF)"), data=bd.section_dxf(res, k, ist), file_name=f"penampang_sekatan_s{k}_t{ist + 1}.dxf", mime="application/dxf", key="bd_dxf")
+    except Exception as e4:
+        d2.caption(_t(f"DXF penampang tidak tersedia: {e4}", f"Section DXF unavailable: {e4}"))
+
+with tabF:
+    _bund_tab()
+
+
+# =========================================================
+# ====== MODUL: MUD POCKET (pad unit HD dumping ke kolam lumpur) =====
+# =========================================================
+_MUDPOCKET_SRC = r'''"""
+Mesin analisis desain MUD POCKET (pad unit HD untuk dumping ke kolam lumpur) -- ILUSTRATIF / indikatif.
+
+Model 2D (potongan memanjang pad, bidang regangan) + faktor lebar pad:
+  * Penampang: lahan -> lereng dasar kolam (tabel titik) -> lumpur (sampai muka lumpur) -> air; di bawah dasar: lapisan lunak/tanah dasar (tebal, gamma, Su, Cc, e0, cv).
+  * Pad dibangun bertahap maju ke kolam (end-dump): volume tiap tahap dari armada (loads/hari). Timbunan menggusur lumpur/air (muka kolam bisa naik).
+  * Beban bersih (timbunan - fluida yang digusur) -> tambahan tegangan Boussinesq strip (plane strain) x faktor lebar pad -> konsolidasi Terzaghi per lapisan dgn pembebanan bertahap:
+        tekanan pori berlebih u(t), penurunan s(t), kenaikan Su(t) = m * (delta sigma' terkonsolidasi).
+  * Daya dukung (Su, phi=0): timbunan di atas tanah lunak (Nc persegi panjang + koreksi lapisan tipis), roda HD via penyebaran 2:1 melalui timbunan.
+  * Stabilitas lereng: Bishop sederhana, pencarian lingkaran, beban HD di tepi dump, air kolam, kuat geser undrained lumpur/lempung (Su) dan c-phi timbunan.
+  * Konversi data uji: DCP->CBR, CBR->Su, sand cone -> kepadatan relatif -> faktor kuat timbunan.
+Tidak menggantikan analisis geoteknik (Plaxis/Slide/GeoStudio) dan tidak mengkalibrasi terhadap kejadian lapangan.
+"""
+import math
+import numpy as np
+
+GW = 9.81
+
+
+# ---------------------------------------------------------------- konversi data uji
+def dcp_to_cbr(dcp_mm_blow):
+    d = np.maximum(np.asarray(dcp_mm_blow, float), 0.5)
+    return 10 ** (2.465 - 1.12 * np.log10(d))
+
+
+def cbr_to_su(cbr, k=30.0):
+    return k * np.asarray(cbr, float)
+
+
+def rc_factor(rc):
+    """Faktor kuat timbunan dari kepadatan relatif (RC, 0-1.1): >=95% -> 1.0; 85% -> 0.5."""
+    return float(np.clip(0.5 + (rc - 0.85) / 0.10 * 0.5, 0.4, 1.0))
+
+
+def derive_su(tests, layers, k_cbr=30.0, k_su_ucs=1.0):
+    """tests: list dict(jenis, depth, value). Return (su_per_layer, info). jenis: 'Su', 'UCS', 'CBR', 'DCP'. depth = m di bawah dasar kolam.
+    Layers dg 'h' (tebal). Su layer = rata-rata data dalam interval; jika tak ada -> nilai manual layer['su']."""
+    top = 0.0
+    out, info = [], []
+    for L in layers:
+        bot = top + float(L["h"]) if L.get("h") is not None else 1e9
+        vals, src = [], []
+        for t in tests:
+            try:
+                d = float(t["depth"]); v = float(t["value"])
+            except Exception:
+                continue
+            if not (top - 1e-9 <= d < bot + 1e-9):
+                continue
+            j = str(t["jenis"]).lower()
+            if j.startswith("su") or j.startswith("vane"):
+                vals.append(v); src.append("Su")
+            elif j.startswith("ucs"):
+                vals.append(0.5 * v * k_su_ucs); src.append("UCS")
+            elif j.startswith("cbr"):
+                vals.append(float(cbr_to_su(v, k_cbr))); src.append("CBR")
+            elif j.startswith("dcp"):
+                vals.append(float(cbr_to_su(dcp_to_cbr(v), k_cbr))); src.append("DCP")
+        if vals:
+            out.append(float(np.mean(vals))); info.append((len(vals), sorted(set(src))))
+        else:
+            out.append(float(L.get("su", 20.0))); info.append((0, ["manual"]))
+        top = bot
+    return out, info
+
+
+# ---------------------------------------------------------------- konsolidasi
+def terzaghi_U(T):
+    T = np.maximum(np.asarray(T, float), 0.0)
+    U = np.zeros_like(T)
+    for m in range(0, 40):
+        M = math.pi * (2 * m + 1) / 2.0
+        U = U + 2.0 / (M * M) * np.exp(-M * M * T)
+    return np.clip(1.0 - U, 0.0, 1.0)
+
+
+def strip_kernel(xs, xi, d, dxi):
+    """Pengaruh tambahan tegangan vertikal (plane strain) di titik (x, kedalaman d) akibat pita beban lebar dxi di xi. Return array [len(d), len(xs), len(xi)]."""
+    X = xs[None, :, None]; D = np.maximum(d[:, None, None], 0.05); XI = xi[None, None, :]
+    a = (XI - dxi / 2.0) - X
+    b = (XI + dxi / 2.0) - X
+    t1 = np.arctan2(a, D); t2 = np.arctan2(b, D)
+    return (t2 - t1 + 0.5 * (np.sin(2 * t2) - np.sin(2 * t1))) / math.pi
+
+
+# ---------------------------------------------------------------- geometri
+def floor_fn(pts):
+    P = np.asarray(sorted(pts), float)
+    return lambda x: np.interp(x, P[:, 0], P[:, 1])
+
+
+def pad_top(x, xf, Zp, floor, msl=2.0, x0=-1e9):
+    """Elevasi atas pad: Zp dari x0 sampai xf, lalu lereng depan 1V:msl H turun; None bila di bawah dasar. Tinggi dikembalikan per x (>= floor)."""
+    top = np.where(x <= xf, Zp, Zp - (x - xf) / msl)
+    return np.where(x >= x0, np.maximum(top, -1e9), -1e9)
+
+
+def unit_load(spec, state="loaded", dyn=1.25, Lr=2.0):
+    W = (spec["empty_t"] + (spec["payload_t"] if state == "loaded" else 0.0)) * 9.81 * dyn
+    fr = spec.get("front_loaded", 0.33) if state == "loaded" else spec.get("front_empty", 0.47)
+    Fr = W * (1 - fr)
+    Bb = spec.get("track_rear", 2.9) + 2 * spec.get("tire_w", 0.69) + spec.get("dual_gap", 0.95) * 0.0
+    return dict(W=W, Fr=Fr, Bb=Bb, Lr=Lr, q=Fr / (Bb * Lr), len=spec.get("len_m", 10.0), wid=spec.get("wid_m", 5.0))
+
+
+TRACK_UNITS = {
+    "Excavator 35 t": dict(kind="excavator", empty_t=35.0, track_len=3.9, shoe_w=0.6, gauge=2.5, len_m=7.0, wid_m=3.2, reach=9.5, lb=0.0),
+    "Excavator 50 t": dict(kind="excavator", empty_t=50.0, track_len=4.4, shoe_w=0.6, gauge=2.7, len_m=9.5, wid_m=3.4, reach=10.5),
+    "Excavator 90 t": dict(kind="excavator", empty_t=90.0, track_len=5.1, shoe_w=0.8, gauge=3.4, len_m=11.5, wid_m=4.2, reach=12.5),
+    "Dozer D8 (±39 t)": dict(kind="dozer", empty_t=39.0, track_len=3.3, shoe_w=0.61, gauge=2.16, len_m=5.8, wid_m=3.4),
+    "Dozer D6 (±20 t)": dict(kind="dozer", empty_t=20.0, track_len=2.6, shoe_w=0.56, gauge=1.88, len_m=4.9, wid_m=3.2),
+}
+
+
+def track_load(spec, dyn=1.1):
+    """Beban unit track (excavator/dozer) pada pad. q = tekanan tapak (kPa) per track; Fr = beban per track (kN)."""
+    W = spec["empty_t"] * 9.81 * dyn
+    sw, Lt, g = float(spec["shoe_w"]), float(spec["track_len"]), float(spec["gauge"])
+    q = W / (2.0 * sw * Lt)
+    return dict(W=W, Fr=W / 2.0, Bb=sw, Lr=Lt, Lx=Lt, q=q, q_eq=W / (Lt * (g + sw)), gauge=g, len=spec.get("len_m", 6.0), wid=spec.get("wid_m", 3.4), name=spec.get("name", spec.get("kind", "track")))
+
+
+def n_gamma(phi_deg):
+    ph = math.radians(max(phi_deg, 0.0))
+    nq = math.exp(math.pi * math.tan(ph)) * math.tan(math.pi / 4 + ph / 2) ** 2
+    return 2.0 * (nq + 1.0) * math.tan(ph)
+
+
+def nc_rect(B, L):
+    return 5.14 * (1.0 + 0.2 * min(B / max(L, 1e-6), 1.0))
+
+
+def nc_thin(Nc0, B, H):
+    """Koreksi lapisan lunak tipis di atas lapisan keras (pemerasan/Mandel-Salencon, indikatif): Nc naik bila H < B."""
+    return Nc0 + min(0.5 * B / max(H, 1e-3), 6.0) if H < B else Nc0
+
+
+# ---------------------------------------------------------------- model utama
+class MudPocket:
+    def __init__(self, floor_pts, layers, fill, Zp, Zm0, Zw0, pad_w, xf0, xf1, n_steps, msl=2.0, mud=None, fleet=None, unit=None, pond_area=None,
+                 setback=3.0, su_gain=0.25, drain_two_way=False, dyn=1.25, dx=0.5, dz=0.5, k_cbr=30.0, extra=None,
+                 mode="dump", x_dump=None, dozer=None, load=None):
+        self.fl = floor_fn(floor_pts)
+        self.layers = layers
+        self.fill = fill
+        self.Zp, self.Zm0, self.Zw0 = float(Zp), float(Zm0), float(Zw0)
+        self.W = float(pad_w)
+        self.mode = mode
+        self.x_dump = x_dump
+        self.dozer = dozer                # dict dari track_load (atau None)
+        self.load = load                  # mode 'load': dict(units=[...], prod_m3h, step_h, pad_age_d, reach_len, refill, scour_per_1000)
+        self.xf = np.linspace(xf0, xf1, n_steps) if mode == "dump" else np.full(n_steps, float(xf1))
+        self.n = n_steps
+        self.msl = msl
+        self.mud = mud or dict(gamma=14.0, su=3.0)
+        self.fleet = fleet or dict(trucks=4, cycle_min=12.0, hours=10.0)
+        self.unit = unit
+        self.pond_area = pond_area
+        self.setback = setback
+        self.su_gain = su_gain
+        self.two = drain_two_way
+        self.dyn = dyn
+        self.dx, self.dz = dx, dz
+        self.x0g = min(floor_pts[0][0], -40.0)
+        self.x1g = float(xf1) + 70.0
+        self.xs = np.arange(self.x0g, self.x1g + 1e-9, dx)
+        Hs = sum(float(L["h"]) for L in layers if L.get("h"))
+        self.Hs = Hs
+        self.zf = self.fl(self.xs)
+        self.zbot = float(self.zf.min()) - Hs - 4.0
+        self.ztop = float(Zp) + 3.0
+        self.zs = np.arange(self.zbot + dz / 2, self.ztop, dz)           # pusat sel naik
+        self.nz, self.nx = len(self.zs), len(self.xs)
+        # kernel tegangan (depth index dari 0..Hs+4)
+        self.dd = np.arange(dz / 2, Hs + 4.0 + dz, dz)
+        xi = np.arange(self.x0g, self.x1g + 1e-9, 1.0)
+        self.xi = xi
+        self.K = strip_kernel(self.xs, xi, self.dd, 1.0)
+
+    # ---- profil per tahap
+    def volumes(self):
+        xs = np.arange(self.x0g, self.xf[-1] + 1.0, 0.5)
+        zf = self.fl(xs)
+        top = self.Zp
+        h = np.maximum(top - zf, 0.0)
+        x_edge = 0.0
+        cum = np.cumsum(h) * 0.5
+        # toe segment diabaikan; volume per m lebar dari x0g
+        V = []
+        for xf in self.xf:
+            m = xs <= xf
+            area = float(np.sum(h[m]) * 0.5)
+            # lereng depan: segitiga antara dasar dan puncak
+            hf = max(self.Zp - float(self.fl(xf)), 0.0)
+            area += 0.5 * hf * hf * self.msl
+            V.append(area * self.W)
+        return np.array(V)
+
+    def run(self, progress=None):
+        n = self.n
+        dz, dx = self.dz, self.dx
+        xs, zs = self.xs, self.zs
+        layers = self.layers
+        fill = self.fill
+        U = self.unit
+        # lapisan: batas kedalaman dari dasar
+        hs = [float(L["h"]) if L.get("h") else 1e3 for L in layers]
+        dtop = np.cumsum([0.0] + hs[:-1]); dbot = np.cumsum(hs)
+        nL = len(layers)
+        # volume & waktu
+        V = self.volumes()                    # m3 bangunan (3D)
+        lc = self.load or {}
+        if self.mode == "load":
+            dV = float(lc["prod_m3h"]) * float(lc["step_h"])
+            loads = np.zeros(n); rate = float(lc["prod_m3h"]) * 24.0 / max(float(lc["step_h"]), 1e-6) * 0.0
+            t_days = np.arange(n) * float(lc["step_h"]) / 24.0
+        else:
+            capacity = self.fleet.get("cap_m3", 40.0)
+            loads = V / max(capacity, 1.0)
+            rate = self.fleet["trucks"] * (60.0 / self.fleet["cycle_min"]) * self.fleet["hours"]       # load / hari
+            t_days = np.concatenate([[0.0], np.cumsum(np.diff(loads)) / max(rate, 1e-6)])
+            t_days[0] = 0.0
+        # gaya truk
+        # tekanan efektif awal per sel kedalaman (kolom)  sigma'0(x,d)
+        gam_eff = [float(L["gamma"]) - GW for L in layers]
+        dtl = self.dd
+        lay_of_d = np.clip(np.searchsorted(dbot, dtl), 0, nL - 1)
+        sig0_d = np.zeros(len(dtl))
+        for i, dd_ in enumerate(dtl):
+            s = 0.0
+            for j in range(nL):
+                top_ = dtop[j]; bot_ = dbot[j]
+                s += gam_eff[j] * max(min(dd_, bot_) - top_, 0.0)
+            sig0_d[i] = s
+        mud_gam_eff = self.mud["gamma"] - GW
+        # kumpulan hasil
+        res = dict(steps=[], frames=[], xs=xs, zs=zs, dx=dx, dz=dz, floor=self.zf.copy(), layers=layers, t_days=t_days, V=V, loads=loads, rate=rate)
+        Dsig_hist = []          # (t_j, Dsig_j(d,x))
+        Zm, Zw = self.Zm0, self.Zw0
+        gf = float(fill["gamma"]); gfs = float(fill.get("gamma_sat", gf + 1.0)); phi_f = float(fill["phi_eff"]); c_f = float(fill.get("c", 0.0))
+        Vdisp_prev = 0.0
+        Su0 = [float(L["su_use"]) for L in layers]
+        Cc = [float(L.get("cc", 0.3)) for L in layers]; e0 = [float(L.get("e0", 1.2)) for L in layers]
+        cv = [max(float(L.get("cv", 0.02)), 1e-5) for L in layers]
+        Hdr = max(self.Hs, 1.0) / (2.0 if self.two else 1.0)
+        for k in range(n):
+            xf = float(self.xf[k]); t = float(t_days[k])
+            floor_s = self.zf.copy()
+            # penurunan akumulasi dari tahap sebelumnya (mengurangi dasar) dihitung nanti; pakai dari hist
+            # --- pad & fluida
+            Vexc, retr, msl_k = 0.0, 0.0, self.msl
+            if self.mode == "load":
+                Vexc = k * dV
+                Hf0 = max(self.Zp - float(self.fl(xf)), 0.5)
+                retr = min(float(lc["scour_per_1000"]) * Vexc / 1000.0, 0.85 * Hf0 * self.msl)
+                msl_k = max((Hf0 * self.msl - retr) / Hf0, 0.2)
+            top_p = np.where(xs <= xf, self.Zp, self.Zp - (xs - xf) / msl_k)
+            hpad = np.maximum(top_p - self.zf, 0.0)
+            # pad menggusur: volume di bawah Zw
+            below_w = np.maximum(np.minimum(top_p, Zw) - self.zf, 0.0)
+            Vd = float(np.sum(below_w) * dx * self.W)
+            if self.mode == "load":
+                Zm, Zw = self.Zm0, self.Zw0
+            elif self.pond_area:
+                rise = max(Vd - Vdisp_prev * 0.0, 0.0) / max(self.pond_area, 1.0)
+                Zm = self.Zm0 + rise
+                Zw = self.Zw0 + rise
+            else:
+                Zm, Zw = self.Zm0, self.Zw0
+            # beban bersih per kolom (kPa)
+            zmud_top = np.maximum(self.zf, Zm)
+            mud_h = np.maximum(np.minimum(Zm, Zw + 1e6) - self.zf, 0.0)
+            before = self.mud["gamma"] * np.maximum(Zm - self.zf, 0.0) + GW * np.maximum(Zw - np.maximum(self.zf, Zm), 0.0)
+            wet = np.maximum(np.minimum(top_p, Zw) - self.zf, 0.0)
+            dry = np.maximum(top_p - np.maximum(self.zf, Zw), 0.0)
+            after = gfs * wet + gf * dry
+            qnet = np.where(hpad > 0, np.maximum(after - before, 0.0), 0.0)
+            # muka lumpur lokal (parit galian excavator di depan kaki pad) -- hanya mode 'load'
+            Zmx = np.full(self.nx, Zm); trench = 0.0; xtoe = xf
+            if self.mode == "load":
+                Zm_cur = self.Zm0 - (Vexc / self.pond_area if self.pond_area else 0.0)
+                Hf1 = max(self.Zp - float(self.fl(xf)), 0.5); xtoe = xf + Hf1 * msl_k
+                Ltr = float(lc["reach_len"])
+                shape = np.clip(1.0 - (xs - (xtoe + Ltr)) / 3.0, 0.0, 1.0) * np.clip((xs - (xtoe - 1.0)) / 1.0, 0.0, 1.0)
+                nom = Vexc / max(self.W * Ltr, 1.0)
+                Zmx = np.maximum(Zm_cur - (1.0 - float(lc["refill"])) * nom * shape, np.minimum(self.zf + 0.1, Zm_cur))
+                Zm = Zm_cur; trench = float(np.max(Zm_cur - Zmx))
+                Zw = max(Zw, Zm)
+            # nilai q pada xi (1 m)
+            q_xi = np.interp(self.xi, xs, qnet)
+            Dsig = np.einsum("dxi,i->dx", self.K, q_xi) * (self.W / (self.W + self.dd[:, None]))     # [d, x]
+            if self.mode == "dump":
+                Dsig_hist.append((t, Dsig))
+            elif k == 0:
+                qx = np.zeros_like(self.xi)
+                for ld in lc["units"]:
+                    hfe = max(float(np.interp(ld["x"], xs, top_p - self.zf)), 0.0)
+                    wd = ld["Lx"] + hfe
+                    qx += np.where(np.abs(self.xi - ld["x"]) <= wd / 2.0, ld["q_eq"] * ld["Lx"] / wd, 0.0)
+                Dex = np.einsum("dxi,i->dx", self.K, qx) * (self.W / (self.W + self.dd[:, None]))
+                Dsig_hist.append((-float(lc["pad_age_d"]), Dsig)); Dsig_hist.append((0.0, Dsig + Dex))
+            # --- konsolidasi (superposisi tahap)
+            gain = np.zeros_like(Dsig); u_exc = np.zeros_like(Dsig)
+            prev = np.zeros_like(Dsig)
+            for (tj, Dj) in Dsig_hist:
+                inc = Dj - prev; prev = Dj
+                Tcol = np.array([cv[lay_of_d[i]] * max(t - tj, 0.0) / (Hdr ** 2) for i in range(len(dtl))])
+                Ud = terzaghi_U(Tcol)[:, None]
+                gain += inc * Ud
+                u_exc += inc * (1.0 - Ud)
+            # penurunan per lapisan: Cc H /(1+e0) log10(1+gain/sig0)
+            s_x = np.zeros(self.nx)
+            for i in range(nL):
+                m_ = (dtl >= dtop[i]) & (dtl < dbot[i])
+                if not m_.any() or i >= nL - 0:
+                    pass
+                if not m_.any():
+                    continue
+                if layers[i].get("firm"):
+                    continue
+                g_i = gain[m_].mean(axis=0); s0_i = float(np.mean(sig0_d[m_])) + 1e-3
+                Hi = min(hs[i], self.Hs)
+                s_x += Cc[i] * Hi / (1.0 + e0[i]) * np.log10(1.0 + g_i / s0_i)
+            smax_c = float(s_x.max())
+            # --- Su(x,z) & grid kelas
+            zf_s = self.zf - 0.0
+            cls = np.zeros((self.nz, self.nx), np.uint8)     # 0 udara,1 air,2 lumpur,3 timbunan, 4+i lapisan
+            gam = np.zeros((self.nz, self.nx)); cc = np.zeros((self.nz, self.nx)); phi = np.zeros((self.nz, self.nx))
+            su_f = np.zeros((self.nz, self.nx)); du_f = np.zeros((self.nz, self.nx))
+            Z = zs[:, None]
+            zf_row = self.zf[None, :]
+            # penurunan menurunkan dasar (pad area)
+            zfl = zf_row - s_x[None, :]
+            depth = zfl - Z                        # + di bawah dasar
+            atop = top_p[None, :]
+            in_fill = (Z <= atop) & (Z > zfl) & (hpad[None, :] > 0)
+            in_soil = (depth > 0) & (~in_fill)
+            in_mud = (~in_fill) & (~in_soil) & (Z <= Zmx[None, :]) & (Z > zfl)
+            in_water = (~in_fill) & (~in_soil) & (~in_mud) & (Z <= Zw) & (Z > zfl)
+            for i in range(nL):
+                m_ = in_soil & (depth >= dtop[i]) & (depth < dbot[i] if i < nL - 1 else True)
+                cls[m_] = 4 + i
+                gam[m_] = float(layers[i]["gamma"])
+                Sg = np.zeros((self.nz, self.nx))
+            # gain & u pada grid: interpolasi di d
+            didx = np.clip(((depth - dz / 2) / dz).round().astype(int), 0, len(dtl) - 1)
+            gain_g = gain[didx, np.arange(self.nx)[None, :].repeat(self.nz, 0)]
+            u_g = u_exc[didx, np.arange(self.nx)[None, :].repeat(self.nz, 0)]
+            for i in range(nL):
+                m_ = cls == 4 + i
+                cc[m_] = Su0[i] + self.su_gain * gain_g[m_]
+                su_f[m_] = cc[m_]
+                du_f[m_] = u_g[m_]
+            cls[in_mud] = 2; gam[in_mud] = self.mud["gamma"]; cc[in_mud] = self.mud["su"]; su_f[in_mud] = self.mud["su"]
+            cls[in_water] = 1; gam[in_water] = GW
+            cls[in_fill] = 3; gam[in_fill] = np.where(Z <= Zw, gfs, gf)[in_fill] if False else np.where(np.broadcast_to(Z, in_fill.shape) <= Zw, gfs, gf)[in_fill]
+            cc[in_fill] = c_f; phi[in_fill] = phi_f
+            # permukaan "padat" untuk lingkaran: puncak pad / lumpur / dasar
+            mtop = np.where(Zmx > zfl[0], Zmx, zfl[0])
+            solid_top = np.where(hpad > 0, np.maximum(top_p, mtop), mtop)
+            # --- stabilitas lereng (Bishop) dgn beban truk di tepi
+            blist, ulist = [], []
+            if self.mode == "dump":
+                xt = float(self.x_dump) if self.x_dump is not None else float(self.xf[0] - self.setback)
+                if U:
+                    blist.append((xt, U["q"], U["Lr"])); ulist.append((xt, U))
+                if self.dozer:
+                    blist.append((xf - 3.5, self.dozer["q"], self.dozer["Lx"]))
+            else:
+                for ld in lc["units"]:
+                    blist.append((ld["x"], ld["q"], ld["Lx"])); ulist.append((ld["x"], ld))
+                xt = float(lc["units"][0]["x"]) if lc["units"] else xf - 3.0
+            fs_s, circ = self._bishop(cls, gam, cc, phi, solid_top, Zw, xt, 0.0, 2.0, loads=blist, xref=xf)
+            # --- daya dukung
+            Lp = max(xf - 0.0, 1.0)
+            Bp = min(self.W, Lp); Lq = max(self.W, Lp)
+            # Su efektif rata-rata pada kedalaman 0 .. Bp/2 di bawah dasar pada x tengah pad
+            xc_ = 0.5 * (max(0.0, self.x0g) + xf)
+            ic = int(np.clip(round((xc_ - self.x0g) / dx), 0, self.nx - 1))
+            dep_lim = min(Bp / 2.0, self.Hs)
+            mm = dtl <= dep_lim
+            su_prof = np.array([Su0[lay_of_d[i]] + self.su_gain * gain[i, ic] for i in range(len(dtl))])
+            su_eff = float(np.mean(su_prof[mm])) if mm.any() else Su0[0]
+            Hsoft_ = self.Hs
+            Nc = nc_thin(nc_rect(Bp, Lq), Bp, Hsoft_)
+            q_app = float(np.mean(qnet[(xs >= max(self.x0g, 0)) & (xs <= xf)])) if (hpad > 0).any() else 0.0
+            # lumpur di bawah: perlawanan tambahan dari fluida di sekitar diabaikan
+            FS_emb = Nc * su_eff / max(q_app, 1e-3)
+            # roda truk: sebar 2:1 melalui timbunan di titik xt
+            FS_wheel, sig_top, qu_w = 99.0, 0.0, 0.0
+            for (xu, Uu) in (ulist or [(xt, None)]):
+                ix = int(np.clip(round((xu - self.x0g) / dx), 0, self.nx - 1))
+                hf = max(float(top_p[ix] - zfl[0, ix]), 0.05)
+                Be, Le = (Uu["Bb"] + hf, Uu["Lr"] + hf) if Uu else (3.0, 2.0)
+                sig_u = (Uu["Fr"] / (Be * Le)) if Uu else 0.0
+                su_top = su_prof[0] if len(su_prof) else Su0[0]
+                su_top = float(np.mean(su_prof[dtl <= min(Be, self.Hs)])) if (dtl <= min(Be, self.Hs)).any() else su_top
+                qu_u = nc_thin(nc_rect(Be, Le), Be, Hsoft_) * su_top
+                fsu = qu_u / max(sig_u + float(qnet[ix]), 1e-3)
+                if fsu < FS_wheel:
+                    FS_wheel, sig_top, qu_w = fsu, sig_u, qu_u
+            # daya dukung lokal material pad di bawah tapak (hanya unit track)
+            FS_pad = 99.0
+            if self.mode == "load":
+                Gp = float(gf); Ng = n_gamma(phi_f)
+                for (xu, Uu) in ulist:
+                    if Uu.get("gauge"):
+                        qu_pad = 0.5 * Gp * Uu["Bb"] * Ng + Gp * 0.3 * (math.exp(math.pi * math.tan(math.radians(phi_f))) * math.tan(math.pi / 4 + math.radians(phi_f) / 2) ** 2)
+                        FS_pad = min(FS_pad, qu_pad / max(Uu["q"], 1e-3))
+            u_max = float(u_g[(cls >= 4)].max()) if (cls >= 4).any() else 0.0
+            ru = float(np.max(np.where(cls >= 4, u_g / np.maximum(self._sig_eff_grid(depth, mud_gam_eff, dtl, sig0_d), 15.0), 0.0)))
+            su_min = float(su_f[(cls >= 4)].min()) if (cls >= 4).any() else 0.0
+            gain_su = float((su_f[(cls >= 4)] - np.vectorize(lambda c: Su0[int(c) - 4])(cls[(cls >= 4)])).max()) if (cls >= 4).any() else 0.0
+            # mud wave / heave
+            fh = float(np.clip((2.0 - FS_emb) / 0.8, 0.0, 1.0)) * 0.9
+            s_area = float(np.sum(s_x) * dx)
+            heave_A = fh * s_area
+            rec = dict(mode=self.mode, xd=float(xt), push_m=float(max(xf - xt, 0.0)), Vexc=float(Vexc), retreat=float(retr), trench=float(trench), msl=float(msl_k), FS_pad=float(FS_pad), xtoe=float(xtoe),
+                       mud_top=Zmx.copy(), k=k, xf=xf, t=t, V=float(V[k]), loads=float(loads[k]), hfront=float(self.Zp - self.fl(xf)), Zm=Zm, Zw=Zw, FS_emb=float(FS_emb), FS_wheel=float(FS_wheel), FS_slope=float(fs_s),
+                       circle=circ, s_max=smax_c, s_x=s_x.copy(), u_max=u_max, ru=ru, su_min=su_min, su_gain=gain_su, heave_A=heave_A, fh=fh, Vd=Vd, Nc=float(Nc), su_eff=su_eff, q_app=q_app,
+                       sig_top=float(sig_top), qu_w=float(qu_w), xt=xt, qnet_max=float(qnet.max()), top=top_p.copy())
+            res["steps"].append(rec)
+            # bingkai viewer
+            sc = lambda a, m: np.clip(np.rint(255 * a / m), 0, 255).astype(np.uint8)
+            res["frames"].append(dict(cls=cls, su=su_f.astype(np.float32), du=u_g.astype(np.float32) * (cls >= 4)))
+            if progress:
+                progress((k + 1) / n)
+        res["Su0"] = Su0
+        return res
+
+    def _sig_eff_grid(self, depth, mge, dtl, sig0_d):
+        didx = np.clip(((depth - self.dz / 2) / self.dz).round().astype(int), 0, len(dtl) - 1)
+        return sig0_d[didx]
+
+    # ---- Bishop sederhana, pencarian lingkaran
+    def _bishop(self, cls, gam, cc, phi, solid_top, Zw, xt, qt, Lr, nsl=70, return_all=False, ncx=22, ncz=10, nr=10, loads=None, xref=None):
+        dx, dz = self.dx, self.dz
+        xs, zs = self.xs, self.zs
+        nz, nx = cls.shape
+        if loads is None:
+            loads = [(xt, qt, Lr)] if qt > 0 else []
+        xref = xt if xref is None else xref
+        # bobot kumulatif dari atas grid: cumAbove[row, col] dengan baris dari atas
+        gam_t = gam[::-1]; cc_t = cc[::-1]; phi_t = phi[::-1]; cls_t = cls[::-1]
+        cum = np.cumsum(gam_t * dz, axis=0) - gam_t * dz          # berat sel2 di atas sel (strict)
+        ztopcell = (self.zs[-1] + dz / 2) - np.arange(nz) * dz     # elevasi atas sel baris i
+        xc_list = np.linspace(max(min([xref] + [l[0] for l in loads]) - 45.0, self.x0g + 5), min(xref + 22.0, self.x1g - 5), ncx)
+        zlow_top = float(solid_top.max())
+        zc_list = zlow_top + np.linspace(2.0, 2.0 + max(14.0, 1.3 * self.Hs + 6.0), ncz)
+        zfloor_min = float(self.zf.min())
+        zlows = zfloor_min - np.linspace(0.4, self.Hs + 0.6, nr)
+        XC, ZC, ZL = np.meshgrid(xc_list, zc_list, zlows, indexing="ij")
+        XC, ZC, ZL = XC.ravel(), ZC.ravel(), ZL.ravel()
+        R = ZC - ZL
+        ok = R > 3.0
+        XC, ZC, R = XC[ok], ZC[ok], R[ok]
+        n = len(R)
+        t = np.linspace(-1.0, 1.0, nsl)
+        xsl = XC[:, None] + t[None, :] * R[:, None]
+        bw = (2.0 * R / (nsl - 1))[:, None]
+        zb = ZC[:, None] - np.sqrt(np.maximum(R[:, None] ** 2 - (xsl - XC[:, None]) ** 2, 0.0))
+        ic = np.clip(np.round((xsl - self.x0g) / dx).astype(int), 0, nx - 1)
+        zt = solid_top[ic]
+        valid = (zb < zt - 0.02) & (zb > zs[0] - dz / 2) & (xsl > xs[0]) & (xsl < xs[-1])
+        # indeks baris sel berisi zb
+        ir = np.clip(((self.zs[-1] + dz / 2) - zb) // dz, 0, nz - 1).astype(int)
+        W_ = cum[ir, ic] + gam_t[ir, ic] * (ztopcell[ir] - zb)
+        # beban truk
+        for (xl_, ql_, wl_) in loads:
+            lo = np.maximum(xsl - bw / 2, xl_ - wl_ / 2); hi = np.minimum(xsl + bw / 2, xl_ + wl_ / 2)
+            W_ = W_ + ql_ * np.maximum(hi - lo, 0.0)
+        W_ = W_ * bw
+        sina = (xsl - XC[:, None]) / R[:, None]
+        cosa = np.sqrt(np.maximum(1 - sina ** 2, 1e-6))
+        c_ = cc_t[ir, ic]; ph = np.radians(phi_t[ir, ic])
+        tanp = np.tan(ph)
+        u_ = GW * np.maximum(Zw - zb, 0.0) * (phi_t[ir, ic] > 0)
+        # jumlah irisan valid per lingkaran
+        nv = valid.sum(axis=1)
+        drive = np.where(valid, W_ * sina, 0.0).sum(axis=1)
+        dirn = np.where(drive >= 0, 1.0, -1.0)
+        sina = sina * dirn[:, None]
+        drive = np.abs(drive)
+        FS = np.full(n, 5.0)
+        base_c = np.where(valid, c_ * bw, 0.0)
+        base_f = np.where(valid, np.maximum(W_ - u_ * bw, 0.0) * tanp, 0.0)
+        for _ in range(8):
+            ma = cosa + sina * tanp / FS[:, None]
+            res_ = np.where(valid, (c_ * bw + np.maximum(W_ - u_ * bw, 0.0) * tanp) / np.maximum(ma, 0.2), 0.0).sum(axis=1)
+            FSn = res_ / np.maximum(drive, 1e-6)
+            FS = np.clip(np.where(drive > 1e-6, FSn, 9.0), 0.05, 9.0)
+        good = (nv >= 14) & (drive > 0)
+        # lingkaran harus memotong zona pad/lereng depan: rentang irisan valid mencakup xt
+        xv = np.where(valid, xsl, np.nan)
+        xmin = np.nanmin(np.where(valid, xsl, 1e9), axis=1); xmax = np.nanmax(np.where(valid, xsl, -1e9), axis=1)
+        good &= (xmin < xref + 3.0) & (xmax > xref - 3.0)
+        if return_all:
+            return FS, good, nv, drive, res_, XC, ZC, R
+        if not good.any():
+            return 9.0, None
+        FSg = np.where(good, FS, 99.0)
+        i = int(np.argmin(FSg))
+        return float(FSg[i]), dict(xc=float(XC[i]), zc=float(ZC[i]), R=float(R[i]), x0=float(xmin[i]), x1=float(xmax[i]))
+
+
+# ---------------------------------------------------------------- analisis tambahan
+def required_fill_thickness(unit_q, Su_top, Bb, Lr, Hsoft, FS_t=1.3, h_max=6.0):
+    """Tebal timbunan minimum agar roda HD tidak melampaui daya dukung tanah lunak (sebar 2:1)."""
+    hs = np.linspace(0.05, h_max, 120)
+    sig = unit_q / ((Bb + hs) * (Lr + hs))
+    qu = np.array([nc_thin(nc_rect(Bb + h, Lr + h), Bb + h, Hsoft) * Su_top for h in hs])
+    ok = qu / sig >= FS_t
+    return hs, qu / sig, (float(hs[np.argmax(ok)]) if ok.any() else None)
+
+
+def setback_curve(mp, res, k, dists):
+    """FS lereng vs jarak roda dari tepi depan pad pada tahap k (ulang Bishop dgn xt berbeda)."""
+    # rekonstruksi grid tahap k dari bingkai tersimpan
+    st = res["steps"][k]
+    fr = res["frames"][k]
+    cls = fr["cls"]
+    gam = np.zeros(cls.shape); cc = np.zeros(cls.shape); phi = np.zeros(cls.shape)
+    layers = res["layers"]
+    Zw = st["Zw"]; Zm = st["Zm"]
+    for i, L in enumerate(layers):
+        gam[cls == 4 + i] = float(L["gamma"])
+    gam[cls == 2] = mp.mud["gamma"]; gam[cls == 1] = GW
+    gf = float(mp.fill["gamma"]); gfs = float(mp.fill.get("gamma_sat", gf + 1.0))
+    Zg = mp.zs[:, None] * np.ones(cls.shape)
+    gam[cls == 3] = np.where(Zg <= Zw, gfs, gf)[cls == 3]
+    cc[cls >= 4] = fr["su"][cls >= 4]; cc[cls == 2] = mp.mud["su"]
+    cc[cls == 3] = float(mp.fill.get("c", 0.0)); phi[cls == 3] = float(mp.fill["phi_eff"])
+    xf = st["xf"]
+    top_p = np.where(mp.xs <= xf, mp.Zp, mp.Zp - (mp.xs - xf) / st.get("msl", mp.msl))
+    solid_top = np.zeros(mp.nx)
+    for j in range(mp.nx):
+        col = np.nonzero(cls[:, j] >= 2)[0]
+        solid_top[j] = mp.zs[col.max()] + mp.dz / 2 if col.size else mp.zbot
+    U = mp.unit
+    out = []
+    for d in dists:
+        fs, _ = mp._bishop(cls, gam, cc, phi, solid_top, Zw, xf - d, U["q"] if U else 0.0, U["Lr"] if U else 2.0, xref=xf)
+        out.append(fs)
+    return np.array(out)
+
+
+def sensitivity(mp_factory, scales=(0.7, 0.85, 1.0, 1.15, 1.3)):
+    out = []
+    for s in scales:
+        mp = mp_factory(s)
+        r = mp.run()
+        out.append((s, min(x["FS_emb"] for x in r["steps"]), min(x["FS_slope"] for x in r["steps"]), min(x["FS_wheel"] for x in r["steps"])))
+    return out
+
+
+# ---------------------------------------------------------------- bendera potensi
+def step_flags(s, lang=None, targets=(1.3, 1.0)):
+    t_ok, t_bad = targets
+    fl = []
+    def lv(v):
+        return "b" if v < t_bad else ("w" if v < t_ok else "o")
+    a = lv(s["FS_slope"])
+    if a != "o":
+        fl.append((a, "Lereng depan pad %s (FS %.2f)" % ("berpotensi longsor" if a == "b" else "marginal", s["FS_slope"])))
+    a = lv(s["FS_emb"])
+    if a != "o":
+        fl.append((a, "Daya dukung dasar %s (FS %.2f): risiko mud wave" % ("terlampaui" if a == "b" else "marginal", s["FS_emb"])))
+    a = lv(s["FS_wheel"])
+    if a != "o":
+        fl.append((a, "Roda HD %s pada tebal timbunan ini (FS %.2f)" % ("menembus/amblas" if a == "b" else "marginal", s["FS_wheel"])))
+    if s["s_max"] > 1.0:
+        fl.append(("b", "Penurunan besar %.2f m" % s["s_max"]))
+    elif s["s_max"] > 0.5:
+        fl.append(("w", "Penurunan %.2f m" % s["s_max"]))
+    if s["fh"] > 0.3:
+        fl.append(("w", "Lumpur terdorong ke depan pad (heave %.0f%% dari volume penurunan)" % (100 * s["fh"])))
+    if s.get("mode") == "dump" and s.get("push_m", 0) > 45:
+        fl.append(("w", "Jarak dorong dozer %.0f m (> 45 m): produktivitas turun, pertimbangkan titik dump baru" % s["push_m"]))
+    if s.get("mode") == "load":
+        if s.get("FS_pad", 99) < 99:
+            a = lv(s["FS_pad"])
+            if a != "o":
+                fl.append((a, "Daya dukung lokal material pad di bawah track %s (FS %.2f)" % ("terlampaui" if a == "b" else "marginal", s["FS_pad"])))
+        if s.get("retreat", 0) > 0.3:
+            fl.append(("b" if s["retreat"] > 2.5 else "w", "Kaki pad tergerus %.1f m (kemiringan depan jadi 1V:%.2fH)" % (s["retreat"], s["msl"])))
+        if s.get("trench", 0) > 0.3:
+            fl.append(("w", "Parit galian lumpur di depan pad sedalam %.1f m: dukungan lumpur ke kaki pad berkurang" % s["trench"]))
+    if not fl:
+        fl.append(("o", "Tidak ada potensi kritis"))
+    return fl
+
+
+def build_scene_html(mp, res, template_html, three_inline=None, three_cdn=None, title="Mud Pocket", subtitle="", labels=None, speed=0.18, unit_dims=None):
+    import json, base64
+    xs, zs = mp.xs, mp.zs
+    xv0, xv1 = -30.0, float(mp.xf[-1]) + 45.0
+    ix = np.nonzero((xs >= xv0) & (xs <= xv1))[0][::2]
+    X = xs[ix]
+    nT = len(res["steps"])
+    cls = np.stack([f["cls"][:, ix] for f in res["frames"]])
+    su = np.stack([f["su"][:, ix] for f in res["frames"]])
+    du = np.stack([f["du"][:, ix] for f in res["frames"]])
+    sumax = float(max(1.0, np.percentile(su[cls >= 4], 99))) if (cls >= 4).any() else 1.0
+    dumax = float(max(1.0, du.max()))
+    enc = lambda a: base64.b64encode(np.ascontiguousarray(a).astype(np.uint8).tobytes()).decode()
+    steps = []
+    Hs = mp.Hs
+    for k, s in enumerate(res["steps"]):
+        top = np.where(s["top"][ix] > mp.zf[ix] + 0.02, s["top"][ix], -999.0)
+        sig = max(Hs * 0.6, 3.0)
+        steps.append(dict(xf=s["xf"], t=s["t"], loads=s["loads"], FS_slope=min(s["FS_slope"], 20.0), FS_emb=min(s["FS_emb"], 20.0), FS_wheel=min(s["FS_wheel"], 20.0), s_max=s["s_max"], u_max=s["u_max"],
+                          su_min=s["su_min"], Zm=s["Zm"], Zw=s["Zw"], xt=s["xd"], Zp0=mp.Zp, circle=s["circle"], flags=step_flags(s), Vexc=s["Vexc"], retreat=s["retreat"], trench=s["trench"], FS_pad=min(s["FS_pad"], 20.0), push=s["push_m"], xtoe=s["xtoe"],
+                          mudTop=[round(float(v), 3) for v in s["mud_top"][ix]],
+                          top=[round(float(v), 3) for v in top], sx=[round(float(v), 4) for v in s["s_x"][ix]],
+                          heave=dict(A=float(s["heave_A"] / (sig * math.sqrt(2 * math.pi))), xc=float(s["xf"] + 0.8 * Hs), sig=float(sig))))
+    ud = unit_dims or dict(len=10.0, wid=5.0)
+    payload = dict(nx=int(len(ix)), nz=int(len(zs)), nT=nT, xs=[round(float(v), 3) for v in X], zs=[round(float(v), 3) for v in zs], dx=float(mp.dx * 2), dz=float(mp.dz),
+                   floor=[round(float(v), 3) for v in mp.zf[ix]], cls=enc(cls), su=enc(np.clip(255 * su / sumax, 0, 255)), du=enc(np.clip(255 * du / dumax, 0, 255)), sumax=sumax, dumax=dumax,
+                   steps=steps, W=float(mp.W), Hs=float(Hs), ymargin=float(max(25.0, 1.5 * Hs)), sideSlope=float(1.0 / 1.5), approach=16.0, truckY=float(min(mp.W / 4.0 + 1.0, mp.W / 2.0 - ud["wid"] / 2.0)),
+                   unit=ud, mode=mp.mode, xd=float(res["steps"][0]["xd"]), dozer=(mp.dozer if mp.dozer else None), lunits=([dict(x=float(u["x"]), Lx=float(u["Lx"]), wid=float(u.get("wid", 3.4)), len=float(u.get("len", 6.0)), reach=float(u.get("reach", 10.0)), name=str(u.get("name", ""))) for u in mp.load["units"]] if mp.mode == "load" else None), reach_len=(float(mp.load["reach_len"]) if mp.mode == "load" else 0.0), speed=float(speed), title=title, subtitle=subtitle, labels=labels or {}, three_cdn=three_cdn or [], t0=0.0)
+    js = json.dumps(payload, separators=(",", ":")).replace("</", "<\\/")
+    return template_html.replace("/*__PAYLOAD__*/null", js).replace("/*__THREE_INLINE__*/", (three_inline or "").replace("</script", "<\\/script"))
+
+
+def section_dxf(mp, res, k):
+    import ezdxf, io
+    st = res["steps"][k]
+    doc = ezdxf.new("R2010")
+    for nm, col in (("TANAH_ASLI", 8), ("TANAH_SETELAH_PENURUNAN", 30), ("PAD", 7), ("LUMPUR", 40), ("AIR", 5), ("LAPISAN", 9), ("BIDANG_GELINCIR", 1), ("BEBAN_HD", 2), ("TEKS", 3)):
+        doc.layers.add(nm, color=col)
+    msp = doc.modelspace()
+    xs = mp.xs
+    zf = mp.zf
+    sel = (xs >= -30) & (xs <= mp.xf[-1] + 45)
+    msp.add_lwpolyline([(float(a), float(b)) for a, b in zip(xs[sel], zf[sel])], dxfattribs={"layer": "TANAH_ASLI"})
+    msp.add_lwpolyline([(float(a), float(b - s)) for a, b, s in zip(xs[sel], zf[sel], st["s_x"][sel])], dxfattribs={"layer": "TANAH_SETELAH_PENURUNAN"})
+    top = st["top"]
+    pm = sel & (top > zf + 0.02)
+    if pm.any():
+        pts = [(float(a), float(b)) for a, b in zip(xs[pm], top[pm])]
+        base = [(float(a), float(b - s)) for a, b, s in zip(xs[pm][::-1], zf[pm][::-1], st["s_x"][pm][::-1])]
+        msp.add_lwpolyline(pts + base, close=True, dxfattribs={"layer": "PAD"})
+    x0, x1 = float(xs[sel][0]), float(xs[sel][-1])
+    msp.add_line((x0, st["Zw"]), (x1, st["Zw"]), dxfattribs={"layer": "AIR"})
+    msp.add_line((x0, st["Zm"]), (x1, st["Zm"]), dxfattribs={"layer": "LUMPUR"})
+    cum = 0.0
+    for L in mp.layers[:-1]:
+        cum += float(L["h"])
+        msp.add_lwpolyline([(float(a), float(b - cum)) for a, b in zip(xs[sel], zf[sel])], dxfattribs={"layer": "LAPISAN"})
+    c = st["circle"]
+    if c:
+        a0 = math.asin(max(-1, min(1, (c["x0"] - c["xc"]) / c["R"]))); a1 = math.asin(max(-1, min(1, (c["x1"] - c["xc"]) / c["R"])))
+        pts = [(c["xc"] + c["R"] * math.sin(a), c["zc"] - c["R"] * math.cos(a)) for a in np.linspace(a0, a1, 60)]
+        msp.add_lwpolyline(pts, dxfattribs={"layer": "BIDANG_GELINCIR"})
+    if mp.unit:
+        xt, Lr = st["xd"], mp.unit["Lr"]
+        msp.add_lwpolyline([(xt - Lr / 2, mp.Zp), (xt + Lr / 2, mp.Zp), (xt + Lr / 2, mp.Zp + 0.6), (xt - Lr / 2, mp.Zp + 0.6)], close=True, dxfattribs={"layer": "BEBAN_HD"})
+    msp.add_text("Mud pocket langkah %d  xf=%.0f m  FS lereng=%.2f  FS dukung=%.2f  FS roda=%.2f" % (k + 1, st["xf"], st["FS_slope"], st["FS_emb"], st["FS_wheel"]), dxfattribs={"layer": "TEKS", "height": 0.6}).set_placement((x0, mp.Zp + 5))
+    buf = io.StringIO(); doc.write(buf)
+    return buf.getvalue().encode("utf-8")
+'''
+
+_MUDPOCKET_VIEWER_TEMPLATE = r'''<!doctype html>
+<html lang="id"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mud Pocket 3D</title>
+<style>
+:root{--bg:#0c1118;--panel:rgba(16,22,31,.88);--fg:#eaf0f6;--mut:#9fb1c4;--acc:#f2b61c;--bad:#ff6a5c;--ok:#5fd38d;--line:rgba(255,255,255,.14)}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:12.5px/1.35 system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;overflow:hidden}
+#wrap{position:relative;width:100%;height:100%}
+canvas#gl{display:block;width:100%;height:100%;outline:none;touch-action:none;cursor:grab}
+.panel{position:absolute;background:var(--panel);border:1px solid var(--line);border-radius:10px;-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+#hud{left:10px;top:10px;padding:8px 12px;width:min(340px,calc(100% - 20px));max-height:calc(100% - 90px);overflow:auto}
+#hud .ttl{font-weight:650;font-size:13.5px} #hud .sub{color:var(--mut);font-size:11.5px}
+#hud table{width:100%;border-collapse:collapse;margin-top:6px;font-variant-numeric:tabular-nums;font-size:12px}
+#hud td{padding:2px 3px;border-top:1px solid var(--line)} #hud td:last-child{text-align:right;font-weight:600}
+.ok{color:var(--ok)} .wa{color:#ffd166} .bd{color:var(--bad);font-weight:700}
+#flags{margin-top:6px;font-size:11.5px} #flags div{padding:2px 0}
+#lgd{margin-top:7px;height:10px;border-radius:5px;border:1px solid var(--line)} #lgt{display:flex;justify-content:space-between;color:var(--mut);font-size:10.5px}
+#side{right:10px;top:10px;padding:8px 10px;width:210px}
+#side label{display:flex;align-items:center;gap:7px;margin:3px 0;cursor:pointer;user-select:none}
+#side select{width:100%;background:rgba(255,255,255,.08);color:var(--fg);border:1px solid var(--line);border-radius:7px;padding:3px 4px;font:inherit} #side select option{color:#000}
+.tb{position:absolute;right:240px;top:10px;display:flex;gap:5px}
+button{background:rgba(255,255,255,.08);color:var(--fg);border:1px solid var(--line);border-radius:7px;padding:4px 9px;cursor:pointer;font:inherit}
+button:hover{background:rgba(242,182,28,.3)}
+#bar{left:10px;right:10px;bottom:10px;padding:7px 10px;display:flex;gap:9px;align-items:center}
+#bar #play{min-width:34px;font-size:14px} #bar input[type=range]{flex:1;min-width:80px}
+#bar select{background:rgba(255,255,255,.08);color:var(--fg);border:1px solid var(--line);border-radius:7px;padding:3px 4px;font:inherit} #bar select option{color:#000}
+#err{position:absolute;inset:0;display:none;align-items:center;justify-content:center;text-align:center;padding:24px;background:rgba(8,12,18,.94);z-index:9;font-size:14px}
+@media (max-width:700px){#side{width:160px}.tb{right:180px}}
+</style></head>
+<body>
+<div id="wrap">
+  <canvas id="gl" tabindex="0"></canvas>
+  <div id="hud" class="panel"><div class="ttl" id="hT"></div><div class="sub" id="hS"></div><table id="hTab"></table><div id="flags"></div><div id="lgd"></div><div id="lgt"></div></div>
+  <div class="tb"><button id="bReset"></button><button id="bSide"></button><button id="bTop"></button></div>
+  <div id="side" class="panel"><div style="font-weight:600;margin-bottom:4px" id="sTitle"></div><select id="mode"></select>
+    <label><input type="checkbox" id="cWater" checked><span id="lWater"></span></label><label><input type="checkbox" id="cMud" checked><span id="lMud"></span></label>
+    <label><input type="checkbox" id="cCirc" checked><span id="lCirc"></span></label><label><input type="checkbox" id="cTruck" checked><span id="lTruck"></span></label>
+    <label><input type="checkbox" id="cLoop"><span id="lLoop"></span></label></div>
+  <div id="bar" class="panel"><button id="play">▶</button><input type="range" id="tl" min="0" max="1000" value="0"><span id="tt" style="min-width:120px;text-align:right"></span><select id="spd"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select></div>
+  <div id="err"><div id="errT"></div></div>
+</div>
+<script>/*__THREE_INLINE__*/</script>
+<script>window.__MP__ = /*__PAYLOAD__*/null;</script>
+<script>
+(function(){
+"use strict";
+var P = window.__MP__, L = P.labels;
+function $(i){return document.getElementById(i);}
+function showErr(m){ $('err').style.display='flex'; $('errT').textContent=m; }
+function loadThree(cb){ if (window.THREE) return cb(); var urls=P.three_cdn||[], i=0; (function next(){ if(i>=urls.length){showErr('three.js tidak dapat dimuat');return;} var s=document.createElement('script'); s.src=urls[i++]; s.onload=function(){ if(window.THREE) cb(); else next(); }; s.onerror=next; document.head.appendChild(s); })(); }
+function turbo(t){ t=Math.min(Math.max(t,0),1); var r=34.61+t*(1172.33-t*(10793.56-t*(33300.12-t*(38394.49-t*14825.05)))), g=23.31+t*(557.33+t*(1225.33-t*(3574.96-t*(1073.77+t*707.56)))), b=27.2+t*(3211.1-t*(15327.97-t*(27814-t*(22569.18-t*6838.66)))); return [Math.min(255,Math.max(0,r)),Math.min(255,Math.max(0,g)),Math.min(255,Math.max(0,b))]; }
+function b64(s){ var bs=atob(s), n=bs.length, a=new Uint8Array(n); for (var i=0;i<n;i++) a[i]=bs.charCodeAt(i); return a; }
+function sm(a,b,x){ var t=Math.min(Math.max((x-a)/(b-a),0),1); return t*t*(3-2*t); }
+function start(){
+  var nx=P.nx, nz=P.nz, nT=P.nT, XS=P.xs, VE=1.0, ST=P.steps, W=P.W, HW=W/2;
+  var CLS=b64(P.cls), SU=b64(P.su), DU=b64(P.du), NS=nx*nz;
+  var renderer; try { renderer=new THREE.WebGLRenderer({canvas:$('gl'),antialias:true,preserveDrawingBuffer:true}); } catch(e){ showErr('WebGL tidak tersedia'); return; }
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,2));
+  var scene=new THREE.Scene(); scene.background=new THREE.Color(0x182331); var cam=new THREE.PerspectiveCamera(45,1,0.5,4000);
+  scene.add(new THREE.HemisphereLight(0xcfe3ff,0x3a3326,0.9)); var dl=new THREE.DirectionalLight(0xffffff,0.8); dl.position.set(80,160,120); scene.add(dl);
+  // sumbu y (lateral, setengah model)
+  var YS=[]; for (var j=0;j<10;j++) YS.push(HW*j/9); for (var j=1;j<=14;j++) YS.push(HW+ P.ymargin*Math.pow(j/14,1.4)); var ny=YS.length;
+  var Hs=P.Hs;
+  function fy(y){ return y<=HW?1:Math.exp(-(y-HW)/Math.max(Hs*0.8,2)); }
+  // mesh permukaan (tanah + pad), lumpur, air
+  var NV=nx*ny;
+  function mk(opacity,dbl){ var g=new THREE.BufferGeometry(); var p=new Float32Array(NV*3), c=new Float32Array(NV*3);
+    for (var i=0;i<nx;i++) for (var j=0;j<ny;j++){ var k=i*ny+j; p[3*k]=XS[i]; p[3*k+2]=-YS[j]; }
+    var idx=[]; for (var i=0;i<nx-1;i++) for (var j=0;j<ny-1;j++){ var a=i*ny+j,b=a+1,c2=a+ny,d=c2+1; idx.push(a,c2,b,b,c2,d); }
+    g.setAttribute('position',new THREE.BufferAttribute(p,3)); g.setAttribute('color',new THREE.BufferAttribute(c,3)); g.setIndex(idx);
+    if (opacity<1){ var nm=new Float32Array(NV*3); for (var q=0;q<NV;q++) nm[3*q+1]=1; g.setAttribute('normal',new THREE.BufferAttribute(nm,3)); }
+    var m=new THREE.MeshLambertMaterial({vertexColors:true,transparent:opacity<1,opacity:opacity,side:dbl?THREE.DoubleSide:THREE.FrontSide,depthWrite:opacity>=1});
+    var mesh=new THREE.Mesh(g,m); scene.add(mesh); return mesh; }
+  var surf=mk(1,true), mud=mk(0.93,true), wat=mk(0.5,true);
+  // bidang penampang (y=0) bertekstur
+  var tex=new Uint8Array(NS*4); var dtex=new THREE.DataTexture(tex,nx,nz,THREE.RGBAFormat,THREE.UnsignedByteType); dtex.magFilter=THREE.NearestFilter; dtex.minFilter=THREE.NearestFilter; dtex.needsUpdate=true;
+  var secW=XS[nx-1]-XS[0], secH=P.zs[nz-1]-P.zs[0]+P.dz;
+  var sec=new THREE.Mesh(new THREE.PlaneGeometry(secW+P.dx,secH,1,1),new THREE.MeshBasicMaterial({map:dtex,transparent:true,side:THREE.DoubleSide,depthWrite:true}));
+  sec.position.set((XS[0]+XS[nx-1])/2,(P.zs[0]+P.zs[nz-1])/2,0.02); scene.add(sec);
+  // dinding belakang (tanah) sederhana: bidang gelap di y=ymax agar tidak transparan
+  // lingkaran gelincir
+  var circGroup=new THREE.Group(); scene.add(circGroup);
+  var circMat=new THREE.MeshBasicMaterial({color:0xff4d3d,transparent:true,opacity:0.22,side:THREE.DoubleSide,depthWrite:false});
+  var circLineMat=new THREE.LineBasicMaterial({color:0xff4d3d});
+  var curCirc=null;
+  function setCirc(c){ while (circGroup.children.length) circGroup.remove(circGroup.children[0]);
+    if (!c) return; var r=c.R, a0=Math.asin(Math.max(-1,Math.min(1,(c.x0-c.xc)/r))), a1=Math.asin(Math.max(-1,Math.min(1,(c.x1-c.xc)/r))); if (a1<=a0) return;
+    var Ly=HW*2.0; var cg=new THREE.CylinderGeometry(r,r,Ly,40,1,true,a0,a1-a0); cg.rotateX(Math.PI/2); var m=new THREE.Mesh(cg,circMat); m.position.set(c.xc,c.zc,-Ly/2); circGroup.add(m);
+    var pts=[]; for (var i=0;i<=40;i++){ var a=a0+(a1-a0)*i/40; pts.push(new THREE.Vector3(c.xc+r*Math.sin(a),c.zc-r*Math.cos(a),0.05)); }
+    circGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),circLineMat)); }
+// ===== UNITS3D: model 3D unit tambang yang lebih realistis (HD artikulasi, dozer, excavator) =====
+// Konvensi: sumbu +x = depan unit, +y = atas, z = lebar; y=0 = permukaan tanah. Satuan meter.
+var UNITS3D = (function(T){
+  function mat(c, o){ o = o || {}; return new T.MeshPhongMaterial({color:c, specular:(o.sp===undefined?0x2a2a2a:o.sp), shininess:(o.sh||36), transparent:!!o.tr, opacity:(o.op===undefined?1:o.op), emissive:(o.em||0x000000)}); }
+  var M = {};
+  function mats(col){
+    return { body:mat(col), body2:mat(new T.Color(col).multiplyScalar(0.78).getHex()), dark:mat(0x2a2d31,{sp:0x111111,sh:12}), steel:mat(0x7b8289,{sh:60,sp:0x555555}),
+      rubber:mat(0x151618,{sp:0x050505,sh:6}), glass:mat(0x20384a,{sp:0xaad4ff,sh:90,tr:true,op:0.82}), lamp:mat(0xfff3c4,{em:0xffe9a0}), red:mat(0xb3261e,{em:0x300808}), hub:mat(0x9aa1a8,{sh:50}), grille:mat(0x1b1d20,{sh:8}) };
+  }
+  function box(w,h,d,m,x,y,z){ var b = new T.Mesh(new T.BoxGeometry(w,h,d), m); b.position.set(x||0,y||0,z||0); return b; }
+  function cyl(r,len,m,x,y,z,seg){ var g = new T.CylinderGeometry(r,r,len,seg||18); g.rotateX(Math.PI/2); var c = new T.Mesh(g,m); c.position.set(x||0,y||0,z||0); return c; }   // sumbu sepanjang z
+  function extrude(pts, depth, m, x, y, z){ var sh = new T.Shape(); sh.moveTo(pts[0][0],pts[0][1]); for (var i=1;i<pts.length;i++) sh.lineTo(pts[i][0],pts[i][1]); sh.closePath();
+    var g = new T.ExtrudeGeometry(sh,{depth:depth,bevelEnabled:false}); g.translate(0,0,-depth/2); var me = new T.Mesh(g,m); me.position.set(x||0,y||0,z||0); return me; }
+  function hull(P){ P = P.slice().sort(function(a,b){ return a[0]-b[0] || a[1]-b[1]; }); function cr(o,a,b){ return (a[0]-o[0])*(b[1]-o[1])-(a[1]-o[1])*(b[0]-o[0]); }
+    var lo = [], up = [], i; for (i=0;i<P.length;i++){ while (lo.length>=2 && cr(lo[lo.length-2],lo[lo.length-1],P[i])<=0) lo.pop(); lo.push(P[i]); }
+    for (i=P.length-1;i>=0;i--){ while (up.length>=2 && cr(up[up.length-2],up[up.length-1],P[i])<=0) up.pop(); up.push(P[i]); } up.pop(); lo.pop(); return lo.concat(up); }
+  function circPts(cx,cy,r,n){ var o=[]; for (var i=0;i<n;i++){ var a=i/n*Math.PI*2; o.push([cx+r*Math.cos(a), cy+r*Math.sin(a)]); } return o; }
+  // jalur track (hull dari beberapa lingkaran roda) -> rangka + grouser + roda; circles=[[cx,cy,r],...]
+  function trackAssembly(circles, tw, S, grouserEvery){
+    var g = new T.Group(), P = []; circles.forEach(function(c){ P = P.concat(circPts(c[0],c[1],c[2],20)); });
+    var H = hull(P); g.add(extrude(H, tw, S.rubber, 0,0,0));
+    // grouser sepanjang keliling
+    var per = [], tot = 0, i; for (i=0;i<H.length;i++){ var a=H[i], b=H[(i+1)%H.length], l=Math.hypot(b[0]-a[0], b[1]-a[1]); per.push({a:a,b:b,l:l,s:tot}); tot += l; }
+    var step = grouserEvery || 0.34, n = Math.max(12, Math.round(tot/step)), gm = new T.BoxGeometry(0.11, 0.07, tw*1.04), inst = new T.InstancedMesh(gm, S.dark, n), q = new T.Matrix4(), e = new T.Euler(), p = new T.Vector3(), sc = new T.Vector3(1,1,1), qq = new T.Quaternion();
+    for (i=0;i<n;i++){ var s = (i+0.5)/n*tot, k = 0; while (k<per.length-1 && per[k].s+per[k].l < s) k++; var sg = per[k], u = (s-sg.s)/sg.l, ang = Math.atan2(sg.b[1]-sg.a[1], sg.b[0]-sg.a[0]);
+      p.set(sg.a[0]+(sg.b[0]-sg.a[0])*u, sg.a[1]+(sg.b[1]-sg.a[1])*u, 0); e.set(0,0,ang); qq.setFromEuler(e); q.compose(p,qq,sc); inst.setMatrixAt(i,q); }
+    g.add(inst);
+    // roda & sprocket tampak di sisi luar
+    circles.forEach(function(c, k){ var w = cyl(c[2]*0.82, 0.05, S.steel, c[0], c[1], tw/2+0.03, 14); g.add(w); var w2 = cyl(c[2]*0.82, 0.05, S.steel, c[0], c[1], -tw/2-0.03, 14); g.add(w2); });
+    return g;
+  }
+  function link(m, A, B){ var dx = B[0]-A[0], dy = B[1]-A[1]; m.position.set(A[0],A[1],A[2]===undefined?m.position.z:A[2]); m.rotation.z = Math.atan2(dy,dx); m.scale.set(Math.hypot(dx,dy),1,1); }
+  function cylUnit(r, m, z){ var g = new T.CylinderGeometry(r,r,1,12); g.rotateZ(-Math.PI/2); g.translate(0.5,0,0); var c = new T.Mesh(g,m); c.position.z = z||0; return c; }   // panjang 1 sepanjang +x
+
+  // =========================================================== HD (Cat 777 / HD785 / 785 style)
+  M.makeHD = function(o){
+    var L=o.L, W=o.W, H=o.H, S = mats(o.color||0xf2b61c), G = new T.Group(), out = {group:G, wheels:[], L:L, W:W, H:H};
+    var r = H*0.335, tw = W*0.115, ax1 = L*0.27, ax2 = L*0.735;
+    // rangka & poros
+    G.add(box(L*0.86, H*0.085, W*0.40, S.dark, L*0.49, H*0.27, 0));
+    G.add(box(L*0.12, H*0.12, W*0.36, S.dark, L*0.03, H*0.30, 0));
+    G.add(cyl(H*0.06, W*0.80, S.dark, ax1, r, 0, 12)); G.add(cyl(H*0.045, W*0.80, S.dark, ax2, r, 0, 12));
+    // ban (dual belakang, tunggal depan) dengan tapak
+    function tyre(x, z){
+      var wg = new T.Group(); wg.position.set(x, r, z);
+      wg.add(cyl(r*0.99, tw*0.78, S.rubber, 0,0,0, 28));
+      wg.add(cyl(r*0.86, tw, S.rubber, 0,0,0, 28));
+      var lug = new T.BoxGeometry(r*0.18, r*0.12, tw*0.96), im = new T.InstancedMesh(lug, S.rubber, 24), m4 = new T.Matrix4(), qq = new T.Quaternion(), e = new T.Euler(), p = new T.Vector3(), sc = new T.Vector3(1,1,1);
+      for (var i=0;i<24;i++){ var a = i/24*Math.PI*2; p.set(Math.cos(a)*r*1.0, Math.sin(a)*r*1.0, 0); e.set(0,0,a+Math.PI/2); qq.setFromEuler(e); m4.compose(p,qq,sc); im.setMatrixAt(i,m4); }
+      wg.add(im);
+      wg.add(cyl(r*0.52, tw*1.04, S.hub, 0,0,0, 20)); wg.add(cyl(r*0.22, tw*1.1, S.dark, 0,0,0, 12));
+      for (var k=0;k<8;k++){ var bolt = box(r*0.07, r*0.07, 0.02, S.dark, Math.cos(k/8*6.283)*r*0.36, Math.sin(k/8*6.283)*r*0.36, tw*0.54); wg.add(bolt); }
+      G.add(wg); out.wheels.push(wg); }
+    [-1,1].forEach(function(s){ tyre(ax1, s*W*0.405); tyre(ax1, s*W*0.29); tyre(ax2, s*W*0.405); });
+    // bumper, grille, lampu, kap mesin
+    G.add(box(L*0.03, H*0.07, W*0.56, S.dark, L*0.995, H*0.15, 0));
+    G.add(box(L*0.16, H*0.19, W*0.36, S.body, L*0.905, H*0.45, 0));              // kap mesin
+    G.add(box(L*0.02, H*0.17, W*0.30, S.grille, L*0.987, H*0.45, 0));
+    for (var gi=0; gi<5; gi++) G.add(box(L*0.012, H*0.012, W*0.31, S.steel, L*0.995, H*0.38+gi*H*0.04, 0));
+    [-1,1].forEach(function(s){ G.add(box(L*0.015, H*0.035, W*0.07, S.lamp, L*0.99, H*0.54, s*W*0.13)); G.add(box(L*0.015, H*0.03, W*0.035, S.lamp, L*0.992, H*0.33, s*W*0.2)); });
+    // dek + pagar
+    G.add(box(L*0.2, H*0.02, W*0.62, S.dark, L*0.80, H*0.37, 0));
+    // kabin (kiri/-z)
+    var cx = L*0.80, cz = -W*0.27;
+    G.add(box(L*0.14, H*0.27, W*0.17, S.body, cx, H*0.52, cz));
+    G.add(box(L*0.003, H*0.17, W*0.14, S.glass, cx+L*0.0715, H*0.56, cz));        // kaca depan
+    G.add(box(L*0.11, H*0.15, W*0.003, S.glass, cx, H*0.56, cz-W*0.0865));          // kaca samping luar
+    G.add(box(L*0.11, H*0.15, W*0.003, S.glass, cx, H*0.56, cz+W*0.0865));
+    G.add(box(L*0.16, H*0.018, W*0.2, S.body2, cx, H*0.665, cz));                   // atap kabin
+    // tangga + pegangan
+    var lx = L*0.915, lz = -W*0.40;
+    [-1,1].forEach(function(s){ G.add(box(L*0.006, H*0.34, L*0.006, S.steel, lx+s*L*0.014, H*0.19, lz)); });
+    for (var ri=0; ri<5; ri++) G.add(box(L*0.03, H*0.01, W*0.012, S.steel, lx, H*0.06+ri*H*0.055, lz));
+    G.add(box(L*0.2, H*0.012, W*0.012, S.steel, L*0.80, H*0.43, -W*0.33)); G.add(box(L*0.2, H*0.012, W*0.012, S.steel, L*0.80, H*0.40, -W*0.33));
+    // tangki (kanan), knalpot
+    G.add(box(L*0.14, H*0.18, W*0.075, S.body2, L*0.60, H*0.40, W*0.31));
+    G.add(cyl(H*0.012, H*0.34, S.dark, L*0.85, H*0.55, W*0.12, 8).rotateX(Math.PI/2));
+    // bak (pivot di belakang) --------------------------------------------------------------
+    var pv = new T.Group(); pv.position.set(L*0.04, H*0.345, 0); G.add(pv); out.bed = pv;
+    var bl = L*0.64, bh = H*0.43, bw = W*0.80;
+    pv.add(extrude([[0,H*0.01],[bl*0.08,-bh*0.04],[bl*0.62,-bh*0.04],[bl*0.96,bh*0.34],[bl*1.0,bh*0.98],[0,bh*0.86]], bw, S.body, 0,0,0));
+    // rusuk samping
+    for (var k=1;k<=6;k++){ var xx = bl*(0.1+0.16*k), hh = bh*(0.9 + 0.1*(xx/bl)); [-1,1].forEach(function(s){ pv.add(box(L*0.012, hh*0.78, W*0.012, S.body2, xx, hh*0.46, s*(bw/2+W*0.005))); }); }
+    [-1,1].forEach(function(s){ pv.add(box(bl*1.0, bh*0.07, W*0.03, S.body2, bl*0.5, bh*0.93, s*(bw/2))); });   // rel atas
+    pv.add(box(L*0.012, bh*0.95, bw*1.0, S.body2, bl*0.02, bh*0.46, 0));                                     // pintu belakang
+    // kanopi
+    pv.add(extrude([[bl*0.86,bh*1.0],[bl*1.26,bh*1.02-H*0.02],[bl*1.26,bh*1.0-H*0.02],[bl*0.86,bh*0.90]], bw*0.93, S.body2, 0,0,0));
+    // muatan (origin di lantai, di-scale oleh viewer)
+    var ld = extrude([[bl*0.06,0],[bl*0.62,0],[bl*0.93,bh*0.32],[bl*0.93,bh*0.8],[bl*0.7,bh*1.18],[bl*0.4,bh*1.28],[bl*0.12,bh*1.02],[bl*0.06,bh*0.6]], bw*0.9, new T.MeshLambertMaterial({color:o.loadColor||0x7a6a55}), 0, -bh*0.03, 0);
+    pv.add(ld); out.load = ld; out.loadBase = -bh*0.03; out.bedLen = bl; out.bedH = bh; out.bedW = bw;
+    // silinder hoist (2)
+    out.hoist = []; [-1,1].forEach(function(s){ var c = cylUnit(H*0.028, S.steel, s*W*0.2); G.add(c); out.hoist.push(c); var c2 = cylUnit(H*0.04, S.dark, s*W*0.2); G.add(c2); out.hoist.push(c2); });
+    out.hoistA = [L*0.24, H*0.30]; out.hoistB = [bl*0.34, -bh*0.02];
+    out.setBed = function(ang){ pv.rotation.z = ang; var ca = Math.cos(ang), sa = Math.sin(ang), bx = pv.position.x + out.hoistB[0]*ca - out.hoistB[1]*sa, by = pv.position.y + out.hoistB[0]*sa + out.hoistB[1]*ca;
+      for (var i=0;i<out.hoist.length;i+=2){ var t = (i===0)?1:0; link(out.hoist[i], out.hoistA, [bx,by]); out.hoist[i].position.z = out.hoist[i].position.z; var Lx = Math.hypot(bx-out.hoistA[0], by-out.hoistA[1]); out.hoist[i].scale.x = Lx; out.hoist[i+1].position.copy(out.hoist[i].position); out.hoist[i+1].rotation.z = out.hoist[i].rotation.z; out.hoist[i+1].scale.x = Lx*0.55; } };
+    out.setSpin = function(a){ out.wheels.forEach(function(w){ w.rotation.z = -a; }); };
+    out.wheelR = r; out.setBed(0);
+    return out;
+  };
+
+  // =========================================================== DOZER (Cat D8 / D6 style)
+  M.makeDozer = function(o){
+    var L=o.L, W=o.W, H=o.H, S = mats(o.color||0xf2b61c), G = new T.Group(), out = {group:G, L:L, W:W, H:H};
+    var tw = W*0.17, tz = W*0.40, rr = H*0.17;
+    [-1,1].forEach(function(s){
+      var tr = trackAssembly([[ L*0.50, rr, rr ],[ -L*0.10, rr, rr*0.9 ],[ -L*0.44, rr*2.05, rr*1.15 ]], tw, S, 0.34); tr.position.z = s*tz; G.add(tr);
+      G.add(box(L*1.0, H*0.025, tw*1.25, S.body2, L*0.02, H*0.50, s*tz));            // fender
+    });
+    // badan
+    G.add(box(L*0.50, H*0.20, W*0.46, S.dark, -L*0.02, H*0.33, 0));
+    G.add(extrude([[ -L*0.06,H*0.43],[ L*0.46,H*0.43],[ L*0.46,H*0.58],[ L*0.20,H*0.69],[ -L*0.06,H*0.69]], W*0.44, S.body, 0,0,0));  // kap mesin
+    G.add(box(L*0.015, H*0.14, W*0.30, S.grille, L*0.465, H*0.52, 0));
+    for (var i=0;i<4;i++) G.add(box(L*0.012, H*0.01, W*0.31, S.steel, L*0.47, H*0.47+i*H*0.035, 0));
+    [-1,1].forEach(function(s){ G.add(box(L*0.015, H*0.03, W*0.05, S.lamp, L*0.46, H*0.64, s*W*0.14)); });
+    // kabin + ROPS
+    var cx = -L*0.26;
+    G.add(box(L*0.30, H*0.28, W*0.40, S.body, cx, H*0.66+H*0.0, 0));
+    G.add(box(L*0.003, H*0.22, W*0.36, S.glass, cx+L*0.1515, H*0.70, 0));
+    G.add(box(L*0.26, H*0.22, W*0.003, S.glass, cx, H*0.70, -W*0.201)); G.add(box(L*0.26, H*0.22, W*0.003, S.glass, cx, H*0.70, W*0.201));
+    G.add(box(L*0.003, H*0.22, W*0.36, S.glass, cx-L*0.1515, H*0.70, 0));
+    G.add(box(L*0.38, H*0.03, W*0.5, S.body2, cx, H*0.985, 0));
+    [[-1,-1],[-1,1],[1,-1],[1,1]].forEach(function(p){ G.add(box(L*0.018, H*0.32, L*0.018, S.dark, cx+p[0]*L*0.17, H*0.82, p[1]*W*0.21)); });
+    G.add(cyl(H*0.02, H*0.30, S.dark, L*0.22, H*0.83, -W*0.12, 8).rotateX(Math.PI/2));   // knalpot
+    // ripper (belakang)
+    var rip = new T.Group(); rip.position.set(-L*0.60, H*0.34, 0); G.add(rip); out.ripper = rip;
+    rip.add(box(L*0.07, H*0.12, W*0.62, S.dark, -L*0.02, 0, 0)); [-1,0,1].forEach(function(s){ rip.add(box(L*0.025, H*0.34, L*0.03, S.steel, -L*0.03, -H*0.16, s*W*0.2)); rip.add(box(L*0.04, H*0.05, L*0.035, S.dark, -L*0.015, -H*0.35, s*W*0.2)); });
+    // push-arm + blade (pivot di samping badan)
+    var arm = new T.Group(); arm.position.set(-L*0.02, H*0.30, 0); G.add(arm); out.arm = arm;
+    var armLen = L*0.76, bladeX = armLen + L*0.07, Wb = W*1.22, Hb = H*0.56;
+    [-1,1].forEach(function(s){ arm.add(box(armLen, H*0.07, W*0.045, S.body, armLen*0.5, 0, s*W*0.505)); });
+    arm.add(box(L*0.06, H*0.10, W*0.95, S.body2, armLen*0.05, 0, 0));
+    var bl = new T.Group(); bl.position.set(bladeX, 0, 0); arm.add(bl); out.blade = bl;
+    var arc = [], N = 7, R = Hb*1.25; for (var j=0;j<=N;j++){ var a = -0.1+1.0*j/N; arc.push([ R*(1-Math.cos(a))*0.9, -Hb*0.34 + R*Math.sin(a)*0.95 ]); }   // profil cembung ke depan
+    var pts = []; arc.forEach(function(p){ pts.push([p[0]+L*0.0, p[1]]); }); arc.slice().reverse().forEach(function(p){ pts.push([p[0]-L*0.018, p[1]]); });
+    bl.add(extrude(pts, Wb, S.body, 0, 0, 0));
+    bl.add(box(L*0.03, Hb*0.06, Wb*1.0, S.steel, L*0.0, -Hb*0.34, 0));          // cutting edge
+    bl.add(box(L*0.03, Hb*0.05, Wb*1.0, S.steel, R*(1-Math.cos(0.9))*0.9, -Hb*0.34 + R*Math.sin(0.9)*0.95, 0));
+    [-1,1].forEach(function(s){ bl.add(extrude([[ -L*0.02,-Hb*0.34],[ L*0.09,-Hb*0.34],[ L*0.09,Hb*0.2],[ -L*0.02,Hb*0.6]], W*0.03, S.body2, 0,0,s*Wb/2)); });
+    // silinder angkat blade
+    var hc = cylUnit(H*0.028, S.steel, W*0.28), hc2 = cylUnit(H*0.028, S.steel, -W*0.28); G.add(hc); G.add(hc2); out.lift = [hc,hc2];
+    out.setBlade = function(a){ arm.rotation.z = a; var ca=Math.cos(a), sa=Math.sin(a), B=[arm.position.x + armLen*0.7*ca, arm.position.y + armLen*0.7*sa + H*0.05]; link(hc,[L*0.36, H*0.52],B); link(hc2,[L*0.36,H*0.52],B); hc.position.z = W*0.28; hc2.position.z = -W*0.28; };
+    out.bladeW = Wb; out.bladeH = Hb; out.bladeX = bladeX; out.setBlade(0);
+    return out;
+  };
+
+  // =========================================================== EXCAVATOR (Cat 349 / PC450 style)
+  M.makeExcavator = function(o){
+    var L=o.L, W=o.W, H=o.H, S = mats(o.color||0xf2b61c), G = new T.Group(), out = {group:G, L:L, W:W, H:H};
+    var tw = W*0.19, tz = W*0.40, rr = H*0.14;
+    [-1,1].forEach(function(s){ var tr = trackAssembly([[ L*0.46, rr, rr ],[ -L*0.46, rr, rr ],[ -L*0.10, rr*0.95, rr*0.8 ],[ L*0.10, rr*0.95, rr*0.8 ]], tw, S, 0.36); tr.position.z = s*tz; G.add(tr); });
+    G.add(box(L*0.62, H*0.13, W*0.62, S.dark, 0, H*0.20, 0));                                      // carbody
+    G.add(cyl(L*0.26, H*0.07, S.steel, 0, H*0.29, 0, 24).rotateX(Math.PI/2));
+    var hs = new T.Group(); hs.position.set(0, H*0.31, 0); G.add(hs); out.house = hs;
+    // dek + counterweight
+    hs.add(box(L*0.86, H*0.05, W*0.86, S.body2, -L*0.08, H*0.03, 0));
+    hs.add(extrude([[ -L*0.50,0],[ -L*0.50,H*0.46],[ -L*0.42,H*0.50],[ -L*0.22,H*0.44],[ -L*0.22,0]], W*0.80, S.dark, 0,0,0));
+    hs.add(box(L*0.003, H*0.30, W*0.78, S.body2, -L*0.505, H*0.24, 0));
+    // kap mesin + grille
+    hs.add(box(L*0.28, H*0.30, W*0.74, S.body, -L*0.30+L*0.14-L*0.14, H*0.20, 0).translateX(-L*0.06));
+    for (var i=0;i<5;i++) hs.add(box(L*0.2, H*0.012, W*0.002, S.dark, -L*0.17, H*0.12+i*H*0.045, W*0.371));
+    hs.add(box(L*0.12, H*0.06, W*0.74, S.body2, -L*0.06, H*0.37, 0));
+    // kabin kiri depan
+    hs.add(box(L*0.24, H*0.50, W*0.30, S.body, L*0.20, H*0.30, -W*0.28));
+    hs.add(box(L*0.003, H*0.40, W*0.27, S.glass, L*0.322, H*0.34, -W*0.28));
+    hs.add(box(L*0.20, H*0.38, W*0.003, S.glass, L*0.2, H*0.34, -W*0.43)); hs.add(box(L*0.20, H*0.38, W*0.003, S.glass, L*0.2, H*0.34, -W*0.13));
+    hs.add(box(L*0.28, H*0.03, W*0.34, S.body2, L*0.21, H*0.56, -W*0.28));
+    hs.add(box(L*0.003, H*0.07, W*0.30, S.glass, L*0.23, H*0.58, -W*0.28).rotateZ(0.3));
+    hs.add(cyl(H*0.02, H*0.30, S.dark, -L*0.10, H*0.58, W*0.28, 8).rotateX(Math.PI/2));
+    hs.add(box(L*0.25, H*0.012, W*0.012, S.steel, L*0.02, H*0.12, W*0.43)); hs.add(box(L*0.25, H*0.012, W*0.012, S.steel, L*0.02, H*0.09, W*0.43));
+    // boom
+    var fx = L*0.31, fy = H*0.12; out.foot = [fx, fy + hs.position.y];
+    var lb = o.lb || L*1.30, ls = o.ls || L*0.66, lk = o.lk || L*0.32; out.lb=lb; out.ls=ls; out.lk=lk;
+    var bm = new T.Group(); bm.position.set(fx, fy, 0); hs.add(bm); out.boom = bm;
+    var bt = H*0.10; bm.add(extrude([[0,-bt],[lb*0.35,lb*0.20-bt],[lb*0.72,lb*0.16-bt],[lb,-bt*0.4],[lb,bt*0.5],[lb*0.72,lb*0.16+bt*1.3],[lb*0.35,lb*0.20+bt*1.6],[0,bt]], W*0.12, S.body, 0,0,0));
+    var sk = new T.Group(); sk.position.set(lb, 0, 0); bm.add(sk); out.stick = sk;
+    var st = H*0.065; sk.add(extrude([[-bt*0.5,-st],[ls*0.5,-st*1.1],[ls,-st*0.6],[ls,st*0.7],[ls*0.5,st*1.8],[0,st*1.5]], W*0.09, S.body, 0,0,0));
+    var bk = new T.Group(); bk.position.set(ls, 0, 0); sk.add(bk); out.bucket = bk;
+    var bw = o.bw || W*0.55, bh = lk*0.9;
+    bk.add(extrude([[0,0.05],[lk*0.45,-bh*0.55],[lk*1.0,-bh*0.95],[lk*1.05,-bh*0.80],[lk*0.8,-bh*0.28],[lk*0.55,bh*0.0],[lk*0.2,bh*0.18]], bw, S.dark, 0,0,0));
+    for (var ti=0; ti<5; ti++) bk.add(box(lk*0.14, bh*0.10, bw*0.07, S.steel, lk*1.08, -bh*0.86, -bw*0.4+ti*bw*0.2));
+    bk.add(box(lk*0.5, bh*0.08, bw*1.0, S.steel, lk*0.32, -bh*0.32, 0).rotateZ(-0.5));
+    bk.add(box(lk*0.5, bh*0.08, bw*1.02, S.body, lk*0.30, -bh*0.2, 0));
+    out.bucketW = bw; out.bucketH = bh;
+    // silinder
+    var cb = cylUnit(H*0.045, S.steel, W*0.12), cb2 = cylUnit(H*0.065, S.dark, W*0.12), cb3 = cylUnit(H*0.045, S.steel, -W*0.12), cb4 = cylUnit(H*0.065, S.dark, -W*0.12);
+    [cb,cb2,cb3,cb4].forEach(function(c){ hs.add(c); }); out.cylB=[cb,cb2,cb3,cb4];
+    var cs = cylUnit(H*0.04, S.steel, 0), cs2 = cylUnit(H*0.055, S.dark, 0); bm.add(cs); bm.add(cs2); out.cylS=[cs,cs2];
+    var ck = cylUnit(H*0.032, S.steel, 0), ck2 = cylUnit(H*0.045, S.dark, 0); sk.add(ck); sk.add(ck2); out.cylK=[ck,ck2];
+    out.pose = {swing:0, boom:0.7, stick:-1.1, bucket:-1.0};
+    out.setPose = function(sw, b, s, c){
+      out.pose = {swing:sw, boom:b, stick:s, bucket:c}; hs.rotation.y = sw; bm.rotation.z = b; sk.rotation.z = s; bk.rotation.z = c;
+      function R(a, p){ return [p[0]*Math.cos(a)-p[1]*Math.sin(a), p[0]*Math.sin(a)+p[1]*Math.cos(a)]; }
+      // silinder boom (di bingkai house)
+      var bB = R(b, [lb*0.30, bt*2.8]); bB = [fx+bB[0], fy+bB[1]];
+      [[cb,cb2,W*0.12],[cb3,cb4,-W*0.12]].forEach(function(p){ link(p[0], [fx-L*0.12, fy-H*0.04], bB); p[0].position.z = p[2]; var ln = Math.hypot(bB[0]-fx+L*0.12, bB[1]-fy+H*0.04); p[0].scale.x = ln; link(p[1],[fx-L*0.12, fy-H*0.04], bB); p[1].position.z = p[2]; p[1].scale.x = ln*0.55; });
+      // silinder stick (di bingkai boom)
+      var sB = R(s, [ls*0.16, st*3.2]); sB = [lb + sB[0], sB[1]]; link(cs, [lb*0.55, bt*4.2], sB); link(cs2, [lb*0.55, bt*4.2], sB); cs2.scale.x *= 0.55;
+      // silinder bucket (di bingkai stick)
+      var kB = R(c, [lk*0.25, lk*0.2]); kB = [ls + kB[0], kB[1]]; link(ck, [ls*0.28, st*2.6], kB); link(ck2, [ls*0.28, st*2.6], kB); ck2.scale.x *= 0.55;
+    };
+    // IK: ujung gigi bucket pada (r, y) relatif sumbu house & permukaan tanah; phi = sudut absolut gigi bucket
+    out.ik = function(r, y, phi){
+      var tipL = bh*0.95, tipAng = Math.atan2(-bh*0.95, lk*1.0), kd = Math.hypot(lk*1.0, bh*0.95);      // jarak pivot->gigi, arah relatif bucket
+      var ab = phi + 0, px = r - kd*Math.cos(ab + tipAng), py = (y - hs.position.y) - kd*Math.sin(ab + tipAng);
+      var dx = px - fx, dy = py - fy, d = Math.min(Math.hypot(dx,dy), lb+ls-0.05); d = Math.max(d, Math.abs(lb-ls)+0.05);
+      var a0 = Math.atan2(dy, dx), cosA = (lb*lb + d*d - ls*ls)/(2*lb*d), A = Math.acos(Math.max(-1,Math.min(1,cosA)));
+      var bAbs = a0 + A; var tx = fx + lb*Math.cos(bAbs), ty = fy + lb*Math.sin(bAbs), sAbs = Math.atan2(py - ty, px - tx);
+      return {boom:bAbs, stick:sAbs - bAbs, bucket:ab - sAbs};
+    };
+    out.tipAt = function(sw, b, s, c){ var bAbs = b, sAbs = b + s, kAbs = b + s + c, kd = Math.hypot(lk, bh*0.95), ang = Math.atan2(-bh*0.95, lk);
+      var x = fx + lb*Math.cos(bAbs) + ls*Math.cos(sAbs) + kd*Math.cos(kAbs+ang), y = hs.position.y + fy + lb*Math.sin(bAbs) + ls*Math.sin(sAbs) + kd*Math.sin(kAbs+ang); return [x, y]; };
+    out.setPose(0, 0.7, -1.1, -1.0);
+    return out;
+  };
+  return M;
+})(THREE);
+
+  var MODE=P.mode||'dump', LOADM=(MODE==='load');
+  var TL=P.unit.len, TW=P.unit.wid;
+  var hdM=UNITS3D.makeHD({L:TL, W:TW*1.12, H:Math.max(TL*0.52,4.6), loadColor:0x7a6a55});
+  var truck=new THREE.Group(); truck.add(hdM.group); hdM.group.rotation.y=Math.PI; scene.add(truck);   // depan truk = -x (menjauhi kolam)
+  var load=hdM.load, WR=hdM.wheelR;
+  var dzM=UNITS3D.makeDozer({L:5.4,W:3.4,H:3.2}); var dozer=new THREE.Group(); dozer.add(dzM.group); scene.add(dozer);
+  var dzPile=new THREE.Mesh(new THREE.BoxGeometry(1.8,1.1,dzM.bladeW*0.92),new THREE.MeshLambertMaterial({color:0x9a8c76})); dzPile.position.set(dzM.bladeX+1.1,0.6,0); dzM.group.add(dzPile);
+  var pile=new THREE.Mesh(new THREE.SphereGeometry(1,16,10,0,Math.PI*2,0,Math.PI/2),new THREE.MeshLambertMaterial({color:0x9a8c76})); scene.add(pile);
+  var exM=null, exW=null, hd2=null, hd2W=null;
+  if (LOADM){
+    var LU=P.lunits||[]; var eu=LU[0]||{len:9.5,wid:3.4,Lx:4.4};
+    var exL=(eu.Lx||4.4)*1.15; exM=UNITS3D.makeExcavator({L:exL,W:eu.wid||3.4,H:exL*0.62}); exW=new THREE.Group(); exW.add(exM.group); scene.add(exW);
+    if (LU.length>1){ hd2=UNITS3D.makeHD({L:TL,W:TW*1.12,H:Math.max(TL*0.52,4.6),loadColor:0x4a3f33}); hd2W=new THREE.Group(); hd2W.add(hd2.group); hd2.group.rotation.y=Math.PI; scene.add(hd2W); }
+    truck.visible=false; dozer.visible=false;
+  }
+  // partikel material
+  var NPAR=26, par=[]; var pgeo=new THREE.BoxGeometry(0.7,0.7,0.7), pmat=new THREE.MeshLambertMaterial({color:0x8a7658});
+  for (var q=0;q<NPAR;q++){ var m=new THREE.Mesh(pgeo,pmat); m.visible=false; scene.add(m); par.push({m:m,u:Math.random(),v:Math.random()}); }
+  var shown={water:true,mud:true,circ:true,truck:true};
+  var F0=0, tcur=0;
+  // ---------------------------------------------------------------- bingkai
+  function heaveY(x,h,y){ if (!h||!h.A) return 0; var d=(x-h.xc)/h.sig; return h.A*Math.exp(-0.5*d*d)*fy(y); }
+  function geo(fa,fb,a,y,i){ // ketinggian tanah & pad di sel i pada y
+    var fi=fy(y);
+    var sa=ST[fa].sx[i], sb=ST[fb].sx[i]; var s=sa+(sb-sa)*a;
+    var ha=ST[fa].heave, hb=ST[fb].heave; var hv=heaveY(XS[i],ha,y)*(1-a)+heaveY(XS[i],hb,y)*a;
+    var g=P.floor[i]-s*fi+hv;
+    var ta=ST[fa].top[i], tb=ST[fb].top[i]; var pa=ta>-900?ta:-999, pb=tb>-900?tb:-999;
+    var p=(pa>-900&&pb>-900)?pa+(pb-pa)*a:(a>0.5?pb:pa);
+    if (p>-900) p=p-Math.max(y-HW,0)*P.sideSlope;
+    return [g,p];
+  }
+  function update(fa,fb,a){
+    var cs=surf.geometry.attributes.color.array, ps=surf.geometry.attributes.position.array, pm=mud.geometry.attributes.position.array, pw=wat.geometry.attributes.position.array, cm=mud.geometry.attributes.color.array, cw=wat.geometry.attributes.color.array;
+    var Zm=ST[fa].Zm*(1-a)+ST[fb].Zm*a, Zw=ST[fa].Zw*(1-a)+ST[fb].Zw*a;
+    var ZmI=new Float32Array(nx); for (var ii=0;ii<nx;ii++){ ZmI[ii]=ST[fa].mudTop[ii]*(1-a)+ST[fb].mudTop[ii]*a; }
+    for (var i=0;i<nx;i++) for (var j=0;j<ny;j++){ var k=i*ny+j, y=YS[j], gp=geo(fa,fb,a,y,i), g=gp[0], p=gp[1], isPad=p>g+0.03, h=isPad?p:g;
+      ps[3*k+1]=h;
+      if (isPad){ cs[3*k]=0.66; cs[3*k+1]=0.6; cs[3*k+2]=0.5; } else { var inMud=g<Zm; cs[3*k]=inMud?0.30:0.36; cs[3*k+1]=inMud?0.24:0.30; cs[3*k+2]=inMud?0.16:0.2; }
+      var Zl=Zm-(Zm-ZmI[i])*fy(y); pm[3*k+1]=(h<Zl-0.02)?Zl:h-1.2; cm[3*k]=0.40; cm[3*k+1]=0.29; cm[3*k+2]=0.17;
+      pw[3*k+1]=(h<Zw-0.02)?Zw+0.02:h-1.2; cw[3*k]=0.22; cw[3*k+1]=0.5; cw[3*k+2]=0.84; }
+    surf.geometry.attributes.position.needsUpdate=true; surf.geometry.attributes.color.needsUpdate=true; surf.geometry.computeVertexNormals();
+    mud.geometry.attributes.position.needsUpdate=true; mud.geometry.attributes.color.needsUpdate=true; wat.geometry.attributes.position.needsUpdate=true; wat.geometry.attributes.color.needsUpdate=true;
+    mud.visible=shown.mud; wat.visible=shown.water;
+  }
+  var PAL=[[80,130,205,115],[0,0,0,0]]; // placeholder
+  var LAYC=[[196,153,98],[168,128,88],[140,112,90],[110,96,86],[96,90,86],[80,78,76]];
+  function drawTex(f){
+    var md=$('mode').value, o=f*NS, rgb;
+    for (var q=0;q<NS;q++){ var c=CLS[o+q], r=0,g=0,b=0,al=0;
+      if (c===0){ al=0; }
+      else if (c===1){ r=70;g=140;b=215;al=(md==='cls')?120:60; }
+      else if (c===2){ if (md==='cls'){ r=108;g=78;b=48;al=255; } else if (md==='su'){ rgb=turbo(0.05+0.9*SU[o+q]/255); r=rgb[0];g=rgb[1];b=rgb[2];al=255; } else { r=95;g=75;b=55;al=255; } }
+      else if (c===3){ r=150;g=140;b=120;al=255; }
+      else { var li=c-4;
+        if (md==='cls'){ var cc=LAYC[Math.min(li,LAYC.length-1)]; r=cc[0];g=cc[1];b=cc[2];al=255; }
+        else if (md==='su'){ rgb=turbo(0.05+0.9*SU[o+q]/255); r=rgb[0];g=rgb[1];b=rgb[2];al=255; }
+        else { rgb=turbo(0.05+0.9*DU[o+q]/255); r=rgb[0];g=rgb[1];b=rgb[2];al=255; } }
+      tex[4*q]=r;tex[4*q+1]=g;tex[4*q+2]=b;tex[4*q+3]=al; }
+    dtex.needsUpdate=true;
+    var lg=[], i, cols=[]; for (i=0;i<=10;i++){ var cc2=turbo(0.05+0.9*i/10); cols.push('rgb('+Math.round(cc2[0])+','+Math.round(cc2[1])+','+Math.round(cc2[2])+')'); }
+    if (md==='cls'){ $('lgd').style.display='none'; $('lgt').style.display='none'; } else { $('lgd').style.display='block'; $('lgt').style.display='flex'; $('lgd').style.background='linear-gradient(90deg,'+cols.join(',')+')'; $('lgt').innerHTML='<span>0</span><span>'+(md==='su'?L.su:L.du)+' (kPa)</span><span>'+(md==='su'?P.sumax:P.dumax).toFixed(0)+'</span>'; }
+  }
+  function fsc(v){ return v<1.0?'bd':(v<1.3?'wa':'ok'); } function fm(v){ return v>=20?'>20':v.toFixed(2); }
+  function hud(f){ var s=ST[f];
+    $('hTab').innerHTML='<tr><td>'+L.step+'</td><td>'+(f+1)+' / '+nT+'</td></tr><tr><td>'+L.time+'</td><td>'+s.t.toFixed(2)+' '+L.day+'</td></tr><tr><td>'+L.xf+'</td><td>'+s.xf.toFixed(0)+' m</td></tr>'+
+      (LOADM?'':'<tr><td>'+L.loads+'</td><td>'+Math.round(s.loads)+'</td></tr>')+'<tr><td>'+L.fss+'</td><td class="'+fsc(s.FS_slope)+'">'+fm(s.FS_slope)+'</td></tr><tr><td>'+L.fsb+'</td><td class="'+fsc(s.FS_emb)+'">'+fm(s.FS_emb)+'</td></tr>'+
+      '<tr><td>'+L.fsw+'</td><td class="'+fsc(s.FS_wheel)+'">'+fm(s.FS_wheel)+'</td></tr><tr><td>'+L.settle+'</td><td>'+s.s_max.toFixed(2)+' m</td></tr><tr><td>'+L.umax+'</td><td>'+s.u_max.toFixed(0)+' kPa</td></tr>'+
+      '<tr><td>'+L.sumin+'</td><td>'+s.su_min.toFixed(1)+' kPa</td></tr><tr><td>'+L.zm+'</td><td>'+s.Zm.toFixed(2)+' m</td></tr>'+(LOADM?('<tr><td>'+(L.vexc||'Lumpur diangkat')+'</td><td>'+Math.round(s.Vexc)+' m³</td></tr><tr><td>'+(L.retreat||'Gerusan kaki pad')+'</td><td>'+s.retreat.toFixed(1)+' m</td></tr><tr><td>'+(L.trench||'Parit di depan pad')+'</td><td>'+s.trench.toFixed(1)+' m</td></tr><tr><td>'+(L.fspad||'FS material pad')+'</td><td class="'+fsc(s.FS_pad)+'">'+fm(s.FS_pad)+'</td></tr>'):('<tr><td>'+(L.push||'Jarak dorong dozer')+'</td><td>'+s.push.toFixed(0)+' m</td></tr>'));
+    var fl=''; (s.flags||[]).forEach(function(x){ fl+='<div class="'+(x[0]==='b'?'bd':(x[0]==='w'?'wa':'ok'))+'">'+(x[0]==='o'?'● ':'▲ ')+x[1]+'</div>'; }); $('flags').innerHTML=fl; }
+  // ---------------------------------------------------------------- unit
+  var YT=P.truckY, YD=Math.max(2.2, YT-6.5);
+  function topAt(k,x,y,ph){ var pk=Math.min(Math.max(x,XS[0]),XS[nx-1]); var i=Math.min(nx-1,Math.max(0,Math.round((pk-XS[0])/(XS[1]-XS[0])))); var gp=geo(Math.max(k-1,0),k,ph,y,i); return gp[1]>-900?gp[1]:gp[0]; }
+  function mix(a,b,u){ return a+(b-a)*u; }
+  function frontAt(k){ return ST[k].xf; }
+  // jadwal: truk datang 0-0.3, tumpah 0.3-0.55, keluar 0.55-0.7, dozer mendorong 0.7-0.95
+  function setDump(k,ph){
+    var xd=P.xd, rear=xd+0.27*TL, appr=P.approach, xa=rear-appr, pos, tilt=0, spin=0, wk=(ph<0.3)?1:(ph<0.55?0:(ph<0.7?2:3));
+    if (ph<0.3){ var u=sm(0,0.3,ph); pos=xa+(rear-xa)*u; spin=pos; }
+    else if (ph<0.55){ pos=rear; spin=pos; var u1=(ph-0.3)/0.25; tilt=Math.min(sm(0,0.28,u1),1-sm(0.72,1,u1)); }
+    else if (ph<0.7){ var u2=sm(0.55,0.7,ph); pos=rear+(xa-rear)*u2; spin=pos; }
+    else { pos=xa; spin=xa; }
+    var gy=topAt(k,xd,YT,(k>0&&ph<0.7)?0:1); var tv=shown.truck&&ph<0.7;
+    // permukaan pad di posisi truk (tanpa data tambahan: pakai puncak pad = Zp0)
+    var gz=ST[k].Zp0; truck.visible=tv; truck.position.set(pos,gz,-YT);
+    hdM.setBed(tilt*0.85); hdM.setSpin(-pos/WR*0+pos/WR);
+    var rem=ph<0.3?1:(ph<0.55?1-sm(0.34,0.54,ph):0); load.scale.y=Math.max(rem,0.03); load.position.y=hdM.loadBase; load.visible=rem>0.04;
+    // gundukan di titik dump lalu didorong dozer
+    var grow=sm(0.34,0.55,ph), push=ph>=0.7; var pv=push?0:grow; pile.visible=shown.truck&&pv>0.02; pile.scale.set(2.6*pv+0.01,2.0*pv+0.01,Math.min(TW*0.5,6)); pile.position.set(rear+1.2,gz,-YT);
+    // dozer
+    var fk=frontAt(k), fprev=(k>0)?frontAt(k-1):fk, xpk=xd-14, E=fk-4.4, Ep=fprev-4.4, S=xd-2.5, dx_, dy_, bl=0, pushv=0;
+    if (ph<0.35){ var u3=sm(0,0.35,ph); dx_=mix(Math.max(Ep,xpk),xpk,u3); dy_=mix(YT,YD,u3); bl=0.35; }
+    else if (ph<0.6){ dx_=xpk; dy_=YD; bl=0.12; }
+    else if (ph<0.7){ var u4=sm(0.6,0.7,ph); dx_=mix(xpk,S,u4); dy_=mix(YD,YT,u4); bl=0.08; }
+    else if (ph<0.95){ var u5=sm(0.7,0.95,ph); dx_=mix(S,E,u5); dy_=YT; bl=-0.03; pushv=1-0.85*u5; }
+    else { dx_=E; dy_=YT; bl=0.1; }
+    var dzg=gz; dozer.visible=shown.truck; dozer.position.set(dx_,dzg,-dy_); dozer.rotation.y=0; dzM.setBlade(bl);
+    dzPile.visible=pushv>0.02; dzPile.scale.set(Math.max(pushv,0.05),Math.max(pushv,0.05),1);
+    // partikel jatuhan
+    var act=(ph>0.34&&ph<0.56)&&shown.truck; var u=(ph-0.34)/0.2; var zr=gz+hdM.bedH*0.6+hdM.H*0.36;
+    par.forEach(function(p){ var t=Math.min(Math.max(u*1.4-p.u*0.5,0),1); p.m.visible=act&&t>0&&t<1; if(!p.m.visible) return;
+      var xe=rear+0.4+p.v*2.5, ze=gz+0.4; p.m.position.set(rear-0.6+(xe-rear+0.6)*t, zr+(ze-zr)*t*t, -YT+(p.u-0.5)*TW*0.5); });
+    return wk;
+  }
+  // ---- mode pad loading: excavator di atas pad memuat lumpur (bucket menggali parit di depan kaki pad)
+  function kfPose(k,ph,gy){
+    var LU=P.lunits, eu=LU[0], xe=eu.x, rd=Math.max(Math.min(eu.reach||10, exM.lb+exM.ls-1.0), 4.0), xdig=xe+rd;
+    var i=Math.min(nx-1,Math.max(0,Math.round((xdig-XS[0])/(XS[1]-XS[0])))); var zm=ST[k].mudTop[i]; var yd=zm-gy-0.4;
+    var A=exM.ik(rd, yd, -1.15), B=exM.ik(rd-2.4, yd+1.2, 0.6), C=exM.ik(rd*0.55, 3.4, 0.35), D=exM.ik(rd*0.62, 3.0, -0.2), E=exM.ik(rd*0.55, 3.2, -1.0), Fp=exM.ik(rd*0.7, 2.6, -0.4);
+    return [[0,0,A],[0.22,0,B],[0.36,0,C],[0.56,Math.PI,D],[0.66,Math.PI,E],[0.76,Math.PI,D],[0.92,0,Fp],[1.0,0,A]];
+  }
+  function setLoad(k,ph){
+    var LU=P.lunits, eu=LU[0], xe=eu.x, gy=ST[k].Zp0;
+    exW.position.set(xe,gy,-YT); exW.visible=shown.truck;
+    var cyc=(ph*4)%1, kf=kfPose(k,ph,gy), j=0; while (j<kf.length-2 && cyc>kf[j+1][0]) j++;
+    var a=kf[j], b=kf[j+1], u=sm(0,1,(cyc-a[0])/(b[0]-a[0]));
+    exM.setPose(mix(a[1],b[1],u), mix(a[2].boom,b[2].boom,u), mix(a[2].stick,b[2].stick,u), mix(a[2].bucket,b[2].bucket,u));
+    if (hd2W){ var hu=LU[1]; hd2W.position.set(hu.x+0.27*TL,gy,-YT); hd2W.visible=shown.truck; var fr=Math.min(1,(k+ph)/Math.max(nT,1)*0+ph*0.9+0.05); hd2.load.scale.y=Math.max(fr,0.03); hd2.load.position.y=hd2.loadBase; hd2.setBed(0); }
+    // percikan lumpur dari bucket saat dump
+    var act=(cyc>0.56&&cyc<0.76)&&shown.truck; var uu=(cyc-0.56)/0.2; var xr=xe-6.0, zr=gy+3.2;
+    par.forEach(function(p){ var t=Math.min(Math.max(uu*1.4-p.u*0.5,0),1); p.m.visible=act&&t>0&&t<1&&!!hd2W; if(!p.m.visible) return; var xt_=(LU[1]?LU[1].x+0.27*TL:xe-12)-3.5+p.v*2; p.m.position.set(xr+(xt_-xr)*t, zr+(gy+3.0-zr)*t*t, -YT+(p.u-0.5)*2); });
+    return 0;
+  }
+  function setTruck(k,ph){ return LOADM?setLoad(k,ph):setDump(k,ph); }
+  // ---------------------------------------------------------------- kamera & loop
+  var cx0=(XS[0]+XS[nx-1])/2, zmid=(P.zs[0]+P.zs[nz-1])/2, span=XS[nx-1]-XS[0];
+  function HOME(){ return {az:0.0,pol:1.15,r:span*0.62,tx:cx0,ty:zmid,tz:-HW*0.4}; } var cs=HOME();
+  function setCam(){ cam.position.set(cs.tx+cs.r*Math.sin(cs.pol)*Math.sin(cs.az), cs.ty+cs.r*Math.cos(cs.pol), cs.tz+cs.r*Math.sin(cs.pol)*Math.cos(cs.az)); cam.lookAt(cs.tx,cs.ty,cs.tz); }
+  var canvas=$('gl'), drag=null;
+  canvas.addEventListener('pointerdown',function(e){ drag={x:e.clientX,y:e.clientY,pan:e.button===2||e.shiftKey}; canvas.setPointerCapture(e.pointerId); });
+  canvas.addEventListener('pointerup',function(){drag=null;}); canvas.addEventListener('contextmenu',function(e){e.preventDefault();});
+  canvas.addEventListener('pointermove',function(e){ if(!drag) return; var dx_=e.clientX-drag.x, dy_=e.clientY-drag.y; drag.x=e.clientX; drag.y=e.clientY;
+    if (drag.pan){ var k=cs.r*0.0016; cs.tx-=(Math.cos(cs.az)*dx_)*k; cs.tz+=(Math.sin(cs.az)*dx_)*k; cs.ty+=dy_*k; } else { cs.az-=dx_*0.006; cs.pol=Math.min(Math.max(cs.pol-dy_*0.006,0.05),1.6); } setCam(); });
+  canvas.addEventListener('wheel',function(e){ e.preventDefault(); cs.r=Math.min(Math.max(cs.r*Math.exp(e.deltaY*0.0012),8),3000); setCam(); },{passive:false});
+  $('bReset').textContent=L.b_reset; $('bSide').textContent=L.b_side; $('bTop').textContent=L.b_top;
+  $('bReset').onclick=function(){ cs=HOME(); setCam(); };
+  $('bSide').onclick=function(){ cs.az=0.0; cs.pol=1.5; cs.r=span*0.6; cs.tz=0; setCam(); };
+  $('bTop').onclick=function(){ cs.pol=0.1; cs.az=0; cs.r=span*0.7; setCam(); };
+  $('hT').textContent=P.title; $('hS').textContent=P.subtitle; $('sTitle').textContent=L.display;
+  var mo=$('mode'); [['cls',L.m_cls],['su',L.m_su],['du',L.m_du]].forEach(function(o){ var op=document.createElement('option'); op.value=o[0]; op.textContent=o[1]; mo.appendChild(op); });
+  $('lWater').textContent=L.water; $('lMud').textContent=L.mud; $('lCirc').textContent=L.circ; $('lTruck').textContent=L.truck; $('lLoop').textContent=L.loop;
+  var lastF=-1;
+  mo.onchange=function(){ lastF=-1; };
+  $('cWater').onchange=function(){shown.water=this.checked;}; $('cMud').onchange=function(){shown.mud=this.checked;}; $('cCirc').onchange=function(){shown.circ=this.checked; circGroup.visible=this.checked;}; $('cTruck').onchange=function(){shown.truck=this.checked;};
+  function resize(){ var w=canvas.clientWidth,h=canvas.clientHeight; renderer.setSize(w,h,false); cam.aspect=w/h; cam.updateProjectionMatrix(); } window.addEventListener('resize',resize); resize();
+  var playing=false, last=0, tl=$('tl'), T=P.t0||0;
+  function render(t){
+    t=Math.max(0,Math.min(nT-1e-4,t)); var k=Math.floor(t), ph=t-k;
+    var a=LOADM?sm(0.05,0.95,ph):((ph<0.7)?0:sm(0.7,0.95,ph)); var fa=Math.max(k-1,0), fb=k; if (k===0) a=1;
+    update(fa,fb,a);
+    var f=(a>=0.5)?fb:fa; if (f!==lastF){ drawTex(f); hud(f); lastF=f; var c=ST[f].circle; if (c) setCirc(c); else setCirc(null); circGroup.visible=shown.circ; }
+    setTruck(k,ph);
+    tl.value=Math.round(1000*t/nT); $('tt').textContent=L.step+' '+(k+1)+'/'+nT;
+  }
+  tl.oninput=function(){ playing=false; $('play').textContent='▶'; T=tl.value/1000*nT; render(T); };
+  $('play').onclick=function(){ playing=!playing; $('play').textContent=playing?'❚❚':'▶'; if(playing&&T>=nT-0.01) T=0; };
+  function loop(ts){ var dt=Math.min((ts-last)/1000,0.1); last=ts; if (playing){ T+=dt*P.speed*parseFloat($('spd').value); if (T>=nT-1e-3){ if ($('cLoop').checked) T=0; else { T=nT-1e-3; playing=false; $('play').textContent='▶'; } } render(T); } renderer.render(scene,cam); requestAnimationFrame(loop); }
+  setCam(); render(T); requestAnimationFrame(loop);
+  window.__mpv={setT:function(t){T=t;render(t);},setCam:function(o){for(var k in o) cs[k]=o[k]; setCam();},mode:function(m){$('mode').value=m; lastF=-1; render(T);}};
+}
+loadThree(start);
+})();
+</script></body></html>
+'''
+
+
+def _mp_load():
+    import sys as _sys, types as _types, hashlib as _hl
+    nm = "_eroslope_mudpocket_" + _hl.md5(_MUDPOCKET_SRC.encode("utf-8")).hexdigest()[:10]
+    if nm not in _sys.modules:
+        m = _types.ModuleType(nm)
+        m.__dict__["__file__"] = "<mud_pocket>"
+        _sys.modules[nm] = m
+        exec(compile(_MUDPOCKET_SRC, "<mud_pocket>", "exec"), m.__dict__)
+    return _sys.modules[nm]
+
+
+def _mp_fs_cls(v):
+    return _t("KRITIS", "CRITICAL") if v < 1.0 else (_t("Waspada", "Watch") if v < 1.3 else _t("Aman", "OK"))
+
+
+def _mudpocket_tab():
+    _sub_header(_t("Mud Pocket: Desain Pad Dumping HD ke Kolam Lumpur", "Mud Pocket: Haul-Truck Dump Pad Design into a Mud Pond"))
+    st.caption(_t(
+        "Analisis desain pad (mud pocket) yang dimajukan bertahap ke kolam lumpur: daya dukung & mud wave, stabilitas lereng depan pad (Bishop, beban HD di tepi dump), penurunan & konsolidasi, "
+        "tekanan pori berlebih & kenaikan kuat geser, tebal timbunan minimum untuk roda HD, jarak aman roda dari tepi, dan sensitivitas Su. Input: desain + data uji (Su/vane, UCS, CBR, DCP, sand cone).",
+        "Design analysis of a dump pad (mud pocket) advanced step by step into a mud pond: bearing capacity & mud wave, front-slope stability (Bishop, truck load at the dump edge), settlement & consolidation, "
+        "excess pore pressure & strength gain, minimum fill thickness for the truck, safe wheel setback and Su sensitivity. Inputs: design + test data (Su/vane, UCS, CBR, DCP, sand cone)."))
+    _ui_warning(_t(
+        "Model INDIKATIF 2D (bidang regangan + faktor lebar pad), tegangan total/undrained untuk lempung & lumpur, c-φ untuk timbunan, konsolidasi 1D Terzaghi. Belum dikalibrasi dengan kejadian lapangan; "
+        "korelasi CBR→Su (≈30·CBR kPa) dan DCP→CBR hanya perkiraan. Bukan pengganti analisis geoteknik (Slide2/Plaxis/GeoStudio) dan pengamatan lapangan (settlement plate, piezometer, inclinometer).",
+        "INDICATIVE 2D model (plane strain + pad-width factor), total/undrained stresses for clay & mud, c-φ for the fill, 1D Terzaghi consolidation. Not calibrated against field events; the CBR→Su (≈30·CBR kPa) and DCP→CBR "
+        "correlations are rough. Not a substitute for geotechnical analysis (Slide2/Plaxis/GeoStudio) and field monitoring (settlement plates, piezometers, inclinometers)."))
+    try:
+        mp = _mp_load()
+        ul = _unitload_load()
+        _dsm, _dsc = _dump_load_modules()
+    except Exception as e:
+        st.error(_t(f"Modul gagal dimuat: {e}", f"Module failed to load: {e}"))
+        return
+
+    # ---------------- 0. mode
+    _mode = st.radio(_t("Mode analisis", "Analysis mode"), ["dump", "load"], horizontal=True, key="mp_mode",
+                     format_func=lambda c: _t("Dumping HD (pad dimajukan dozer)", "HD dumping (pad advanced by a dozer)") if c == "dump" else _t("Pad Loading (excavator / HD di atas pad, memuat lumpur)", "Pad Loading (excavator / HD on the pad, loading mud)"))
+    LOADM = (_mode == "load")
+    if LOADM:
+        st.caption(_t("Kebalikan mud pocket: pad sudah ada dan dipijak excavator (dan HD yang menunggu muatan). Excavator mengangkat lumpur dari kolam sehingga muka lumpur turun, parit terbentuk di depan kaki pad dan kaki pad tergerus (undercut). Fokus: stabilitas pad.",
+                      "The reverse of a mud pocket: an existing pad carries the excavator (and a waiting haul truck). The excavator removes mud from the pond so the mud level drops, a trench forms in front of the pad toe and the toe gets undercut. Focus: pad stability."))
+    else:
+        st.caption(_t("HD mundur dan menumpahkan di SATU titik tetap di atas pad; dozer mendorong material ke depan sehingga muka pad maju (HD tidak ikut maju).",
+                      "The truck backs up and dumps at ONE fixed point on the pad; a dozer pushes the material forward so the pad front advances (the truck does not advance)."))
+
+    st.caption(_t("Catatan: modul ini memakai penampang 2D parametrik (bukan DEM ber-georeferensi), jadi tanpa citra satelit. Overlay ArcGIS pada desain dasar (DXF/DEM) tersedia di tab Simulasi Dumping.",
+                  "Note: this module uses a parametric 2D section (not a georeferenced DEM), so there is no satellite imagery. The ArcGIS overlay on the base design (DXF/DEM) is in the Dump Simulation tab."))
+    # ---------------- 1. unit
+    _sub_header(_t("1. Unit & beban di atas pad", "1. Units & loads on the pad"))
+    trucks = [k for k, v in ul.UNITS.items() if v["kind"] == "truck"]
+    exs = [k for k, v in mp.TRACK_UNITS.items() if v["kind"] == "excavator"]
+    dzs = [k for k, v in mp.TRACK_UNITS.items() if v["kind"] == "dozer"]
+    dozer_d = None; ex_d = None; use_hd = True; ex_off = 6.0; hd_off = 9.0; lcfg = {}
+    setb = 3.0; Lr = 2.0
+    if not LOADM:
+        c1, c2, c3, c4 = st.columns(4)
+        un = c1.selectbox(_t("Tipe HD", "Truck type"), trucks, key="mp_unit")
+        stt = c2.radio(_t("Kondisi saat dump", "State when dumping"), ["loaded", "empty"], horizontal=True, key="mp_state", format_func=lambda c: _t("Berisi", "Loaded") if c == "loaded" else _t("Kosong", "Empty"))
+        dyn = c3.number_input(_t("Faktor dinamik", "Dynamic factor"), 1.0, 2.0, 1.25, 0.05, key="mp_dyn")
+        Lr = c4.number_input(_t("Panjang tapak as belakang (m)", "Rear-axle footprint length (m)"), 1.0, 8.0, 2.0, 0.5, key="mp_Lr")
+        setb = st.slider(_t("Titik dump tetap: jarak as belakang dari tepi depan AWAL pad (m)", "Fixed dump point: rear-axle distance from the INITIAL pad front edge (m)"), 0.5, 12.0, 3.0, 0.5, key="mp_setb")
+        z1, z2 = st.columns(2)
+        use_dz = z1.checkbox(_t("Dozer mendorong material ke depan (beban dozer ikut dihitung)", "Dozer pushes the material forward (dozer load included)"), True, key="mp_usedz")
+        if use_dz:
+            dzn = z2.selectbox(_t("Tipe dozer", "Dozer type"), dzs, key="mp_dzn")
+            dozer_d = mp.track_load(dict(mp.TRACK_UNITS[dzn], name=dzn), 1.1)
+        spec = ul.UNITS[un]
+        U = mp.unit_load(spec, stt, dyn, Lr)
+        st.caption(_t(f"Beban as belakang ≈ {U['Fr']:.0f} kN pada tapak {U['Bb']:.1f} × {U['Lr']:.1f} m → {U['q']:.0f} kPa (bidang regangan)." + (f" Dozer: {dozer_d['q']:.0f} kPa di dekat tepi depan." if dozer_d else ""),
+                      f"Rear-axle load ≈ {U['Fr']:.0f} kN on a {U['Bb']:.1f} × {U['Lr']:.1f} m footprint → {U['q']:.0f} kPa (plane strain)." + (f" Dozer: {dozer_d['q']:.0f} kPa near the front edge." if dozer_d else "")))
+    else:
+        c1, c2, c3, c4 = st.columns(4)
+        exn = c1.selectbox(_t("Tipe excavator", "Excavator type"), exs, index=1, key="mp_exn")
+        dyn = c2.number_input(_t("Faktor dinamik", "Dynamic factor"), 1.0, 2.0, 1.1, 0.05, key="mp_dyn_l")
+        ex_off = c3.number_input(_t("Jarak as excavator dari tepi atas pad (m)", "Excavator centre distance from the pad crest edge (m)"), 2.0, 40.0, 6.0, 0.5, key="mp_exoff")
+        reach = c4.number_input(_t("Jangkauan gali dari as (m)", "Dig reach from the centre (m)"), 4.0, 20.0, float(mp.TRACK_UNITS[exn]["reach"]), 0.5, key="mp_reach", help=_t("Jarak titik gali lumpur dari as excavator; menentukan lokasi parit di depan kaki pad.", "Distance of the mud dig point from the excavator centre; sets where the trench forms in front of the pad toe."))
+        ex_d = mp.track_load(dict(mp.TRACK_UNITS[exn], name=exn), dyn)
+        ex_d["x"] = None; ex_d["reach"] = float(reach)
+        h1_, h2_, h3_, h4_ = st.columns(4)
+        use_hd = h1_.checkbox(_t("Ada HD di atas pad (menunggu dimuat)", "A haul truck stands on the pad (being loaded)"), True, key="mp_usehd")
+        un = h2_.selectbox(_t("Tipe HD", "Truck type"), trucks, key="mp_unit_l", disabled=not use_hd)
+        stt = h3_.radio(_t("Kondisi HD", "Truck state"), ["loaded", "empty"], horizontal=True, key="mp_state_l", disabled=not use_hd, format_func=lambda c: _t("Berisi", "Loaded") if c == "loaded" else _t("Kosong", "Empty"))
+        hd_off = h4_.number_input(_t("Jarak HD dari excavator (m)", "Truck distance behind the excavator (m)"), 5.0, 40.0, 9.0, 0.5, key="mp_hdoff", disabled=not use_hd)
+        spec = ul.UNITS[un]
+        Lr = 2.0
+        U = ex_d
+        st.caption(_t(f"Excavator: {ex_d['W']:.0f} kN, tekanan tapak {ex_d['q']:.0f} kPa per track ({ex_d['Bb']:.2f} × {ex_d['Lr']:.1f} m).", f"Excavator: {ex_d['W']:.0f} kN, {ex_d['q']:.0f} kPa ground pressure per track ({ex_d['Bb']:.2f} × {ex_d['Lr']:.1f} m)."))
+        p1_, p2_, p3_, p4_ = st.columns(4)
+        prod = p1_.number_input(_t("Produksi muat lumpur (m³/jam)", "Mud loading rate (m³/h)"), 10.0, 600.0, 120.0, 10.0, key="mp_prod")
+        stepH = p2_.number_input(_t("Durasi tiap langkah (jam)", "Duration of each step (h)"), 1.0, 72.0, 8.0, 1.0, key="mp_steph")
+        age = p3_.number_input(_t("Umur pad sebelum loading (hari)", "Pad age before loading (days)"), 0.0, 3650.0, 30.0, 5.0, key="mp_age", help=_t("Pad yang lama sudah mengonsolidasikan fondasinya (Su naik).", "An older pad has already consolidated its foundation (Su gain)."))
+        rlen = p4_.number_input(_t("Panjang parit galian dari kaki pad (m)", "Trench length from the pad toe (m)"), 2.0, 40.0, 8.0, 1.0, key="mp_rlen")
+        q1_, q2_ = st.columns(2)
+        refill = q1_.slider(_t("Lumpur mengalir mengisi kembali parit (0–1)", "Mud flowing back into the trench (0–1)"), 0.0, 0.95, 0.4, 0.05, key="mp_refill", help=_t("0 = parit tetap terbuka (paling kritis); makin besar = lumpur lunak menutup kembali galian.", "0 = trench stays open (most critical); higher = soft mud refills the excavation."))
+        scour = q2_.number_input(_t("Gerusan kaki pad (m per 1.000 m³ lumpur diangkat)", "Pad toe scour (m per 1,000 m³ of mud removed)"), 0.0, 3.0, 0.1, 0.05, key="mp_scour", help=_t("Bucket menggaruk kaki pad saat memuat lumpur di dekatnya: kaki mundur → lereng depan lebih curam. Angka asumsi, kalibrasi dengan pengamatan lapangan.", "The bucket scrapes the pad toe while loading nearby mud: the toe retreats → steeper front slope. An assumed figure; calibrate with field observation."))
+        nst_l = None
+
+    # ---------------- 2. desain
+    _sub_header(_t("2. Desain pad & kolam", "2. Pad & pond design"))
+    d1, d2, d3, d4 = st.columns(4)
+    Zp = d1.number_input(_t("Elevasi puncak pad (m)", "Pad crest elevation (m)"), -50.0, 500.0, 0.5, 0.1, key="mp_Zp")
+    Wp = d2.number_input(_t("Lebar pad (m)", "Pad width (m)"), 6.0, 80.0, 20.0, 1.0, key="mp_W")
+    msl = d3.number_input(_t("Lereng depan (H:V)", "Front slope (H:V)"), 1.0, 5.0, 2.0, 0.25, key="mp_msl")
+    nst = int(d4.number_input(_t("Jumlah langkah waktu", "Number of time steps"), 4, 60, 12, 1, key="mp_nl")) if LOADM else int(d4.number_input(_t("Jumlah tahap maju", "Number of advance steps"), 6, 40, 16, 2, key="mp_n"))
+    e1, e2, e3, e4 = st.columns(4)
+    if LOADM:
+        xf1 = e2.number_input(_t("Posisi tepi depan pad (m)", "Pad front-edge position (m)"), 5.0, 600.0, 70.0, 1.0, key="mp_xf1l", help=_t("x = 0 pada tepi lahan/kolam; x makin besar ke arah kolam.", "x = 0 at the land/pond edge; x increases toward the pond."))
+        xf0 = xf1
+        e1.caption(_t("Pad tetap (sudah terbangun).", "Fixed pad (already built)."))
+    else:
+        xf0 = e1.number_input(_t("Posisi depan awal (m)", "Initial front position (m)"), 0.0, 500.0, 15.0, 1.0, key="mp_xf0", help=_t("x = 0 pada tepi lahan/kolam; x makin besar ke arah kolam.", "x = 0 at the land/pond edge; x increases toward the pond."))
+        xf1 = e2.number_input(_t("Posisi depan akhir desain (m)", "Final design front position (m)"), 5.0, 600.0, 70.0, 1.0, key="mp_xf1")
+    Zw = e3.number_input(_t("Muka air kolam (m)", "Pond water level (m)"), -100.0, 500.0, -0.5, 0.1, key="mp_Zw")
+    Zm = e4.number_input(_t("Muka lumpur (m)", "Mud level (m)"), -100.0, 500.0, -1.5, 0.1, key="mp_Zm")
+    if (not LOADM) and xf1 <= xf0:
+        st.error(_t("Posisi akhir harus lebih besar dari posisi awal.", "Final position must exceed the initial position."))
+        return
+    f1, f2, f3 = st.columns(3)
+    gm = f1.number_input(_t("γ lumpur (kN/m³)", "Mud γ (kN/m³)"), 10.5, 20.0, 14.0, 0.5, key="mp_gm")
+    sum_ = f2.number_input(_t("Su lumpur (kPa)", "Mud Su (kPa)"), 0.5, 40.0, 3.0, 0.5, key="mp_sum")
+    area = f3.number_input(_t("Luas kolam (m², 0 = muka tidak naik)", "Pond area (m², 0 = level does not rise)"), 0.0, 5.0e7, 40000.0, 1000.0, key="mp_area",
+                           help=_t("Timbunan menggusur lumpur & air: bila kolam tertutup, muka naik = volume gusur / luas kolam.", "The fill displaces mud & water: in a closed pond the level rises by displaced volume / pond area."))
+    import pandas as _pd
+    st.markdown("**" + _t("Profil dasar kolam (potongan memanjang pad)", "Pond floor profile (longitudinal section of the pad)") + "**")
+    fdf = st.data_editor(_pd.DataFrame({"x (m)": [-40.0, 0.0, 10.0, 30.0, 200.0], "z dasar (m)": [0.0, 0.0, -2.0, -5.0, -5.0]}), num_rows="dynamic", key="mp_floor", width="stretch", hide_index=True)
+    try:
+        floor_pts = [(float(a), float(b)) for a, b in zip(fdf.iloc[:, 0], fdf.iloc[:, 1]) if np.isfinite(a) and np.isfinite(b)]
+        assert len(floor_pts) >= 2
+    except Exception:
+        st.error(_t("Profil dasar minimal 2 titik.", "The floor profile needs at least 2 points."))
+        return
+
+    # ---------------- 3. armada
+    nHD, cyc, hrs = 4, 12.0, 10.0
+    if not LOADM:
+        _sub_header(_t("3. Produksi dumping (menentukan waktu tiap tahap)", "3. Dumping production (sets the time of each step)"))
+        g1, g2, g3, g4 = st.columns(4)
+        nHD = int(g1.number_input(_t("Jumlah HD", "Number of trucks"), 1, 40, 4, 1, key="mp_nhd"))
+        cyc = g2.number_input(_t("Waktu siklus (menit)", "Cycle time (min)"), 3.0, 60.0, 12.0, 1.0, key="mp_cyc")
+        hrs = g3.number_input(_t("Jam kerja efektif/hari", "Effective hours/day"), 1.0, 24.0, 10.0, 0.5, key="mp_hrs")
+    gfill_bulk = 19.0
+
+    # ---------------- 4. data tanah dasar
+    _sub_header(_t("4. Data tanah dasar & hasil uji", "4. Base soil & test data"))
+    st.caption(_t("Lapisan di bawah dasar kolam, dari atas ke bawah. Baris terakhir = lapisan keras (tebal dikosongkan/0). Su dapat diisi manual atau diturunkan dari data uji di bawah.",
+                  "Layers below the pond floor, top to bottom. The last row = firm layer (thickness blank/0). Su can be typed or derived from the test data below."))
+    ldf0 = _pd.DataFrame({"Lapisan": ["Lempung lunak", "Lempung agak kaku", "Dasar kuat"], "Tebal (m)": [4.0, 4.0, 0.0], "γ (kN/m³)": [15.5, 17.0, 19.5], "Su manual (kPa)": [12.0, 35.0, 150.0],
+                          "Cc": [0.6, 0.3, 0.0], "e0": [1.6, 1.0, 0.6], "cv (m²/hari)": [0.01, 0.03, 0.1]})
+    ldf = st.data_editor(ldf0, num_rows="dynamic", key="mp_layers", width="stretch", hide_index=True)
+    st.markdown("**" + _t("Data uji lapangan/lab", "Field / lab test data") + "**")
+    st.caption(_t("Jenis: Su (vane/CPT/UCS-undrained, kPa) · UCS (qu, kPa → Su = qu/2) · CBR (%) · DCP (mm/pukulan). Kedalaman = m di bawah dasar kolam.", "Type: Su (vane/CPT, kPa) · UCS (qu, kPa → Su = qu/2) · CBR (%) · DCP (mm/blow). Depth = m below the pond floor."))
+    tdf0 = _pd.DataFrame({"Jenis": ["Su", "Su", "CBR", "DCP"], "Kedalaman (m)": [1.0, 3.0, 5.0, 2.0], "Nilai": [10.0, 14.0, 1.2, 300.0]})
+    tdf = st.data_editor(tdf0, num_rows="dynamic", key="mp_tests", width="stretch", hide_index=True,
+                         column_config={"Jenis": st.column_config.SelectboxColumn("Jenis", options=["Su", "UCS", "CBR", "DCP"], required=True)})
+    st.caption(_t("Catatan: korelasi CBR/DCP → Su cenderung terlalu tinggi pada lempung/lumpur sangat lunak; utamakan vane shear/CPT/UCS untuk Su, dan pakai CBR/DCP sebagai pembanding atau untuk lapisan agak kaku.",
+                  "Note: CBR/DCP → Su correlations tend to over-predict in very soft clay/mud; prefer vane shear/CPT/UCS for Su and use CBR/DCP as a cross-check or for stiffer layers."))
+    k_cbr = st.number_input(_t("Korelasi Su = k × CBR (kPa per %)", "Correlation Su = k × CBR (kPa per %)"), 10.0, 60.0, 30.0, 1.0, key="mp_kcbr")
+    st.markdown("**" + _t("Material timbunan pad (sand cone & kekuatan)", "Pad fill (sand cone & strength)") + "**")
+    h1, h2, h3, h4 = st.columns(4)
+    sc_txt = h1.text_input(_t("Sand cone γd lapangan (kN/m³, pisahkan koma)", "Sand-cone field γd (kN/m³, comma separated)"), "17.2, 17.8, 16.9", key="mp_sc")
+    gdmax = h2.number_input(_t("γd maks Proctor (kN/m³)", "Proctor max γd (kN/m³)"), 12.0, 26.0, 18.5, 0.1, key="mp_gdmax")
+    wfill = h3.number_input(_t("Kadar air timbunan (%)", "Fill moisture (%)"), 0.0, 40.0, 10.0, 1.0, key="mp_wf")
+    cbrf = h4.number_input(_t("CBR timbunan pad (%)", "Pad fill CBR (%)"), 1.0, 100.0, 25.0, 1.0, key="mp_cbrf")
+    h5, h6, h7 = st.columns(3)
+    phif = h5.number_input(_t("φ' timbunan acuan (°)", "Reference fill φ' (°)"), 20.0, 45.0, 34.0, 0.5, key="mp_phif")
+    cf = h6.number_input(_t("c' timbunan (kPa)", "Fill c' (kPa)"), 0.0, 50.0, 0.0, 1.0, key="mp_cf")
+    gsat = h7.number_input(_t("γ timbunan jenuh (kN/m³)", "Saturated fill γ (kN/m³)"), 16.0, 24.0, 20.0, 0.5, key="mp_gsat")
+    with st.expander(_t("Parameter konsolidasi & kriteria", "Consolidation parameters & criteria")):
+        i1, i2, i3 = st.columns(3)
+        mgain = i1.number_input(_t("Rasio kenaikan Su / σ'v (m)", "Su gain ratio / σ'v (m)"), 0.1, 0.5, 0.25, 0.01, key="mp_m", help=_t("Kenaikan Su = m × tegangan efektif tambahan yang sudah terkonsolidasi.", "Su gain = m × the consolidated effective-stress increase."))
+        two = i2.checkbox(_t("Drainase dua arah (atas & bawah)", "Two-way drainage (top & bottom)"), False, key="mp_two")
+        fst = i3.number_input(_t("FS target", "Target FS"), 1.0, 2.0, 1.3, 0.05, key="mp_fst")
+
+    # ---- turunan data
+    try:
+        layers = []
+        rows = [r for r in ldf.to_dict("records") if str(r.get("Lapisan", "")).strip()]
+        for i, r in enumerate(rows):
+            h = float(r.get("Tebal (m)") or 0.0)
+            firm = (i == len(rows) - 1) or h <= 0
+            layers.append(dict(name=str(r["Lapisan"]), h=(None if firm else h), gamma=float(r["γ (kN/m³)"]), su=float(r["Su manual (kPa)"]), cc=float(r.get("Cc") or 0.3), e0=float(r.get("e0") or 1.0),
+                               cv=float(r.get("cv (m²/hari)") or 0.02), firm=bool(firm)))
+        assert len(layers) >= 2
+        layers[-1]["h"] = None; layers[-1]["firm"] = True
+    except Exception:
+        st.error(_t("Tabel lapisan tidak valid (min. 2 baris: lapisan lunak + lapisan keras).", "Invalid layer table (min. 2 rows: soft + firm layer)."))
+        return
+    tests = [dict(jenis=r["Jenis"], depth=r["Kedalaman (m)"], value=r["Nilai"]) for r in tdf.to_dict("records") if r.get("Jenis") and np.isfinite(r.get("Kedalaman (m)", np.nan)) and np.isfinite(r.get("Nilai", np.nan))]
+    su_use, su_info = mp.derive_su(tests, layers, k_cbr)
+    for L, s_ in zip(layers, su_use):
+        L["su_use"] = float(s_)
+    try:
+        sc_vals = [float(x) for x in sc_txt.replace(";", ",").split(",") if x.strip()]
+    except Exception:
+        sc_vals = []
+    gd_mean = float(np.mean(sc_vals)) if sc_vals else gdmax * 0.95
+    rc = gd_mean / gdmax
+    frf = mp.rc_factor(rc)
+    phi_eff = float(np.degrees(np.arctan(frf * np.tan(np.radians(phif)))))
+    gfill = float(gd_mean * (1 + wfill / 100.0))
+    fill = dict(gamma=gfill, gamma_sat=max(gsat, gfill), phi_eff=phi_eff, c=float(cf) * frf)
+    rows_s = [{_t("Lapisan", "Layer"): L["name"], _t("Tebal (m)", "Thickness (m)"): ("-" if L["h"] is None else f"{L['h']:g}"), "Su manual": L["su"], _t("Su dipakai (kPa)", "Su used (kPa)"): round(L["su_use"], 1),
+               _t("Sumber", "Source"): (", ".join(inf[1]) + (f" ({inf[0]} data)" if inf[0] else ""))} for L, inf in zip(layers, su_info)]
+    with st.expander(_t("Ringkasan nilai turunan dari data uji", "Summary of values derived from the test data"), expanded=True):
+        st.dataframe(_pd.DataFrame(rows_s), hide_index=True, width="stretch")
+        x1_, x2_, x3_ = st.columns(3)
+        x1_.metric(_t("Kepadatan relatif sand cone", "Sand-cone relative compaction"), f"{100 * rc:.1f}%", help=_t("γd lapangan rata-rata / γd maks Proctor.", "Mean field γd / Proctor max γd."))
+        x2_.metric(_t("φ' timbunan dipakai", "φ' used for the fill"), f"{phi_eff:.1f}°", help=_t("φ' acuan direduksi oleh faktor kepadatan (≥95% → 1,0).", "Reference φ' reduced by the compaction factor (≥95% → 1.0)."))
+        x3_.metric(_t("CBR timbunan", "Fill CBR"), f"{cbrf:.0f}%", help=_t("Syarat umum permukaan jalan angkut ≥ 15–25%.", "Common haul-surface requirement ≥ 15–25%."))
+        if rc < 0.9:
+            st.warning(_t("Kepadatan timbunan < 90% Proctor: kuat geser & daya dukung roda diturunkan. Tingkatkan pemadatan atau ganti material.", "Fill compaction < 90% of Proctor: shear strength & wheel bearing are reduced. Improve compaction or change the material."))
+        if cbrf < 15:
+            st.warning(_t("CBR timbunan < 15%: permukaan pad rawan rutting/amblas oleh roda HD.", "Fill CBR < 15%: the pad surface is prone to rutting under the truck."))
+
+    cap = float(spec["payload_t"]) / max(gfill / 9.81, 1.0) if spec["payload_t"] else 30.0
+    cap = st.number_input(_t("Volume padat per rit (m³)", "Compacted volume per load (m³)"), 5.0, 200.0, float(round(cap, 1)), 1.0, key="mp_cap", help=_t("Default = payload / berat isi timbunan.", "Default = payload / fill density."))
+
+    lunits = None
+    if LOADM:
+        x_ex = float(xf1) - float(ex_off)
+        ex_u = dict(ex_d); ex_u["x"] = x_ex; ex_u["q_eq"] = ex_d["q_eq"]
+        lunits = [ex_u]
+        if use_hd:
+            Uh = mp.unit_load(spec, stt, dyn, 2.0)
+            hd_u = dict(Uh); hd_u["x"] = x_ex - float(hd_off) - 2.7; hd_u["Lx"] = Uh["Lr"]; hd_u["q_eq"] = Uh["q"]; hd_u["name"] = un
+            lunits.append(hd_u)
+            if hd_u["x"] - 0.7 * Uh["len"] < 0:
+                st.warning(_t("HD berada di luar ujung belakang pad pada jarak ini -- perkecil jarak HD dari excavator.", "The truck would stand beyond the back of the pad at this distance -- reduce its distance from the excavator."))
+
+    def make_mp(scale=1.0):
+        Ls = [dict(L, su_use=L["su_use"] * scale) for L in layers]
+        if LOADM:
+            return mp.MudPocket(floor_pts, Ls, fill, Zp=Zp, Zm0=Zm, Zw0=Zw, pad_w=Wp, xf0=xf1, xf1=xf1, n_steps=nst, msl=msl, mud=dict(gamma=gm, su=sum_ * scale), fleet=dict(trucks=1, cycle_min=12.0, hours=10.0, cap_m3=cap),
+                                unit=ex_d, pond_area=(area if area > 0 else None), su_gain=mgain, drain_two_way=two, dyn=dyn, mode="load",
+                                load=dict(units=lunits, prod_m3h=prod, step_h=stepH, pad_age_d=age, reach_len=rlen, refill=refill, scour_per_1000=scour))
+        return mp.MudPocket(floor_pts, Ls, fill, Zp=Zp, Zm0=Zm, Zw0=Zw, pad_w=Wp, xf0=xf0, xf1=xf1, n_steps=nst, msl=msl, mud=dict(gamma=gm, su=sum_ * scale), fleet=dict(trucks=nHD, cycle_min=cyc, hours=hrs, cap_m3=cap),
+                            unit=U, pond_area=(area if area > 0 else None), setback=setb, su_gain=mgain, drain_two_way=two, dyn=dyn, mode="dump", x_dump=float(xf0) - float(setb), dozer=dozer_d)
+
+    key = ("mp", _mode, str(lunits and [(u_["x"], u_["q"]) for u_ in lunits]), (prod, stepH, age, rlen, refill, scour) if LOADM else (dozer_d and dozer_d["q"]), un, stt, dyn, Lr, setb, Zp, Wp, msl, nst, xf0, xf1, Zw, Zm, gm, sum_, area, tuple(floor_pts), nHD, cyc, hrs, cap, str(ldf.values.tolist()), str(tdf.values.tolist()), k_cbr, sc_txt, gdmax, wfill, cbrf, phif, cf, gsat, mgain, two)
+    if st.button(_t("Jalankan analisis mud pocket", "Run mud pocket analysis"), type="primary", key="mp_run"):
+        prog = st.progress(0.0)
+        try:
+            m0 = make_mp(1.0)
+            res = m0.run(progress=prog.progress)
+            sens = []
+            for sc_ in (0.7, 0.85, 1.0, 1.15, 1.3):
+                r_ = make_mp(sc_).run() if sc_ != 1.0 else res
+                sens.append((sc_, min(s["FS_slope"] for s in r_["steps"]), min(s["FS_emb"] for s in r_["steps"]), min(s["FS_wheel"] for s in r_["steps"])))
+        except Exception as e:
+            prog.empty()
+            st.error(_t(f"Analisis gagal: {e}", f"Analysis failed: {e}"))
+            return
+        prog.empty()
+        st.session_state["mp_res"] = (key, m0, res, sens)
+    got = st.session_state.get("mp_res")
+    if not got:
+        return
+    if got[0] != key:
+        _ui_info(_t("Input berubah sejak analisis terakhir -- klik 'Jalankan analisis mud pocket' untuk memperbarui.", "Inputs changed since the last run -- click 'Run mud pocket analysis' to refresh."))
+    _, m0, res, sens = got
+    stp = res["steps"]
+    nT = len(stp)
+
+    # ---------------- ringkasan
+    _sub_header(_t("Hasil", "Results"))
+    fs_s = [s["FS_slope"] for s in stp]; fs_e = [s["FS_emb"] for s in stp]; fs_w = [s["FS_wheel"] for s in stp]
+    kc = int(np.argmin(fs_s))
+    a1, a2, a3, a4 = st.columns(4)
+    _metric_card(_t("FS lereng depan min.", "Min front-slope FS"), f"{min(fs_s):.2f}", help_text=_t(f"{_mp_fs_cls(min(fs_s))} · langkah {kc + 1}", f"{_mp_fs_cls(min(fs_s))} · step {kc + 1}"), container=a1)
+    _metric_card(_t("FS daya dukung dasar min.", "Min base-bearing FS"), f"{min(fs_e):.2f}", help_text=_mp_fs_cls(min(fs_e)), container=a2)
+    _metric_card(_t("FS track/roda min.", "Min track/wheel FS") if LOADM else _t("FS roda HD min.", "Min truck-wheel FS"), f"{min(fs_w):.2f}", help_text=_mp_fs_cls(min(fs_w)), container=a3)
+    if LOADM:
+        _metric_card(_t("Gerusan kaki pad / parit", "Toe scour / trench"), f"{stp[-1]['retreat']:.1f} m / {max(s['trench'] for s in stp):.1f} m", help_text=_t(f"Lumpur diangkat {stp[-1]['Vexc']:.0f} m³ dalam {stp[-1]['t']:.1f} hari", f"{stp[-1]['Vexc']:.0f} m³ of mud removed in {stp[-1]['t']:.1f} days"), container=a4)
+    else:
+        _metric_card(_t("Penurunan maks.", "Max settlement"), f"{max(s['s_max'] for s in stp):.2f} m", help_text=_t(f"Waktu total {stp[-1]['t']:.1f} hari, {stp[-1]['loads']:.0f} rit", f"Total {stp[-1]['t']:.1f} days, {stp[-1]['loads']:.0f} loads"), container=a4)
+    bad = [s for s in stp if min(s["FS_slope"], s["FS_emb"], s["FS_wheel"], s["FS_pad"]) < 1.0]
+    wa = [s for s in stp if min(s["FS_slope"], s["FS_emb"], s["FS_wheel"], s["FS_pad"]) < fst]
+    if bad:
+        st.error(_t(f"FS < 1,0 mulai langkah {bad[0]['k'] + 1} " + (f"(lumpur diangkat {bad[0]['Vexc']:.0f} m³)" if LOADM else f"(panjang pad {bad[0]['xf']:.0f} m)") + ": tidak stabil pada data ini -- lihat rekomendasi di bawah.",
+                    f"FS < 1.0 from step {bad[0]['k'] + 1} " + (f"({bad[0]['Vexc']:.0f} m³ of mud removed)" if LOADM else f"(pad length {bad[0]['xf']:.0f} m)") + ": unstable with this data -- see the recommendations below."))
+    elif wa:
+        st.warning(_t(f"FS < {fst:.2f} (di bawah target) mulai tahap {wa[0]['k'] + 1}.", f"FS < {fst:.2f} (below target) from step {wa[0]['k'] + 1}."))
+    else:
+        st.success(_t(f"Semua FS ≥ {fst:.2f} di seluruh tahap (indikatif).", f"All FS ≥ {fst:.2f} across all steps (indicative)."))
+
+    # ---------------- 3D
+    _sub_header(_t("Simulasi 3D: progres dumping, perubahan pada dasar & potensi", "3D simulation: dumping progress, base changes & potentials"))
+    if LOADM:
+        st.caption(_t("Potongan memanjang pad di bidang depan (warna: material / Su / tekanan pori berlebih). Excavator di atas pad menggali lumpur di depan kaki pad dan memuat ke HD; parit terbentuk, kaki pad tergerus dan lereng depan makin curam. Lingkaran merah = bidang gelincir kritis.",
+                      "The pad's longitudinal section is on the front plane (colour: material / Su / excess pore pressure). The excavator on the pad digs mud in front of the toe and loads the truck; a trench forms, the toe is undercut and the front slope steepens. Red circle = critical slip surface."))
+    else:
+        st.caption(_t("Potongan memanjang pad terlihat di bidang depan (warna: material / Su / tekanan pori berlebih). HD mundur ke SATU titik dump tetap dan menumpahkan; dozer mendorong material sehingga pad maju (HD tidak ikut maju); dasar turun dan lumpur terdorong (heave) bila daya dukung menipis. Lingkaran merah = bidang gelincir kritis.",
+                      "The pad's longitudinal section is on the front plane (colour: material / Su / excess pore pressure). The truck backs to ONE fixed dump point and tips; a dozer pushes the material so the pad advances (the truck does not advance); the base settles and mud is pushed (heave) when bearing is marginal. Red circle = critical slip surface."))
+    try:
+        _html = mp.build_scene_html(m0, res, _MUDPOCKET_VIEWER_TEMPLATE, three_inline=_wsim_find_local_three(), three_cdn=_dsc.THREE_CDN, unit_dims=dict(len=float(spec.get("len_m", 10.0)), wid=float(spec.get("wid_m", 5.0))),
+                                    title=_t("Pad loading: excavator memuat lumpur", "Pad loading: excavator loading mud") if LOADM else _t("Mud pocket: progres dumping", "Mud pocket: dumping progress"), subtitle=un.split(" (")[0],
+                                    labels=dict(step=_t("Tahap", "Step"), time=_t("Waktu", "Time"), day=_t("hari", "d"), xf=_t("Panjang pad", "Pad length"), loads=_t("Rit kumulatif", "Cumulative loads"), fss=_t("FS lereng depan", "Front-slope FS"),
+                                                fsb=_t("FS daya dukung", "Bearing FS"), fsw=_t("FS roda HD", "Truck-wheel FS"), settle=_t("Penurunan maks.", "Max settlement"), umax=_t("u berlebih maks.", "Max excess u"), sumin=_t("Su minimum", "Min Su"),
+                                                zm=_t("Muka lumpur", "Mud level"), b_reset="Reset", b_side=_t("Samping", "Side"), b_top=_t("Atas", "Top"), display=_t("Tampilan potongan", "Section display"),
+                                                m_cls=_t("Material", "Material"), m_su="Su (kPa)", m_du=_t("Tekanan pori berlebih", "Excess pore pressure"), water=_t("Air", "Water"), mud=_t("Lumpur", "Mud"), circ=_t("Bidang gelincir", "Slip surface"),
+                                                truck=_t("Unit", "Units"), loop=_t("Ulangi", "Loop"), su="Su", du="Δu", vexc=_t("Lumpur diangkat", "Mud removed"), retreat=_t("Gerusan kaki pad", "Pad toe scour"), trench=_t("Parit di depan pad", "Trench in front of pad"),
+                                                fspad=_t("FS material pad (track)", "Pad-material FS (track)"), push=_t("Jarak dorong dozer", "Dozer push distance")))
+        if hasattr(st, "iframe"):
+            st.iframe(_html, width="stretch", height=700)
+        else:
+            import streamlit.components.v1 as _mpc
+            _mpc.html(_html, height=700, scrolling=False)
+        st.download_button(_t("Unduh simulasi 3D (HTML mandiri)", "Download 3D simulation (standalone HTML)"), data=_html.encode("utf-8"), file_name="mud_pocket_3d.html", mime="text/html", key="mp_dl3d")
+    except Exception as e3:
+        st.error(_t(f"Simulasi 3D gagal dibuat: {e3}", f"Could not build the 3D simulation: {e3}"))
+
+    # ---------------- grafik
+    _sub_header(_t("Faktor keamanan & perubahan dasar terhadap progres", "Safety factors & base changes vs. progress"))
+    xlab = [f"{s['xf']:.0f}" for s in stp]
+    XV = [s["Vexc"] for s in stp] if LOADM else [s["xf"] for s in stp]
+    XL = _t("Lumpur diangkat (m³)", "Mud removed (m³)") if LOADM else _t("Panjang pad (m)", "Pad length (m)")
+    gA, gB = st.columns(2)
+    f1_ = go.Figure()
+    for nm_, v_, col in ((_t("Lereng depan (Bishop)", "Front slope (Bishop)"), fs_s, "#d8402c"), (_t("Daya dukung dasar", "Base bearing"), fs_e, "#2d8de0"), (_t("Roda HD", "Truck wheel"), fs_w, "#e08a2d")):
+        f1_.add_trace(go.Scatter(x=XV, y=[min(v, 6) for v in v_], name=nm_, line=dict(color=col, width=3)))
+    if LOADM:
+        f1_.add_trace(go.Scatter(x=XV, y=[min(s["FS_pad"], 6) for s in stp], name=_t("Material pad (track)", "Pad material (track)"), line=dict(color="#7a5c36", width=2, dash="dot")))
+    f1_.add_hline(y=1.0, line=dict(color="#d8402c", dash="dash")); f1_.add_hline(y=fst, line=dict(color="#e6b800", dash="dot"))
+    f1_.update_layout(height=320, margin=dict(l=10, r=10, t=30, b=10), xaxis_title=XL, yaxis_title="FS", yaxis=dict(range=[0, 6.2]), legend=dict(orientation="h", y=1.15), title=dict(text=_t("Faktor keamanan tiap tahap (maks. 6 ditampilkan)", "Safety factor per step (capped at 6)"), font=dict(size=14)))
+    gA.plotly_chart(f1_, width="stretch")
+    f2_ = go.Figure()
+    f2_.add_trace(go.Scatter(x=XV, y=[s["s_max"] for s in stp], name=_t("Penurunan maks. (m)", "Max settlement (m)"), line=dict(color="#7a5c36", width=3)))
+    f2_.add_trace(go.Scatter(x=XV, y=[s["u_max"] for s in stp], name=_t("u berlebih maks. (kPa)", "Max excess u (kPa)"), yaxis="y2", line=dict(color="#2d8de0", width=2, dash="dash")))
+    f2_.add_trace(go.Scatter(x=XV, y=[s["su_min"] for s in stp], name=_t("Su minimum (kPa)", "Min Su (kPa)"), yaxis="y2", line=dict(color="#4caf50", width=2, dash="dot")))
+    f2_.update_layout(height=320, margin=dict(l=10, r=10, t=30, b=10), xaxis_title=XL, yaxis=dict(title=_t("Penurunan (m)", "Settlement (m)")), yaxis2=dict(title="kPa", overlaying="y", side="right"), legend=dict(orientation="h", y=1.15),
+                      title=dict(text=_t("Penurunan, tekanan pori berlebih, Su", "Settlement, excess pore pressure, Su"), font=dict(size=14)))
+    gB.plotly_chart(f2_, width="stretch")
+    gC, gD = st.columns(2)
+    f3_ = go.Figure()
+    if LOADM:
+        f3_.add_trace(go.Scatter(x=[s["t"] for s in stp], y=[s["retreat"] for s in stp], name=_t("Gerusan kaki pad (m)", "Pad toe scour (m)"), line=dict(color="#555", width=3)))
+        f3_.add_trace(go.Scatter(x=[s["t"] for s in stp], y=[s["trench"] for s in stp], name=_t("Kedalaman parit (m)", "Trench depth (m)"), line=dict(color="#c0392b", width=2, dash="dot")))
+    else:
+        f3_.add_trace(go.Scatter(x=[s["t"] for s in stp], y=[s["xf"] for s in stp], name=_t("Panjang pad (m)", "Pad length (m)"), line=dict(color="#555", width=3)))
+    f3_.add_trace(go.Scatter(x=[s["t"] for s in stp], y=[s["Zm"] for s in stp], name=_t("Muka lumpur (m)", "Mud level (m)"), yaxis="y2", line=dict(color="#8a5a2b", width=2, dash="dash")))
+    f3_.update_layout(height=290, margin=dict(l=10, r=10, t=30, b=10), xaxis_title=_t("Waktu (hari)", "Time (days)"), yaxis=dict(title=_t("Gerusan / parit (m)", "Scour / trench (m)") if LOADM else _t("Panjang pad (m)", "Pad length (m)")), yaxis2=dict(title=_t("Muka lumpur (m)", "Mud level (m)"), overlaying="y", side="right"), legend=dict(orientation="h", y=1.18),
+                      title=dict(text=(_t(f"Progres: {prod:.0f} m³/jam, {stp[-1]['Vexc']:.0f} m³ total", f"Progress: {prod:.0f} m³/h, {stp[-1]['Vexc']:.0f} m³ total") if LOADM else _t(f"Progres: {res['rate']:.0f} rit/hari, {stp[-1]['loads']:.0f} rit total", f"Progress: {res['rate']:.0f} loads/day, {stp[-1]['loads']:.0f} loads total")), font=dict(size=14)))
+    gC.plotly_chart(f3_, width="stretch")
+    # kebutuhan tebal timbunan
+    su_top = float(layers[0]["su_use"])
+    hs_, fsw_, hreq = mp.required_fill_thickness(U["Fr"], su_top, U["Bb"], U["Lr"], m0.Hs, FS_t=fst)
+    f4_ = go.Figure()
+    f4_.add_trace(go.Scatter(x=hs_, y=np.minimum(fsw_, 6), line=dict(color="#e08a2d", width=3), name="FS roda"))
+    f4_.add_hline(y=fst, line=dict(color="#e6b800", dash="dot"))
+    f4_.update_layout(height=290, margin=dict(l=10, r=10, t=30, b=10), xaxis_title=_t("Tebal timbunan di atas dasar lunak (m)", "Fill thickness over the soft base (m)"), yaxis_title="FS", yaxis=dict(range=[0, 6.2]),
+                      title=dict(text=_t(f"Tebal minimum untuk roda HD (Su={su_top:.0f} kPa): " + (f"{hreq:.1f} m" if hreq else "> 6 m"), f"Minimum fill for the truck (Su={su_top:.0f} kPa): " + (f"{hreq:.1f} m" if hreq else "> 6 m")), font=dict(size=14)))
+    gD.plotly_chart(f4_, width="stretch")
+
+    # ---------------- penampang
+    _sub_header(_t("Penampang memanjang: Su, bidang gelincir, dan jarak aman roda", "Longitudinal section: Su, slip surface and safe wheel setback"))
+    k = st.slider(_t("Tahap", "Step"), 0, nT - 1, kc, 1, key="mp_k")
+    s = stp[k]
+    fr_ = res["frames"][k]
+    xs_, zs_ = m0.xs, m0.zs
+    selx = (xs_ >= -30) & (xs_ <= m0.xf[-1] + 45)
+    cl = fr_["cls"][:, selx]
+    suz = np.where(cl >= 4, fr_["su"][:, selx], np.where(cl == 2, fr_["su"][:, selx], np.nan))
+    fg = go.Figure()
+    fg.add_trace(go.Heatmap(x=xs_[selx], y=zs_, z=suz, colorscale="Turbo", colorbar=dict(title="Su (kPa)"), zmin=0, zmax=float(np.nanpercentile(suz, 99)) if np.isfinite(suz).any() else 50, hovertemplate="Su=%{z:.1f} kPa<extra></extra>"))
+    fillm = np.where(cl == 3, 1.0, np.nan)
+    fg.add_trace(go.Heatmap(x=xs_[selx], y=zs_, z=fillm, colorscale=[[0, "#a8a090"], [1, "#a8a090"]], showscale=False, hoverinfo="skip", name=_t("Timbunan", "Fill")))
+    watm = np.where(cl == 1, 1.0, np.nan)
+    fg.add_trace(go.Heatmap(x=xs_[selx], y=zs_, z=watm, colorscale=[[0, "rgba(70,140,215,0.35)"], [1, "rgba(70,140,215,0.35)"]], showscale=False, hoverinfo="skip"))
+    c = s["circle"]
+    if c:
+        a0 = np.arcsin(np.clip((c["x0"] - c["xc"]) / c["R"], -1, 1)); a1 = np.arcsin(np.clip((c["x1"] - c["xc"]) / c["R"], -1, 1))
+        aa = np.linspace(a0, a1, 80)
+        fg.add_trace(go.Scatter(x=c["xc"] + c["R"] * np.sin(aa), y=c["zc"] - c["R"] * np.cos(aa), mode="lines", line=dict(color="#fff", width=4), hoverinfo="skip", showlegend=False))
+        fg.add_trace(go.Scatter(x=c["xc"] + c["R"] * np.sin(aa), y=c["zc"] - c["R"] * np.cos(aa), mode="lines", line=dict(color="#d8402c", width=2), name=_t(f"Bidang gelincir (FS {s['FS_slope']:.2f})", f"Slip surface (FS {s['FS_slope']:.2f})")))
+    if LOADM:
+        for u_ in m0.load["units"]:
+            fg.add_trace(go.Scatter(x=[u_["x"] - u_["Lx"] / 2, u_["x"] + u_["Lx"] / 2], y=[m0.Zp + 0.4, m0.Zp + 0.4], mode="lines", line=dict(color="#111", width=8), name=str(u_.get("name", "unit"))))
+        fg.add_trace(go.Scatter(x=m0.xs[selx], y=s["mud_top"][selx], mode="lines", line=dict(color="#7b4a1c", width=2, dash="dot"), name=_t("Muka lumpur (parit)", "Mud surface (trench)")))
+    else:
+        fg.add_trace(go.Scatter(x=[s["xd"] - m0.unit["Lr"] / 2, s["xd"] + m0.unit["Lr"] / 2], y=[m0.Zp + 0.4, m0.Zp + 0.4], mode="lines", line=dict(color="#111", width=8), name=_t("Beban HD (titik dump tetap)", "Truck load (fixed dump point)")))
+        if m0.dozer:
+            fg.add_trace(go.Scatter(x=[s["xf"] - 3.5 - m0.dozer["Lx"] / 2, s["xf"] - 3.5 + m0.dozer["Lx"] / 2], y=[m0.Zp + 0.4, m0.Zp + 0.4], mode="lines", line=dict(color="#c9830f", width=8), name=_t("Beban dozer", "Dozer load")))
+    fg.update_layout(height=430, margin=dict(l=10, r=10, t=30, b=10), xaxis_title=_t("x (m) → kolam", "x (m) → pond"), yaxis_title=_t("Elevasi (m)", "Elevation (m)"), yaxis=dict(scaleanchor="x", scaleratio=1.0), legend=dict(orientation="h", y=1.1),
+                     xaxis=dict(range=[-25, float(m0.xf[-1]) + 40]), yaxis_range=[float(zs_.min()), float(m0.Zp) + 4])
+    st.plotly_chart(fg, width="stretch")
+    rowsx = [(_t("Panjang pad / waktu", "Pad length / time"), f"{s['xf']:.0f} m / {s['t']:.2f} {_t('hari', 'd')}"), ((_t("Lumpur diangkat / kemiringan depan", "Mud removed / front slope"), f"{s['Vexc']:.0f} m³ / 1V:{s['msl']:.2f}H") if LOADM else (_t("Rit kumulatif / volume timbunan", "Cumulative loads / fill volume"), f"{s['loads']:.0f} / {s['V']:.0f} m³")),
+             (_t("FS lereng / daya dukung / roda", "FS slope / bearing / wheel"), f"{s['FS_slope']:.2f} / {s['FS_emb']:.2f} / {s['FS_wheel']:.2f}"), (_t("Penurunan maks. / heave lumpur", "Max settlement / mud heave"), f"{s['s_max']:.2f} m / {100 * s['fh']:.0f}%"),
+             (_t("Beban bersih rata-rata pad", "Mean net pad load"), f"{s['q_app']:.0f} kPa (Nc={s['Nc']:.1f}, Su eff={s['su_eff']:.1f} kPa)"), (_t("Tegangan roda di atas dasar lunak", "Wheel stress on the soft base"), f"{s['sig_top']:.0f} kPa"),
+             (_t("Muka lumpur / air kolam", "Mud / water level"), f"{s['Zm']:.2f} / {s['Zw']:.2f} m")]
+    st.dataframe(_pd.DataFrame(rowsx, columns=[_t("Besaran", "Quantity"), _t("Nilai", "Value")]), hide_index=True, width="stretch")
+    dist = np.array([0.5, 1, 2, 3, 4, 6, 8, 12, 16.0])
+    try:
+        fsd = mp.setback_curve(m0, res, k, dist)
+        fq = go.Figure(go.Scatter(x=dist, y=np.minimum(fsd, 6), mode="lines+markers", line=dict(color="#d8402c", width=3)))
+        fq.add_hline(y=fst, line=dict(color="#e6b800", dash="dot")); fq.add_hline(y=1.0, line=dict(color="#d8402c", dash="dash"))
+        okd = [d for d, v in zip(dist, fsd) if v >= fst]
+        fq.update_layout(height=270, margin=dict(l=10, r=10, t=30, b=10), xaxis_title=_t("Jarak beban dari tepi depan pad (m)", "Load distance from the pad front edge (m)"), yaxis_title=_t("FS lereng", "Slope FS"),
+                         title=dict(text=_t("Jarak aman unit dari tepi (tahap terpilih): " + (f"≥ {min(okd):.1f} m" if okd else "tidak tercapai ≤ 16 m"), "Safe unit setback (selected step): " + (f"≥ {min(okd):.1f} m" if okd else "not reached ≤ 16 m")), font=dict(size=14)))
+        st.plotly_chart(fq, width="stretch")
+    except Exception as eq:
+        st.caption(_t(f"Kurva jarak aman tidak tersedia: {eq}", f"Setback curve unavailable: {eq}"))
+
+    # ---------------- sensitivitas & rekomendasi
+    _sub_header(_t("Sensitivitas terhadap kuat geser (Su) & rekomendasi", "Sensitivity to shear strength (Su) & recommendations"))
+    sdf = _pd.DataFrame([{_t("Faktor Su", "Su factor"): f"{a:.2f}×", _t("FS lereng min.", "Min slope FS"): round(b, 2), _t("FS daya dukung min.", "Min bearing FS"): round(c_, 2), _t("FS roda min.", "Min wheel FS"): round(d_, 2)} for a, b, c_, d_ in sens])
+    st.dataframe(sdf, hide_index=True, width="stretch")
+    L1 = layers[0]
+    Hdr_ = max(m0.Hs, 1.0) / (2.0 if two else 1.0)
+    du_end = stp[-1]["u_max"]
+    wr = []
+    for dd_ in (7, 30, 90, 180, 365):
+        Uu = float(mp.terzaghi_U(np.array([max(float(L1.get("cv", 0.02)), 1e-5) * dd_ / Hdr_ ** 2]))[0])
+        wr.append({_t("Jeda tanpa dumping (hari)", "Rest without dumping (days)"): dd_, _t("Derajat konsolidasi lapisan 1", "Consolidation degree, layer 1"): f"{100 * Uu:.0f}%",
+                   _t("Kenaikan Su (kPa)", "Su gain (kPa)"): round(mgain * du_end * Uu, 1), _t("Su lapisan 1 (kPa)", "Layer-1 Su (kPa)"): round(L1["su_use"] + mgain * du_end * Uu, 1)})
+    st.markdown("**" + _t("Efek jeda dumping terhadap kuat geser (lapisan lunak pertama)", "Effect of resting the dumping on shear strength (first soft layer)") + "**")
+    st.dataframe(_pd.DataFrame(wr), hide_index=True, width="stretch")
+    st.caption(_t("Dumping berlangsung hari, konsolidasi lempung lunak berbulan-bulan: selama dumping, tekanan pori berlebih hampir penuh dan Su hampir tidak naik (kondisi undrained). Jeda antar-lift menaikkan Su; penurunan segera (distorsi undrained) tidak dimodelkan.",
+                  "Dumping takes days while soft-clay consolidation takes months: during dumping the excess pore pressure is nearly full and Su barely rises (undrained). Pausing between lifts raises Su; immediate (undrained distortion) settlement is not modelled."))
+    rec = []
+    if min(fs_s) < fst:
+        rec.append(_t("Lereng depan marginal: landaikan lereng depan (H:V lebih besar) atau tambah berm pendukung di sisi kolam; jauhkan as belakang dari tepi (lihat kurva jarak aman); jangan antre beberapa HD di ujung pad.",
+                      "Marginal front slope: flatten the front slope (larger H:V) or add a supporting berm on the pond side; keep the rear axle further from the edge (see the setback curve); do not queue several trucks at the pad end."))
+    if min(fs_e) < fst:
+        rec.append(_t("Daya dukung dasar marginal / risiko mud wave: kurangi tinggi per tahap (lift lebih tipis, diberi waktu konsolidasi), perlebar pad, atau pasang geotekstil/geogrid & lapis pasir/batu di dasar; pertimbangkan preloading.",
+                      "Marginal base bearing / mud-wave risk: reduce the height per step (thinner lifts with consolidation time), widen the pad, or place geotextile/geogrid and a sand/rock blanket at the base; consider preloading."))
+    if min(fs_w) < fst:
+        rec.append(_t(f"Roda HD menembus tebal timbunan saat ini: tebal minimum ≈ {hreq:.1f} m di atas dasar lunak" if hreq else "Roda HD menembus: tebal timbunan > 6 m diperlukan atau perkuat dasar (geogrid) / turunkan beban (unit lebih ringan, tidak penuh).",
+                      f"Truck wheels punch through at this fill thickness: minimum ≈ {hreq:.1f} m over the soft base" if hreq else "Wheels punch through: > 6 m of fill is needed, or reinforce the base (geogrid) / reduce the load (lighter unit, partial payload)."))
+    if LOADM:
+        if stp[-1]["retreat"] > 0.3 or max(s_["trench"] for s_ in stp) > 0.3:
+            rec.append(_t("Excavator menggali lumpur di dekat kaki pad: sisakan zona penyangga lumpur (jangan gali dalam radius ≥ tinggi pad dari kaki), muat dari sisi yang menjauhi pad, atau lindungi kaki dengan berm batu/riprap; batasi kedalaman parit dan isi ulang bertahap.",
+                          "The excavator digs mud near the pad toe: keep a mud buffer (do not dig within at least one pad height of the toe), load from a side away from the pad, or protect the toe with a rock berm/riprap; limit the trench depth and backfill progressively."))
+        if min(s_["FS_pad"] for s_ in stp) < fst:
+            rec.append(_t("Material pad di bawah track marginal: tambah tebal/pemadatan lapis atas, pasang matras/bantalan kayu atau pelat baja di bawah track, atau pakai excavator lebih ringan/tapak lebih lebar.",
+                          "The pad material under the tracks is marginal: add thickness/compaction in the top layer, place timber mats or steel plates under the tracks, or use a lighter excavator / wider shoes."))
+        rec.append(_t("Stop loading dan mundurkan excavator bila ada retakan memanjang di puncak pad, penurunan mendadak, atau lumpur terdorong naik di depan kaki.", "Stop loading and retract the excavator if longitudinal cracks form at the pad crest, sudden settlement occurs, or mud bulges up in front of the toe."))
+    if rc < 0.95:
+        rec.append(_t(f"Kepadatan sand cone {100 * rc:.0f}% < 95%: tambah pemadatan/ukur ulang agar φ' timbunan tidak direduksi.", f"Sand-cone compaction {100 * rc:.0f}% < 95%: add compaction/re-test so the fill φ' is not reduced."))
+    if max(s_["s_max"] for s_ in stp) > 0.5:
+        rec.append(_t("Penurunan > 0,5 m: sediakan volume timbunan tambahan untuk mempertahankan elevasi puncak dan pasang settlement plate.", "Settlement > 0.5 m: allow extra fill volume to hold the crest level and install settlement plates."))
+    rec.append(_t("Pantau lapangan: piezometer di lempung lunak, settlement plate/inclinometer di depan pad, dan retakan di puncak; hentikan dumping bila gerak melaju atau retakan menjalar.",
+                  "Monitor in the field: piezometers in the soft clay, settlement plates/inclinometers ahead of the pad, and crest cracks; stop dumping if movement accelerates or cracks propagate."))
+    for r_ in rec:
+        st.markdown("- " + r_)
+    df = _pd.DataFrame([dict(tahap=s_["k"] + 1, waktu_hari=s_["t"], panjang_pad_m=s_["xf"], rit_kumulatif=s_["loads"], volume_m3=s_["V"], muka_lumpur_m=s_["Zm"], muka_air_m=s_["Zw"], FS_lereng=s_["FS_slope"], FS_daya_dukung=s_["FS_emb"],
+                            FS_roda=s_["FS_wheel"], FS_material_pad=s_["FS_pad"], lumpur_diangkat_m3=s_["Vexc"], gerusan_kaki_m=s_["retreat"], parit_m=s_["trench"], jarak_dorong_m=s_["push_m"],
+                            penurunan_maks_m=s_["s_max"], u_berlebih_maks_kPa=s_["u_max"], Su_min_kPa=s_["su_min"], heave_persen=100 * s_["fh"]) for s_ in stp])
+    q1, q2 = st.columns(2)
+    q1.download_button(_t("Unduh tabel hasil (CSV)", "Download result table (CSV)"), data=df.to_csv(index=False).encode("utf-8"), file_name="mud_pocket.csv", mime="text/csv", key="mp_csv")
+    try:
+        q2.download_button(_t("Unduh penampang tahap terpilih (DXF)", "Download selected-step section (DXF)"), data=mp.section_dxf(m0, res, k), file_name=f"mud_pocket_tahap{k + 1}.dxf", mime="application/dxf", key="mp_dxf")
+    except Exception as e6:
+        q2.caption(_t(f"DXF tidak tersedia: {e6}", f"DXF unavailable: {e6}"))
+
+with tabG:
+    _mudpocket_tab()
 
 
 # =========================================================
