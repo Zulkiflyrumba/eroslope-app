@@ -69,6 +69,233 @@ from docx.oxml.ns import qn as docx_qn
 
 st.set_page_config(page_title="Geo AI", layout="wide")
 
+# ===================== KONTUR: OPTIMASI, KOMPRES & KUNCI =====================
+# Fungsi murni numpy (tanpa Streamlit) agar bisa diuji terpisah. Dipakai oleh read_contours().
+import io as _kl_io
+import json as _kl_json
+import hashlib as _kl_hash
+import numpy as _kl_np
+
+_KL_CACHE = {}          # {kunci: dict(contours, diag, info)} -- dikunci per isi file + mode; maksimal 4 entri
+_KL_CACHE_MAX = 4
+KL_MODES = ("auto", "none", "ringan", "sedang", "agresif")
+_KL_TOL = {"ringan": 0.05, "sedang": 0.25, "agresif": 1.0}
+KL_AUTO_TARGET = 300_000
+
+
+def kl_flatten(contours):
+    """list polyline [(x,y,z),...] -> (xyz Nx3 float64, offsets int64 panjang n+1)."""
+    lens = _kl_np.fromiter((len(c) for c in contours), dtype=_kl_np.int64, count=len(contours))
+    off = _kl_np.concatenate([[0], _kl_np.cumsum(lens)]).astype(_kl_np.int64)
+    if off[-1] == 0:
+        return _kl_np.zeros((0, 3)), off
+    xyz = _kl_np.asarray([p[:3] for c in contours for p in c], dtype=float).reshape(-1, 3)
+    return xyz, off
+
+
+def kl_unflatten(xyz, off):
+    pts = list(map(tuple, xyz.tolist()))
+    return [pts[int(off[i]):int(off[i + 1])] for i in range(len(off) - 1)]
+
+
+def kl_clean(contours, round_dedup=4, round_blunder=2, z_tol=0.01):
+    """Dedup titik persis sama (global, urutan pertama menang) + deteksi blunder -- versi vektor (cepat)."""
+    xyz, off = kl_flatten(contours)
+    n = len(xyz)
+    if n == 0:
+        return [], dict(n_raw=0, n_dup=0, n_blunder=0, blunder_sample=[])
+    key = _kl_np.round(xyz, round_dedup)
+    _, first = _kl_np.unique(key, axis=0, return_index=True)
+    keep = _kl_np.zeros(n, bool); keep[first] = True
+    n_dup = int(n - keep.sum())
+    pid = _kl_np.repeat(_kl_np.arange(len(off) - 1), _kl_np.diff(off))
+    xyz2, pid2 = xyz[keep], pid[keep]
+    # blunder: (x,y) sama pada 2 desimal tetapi z berbeda > z_tol
+    k2 = _kl_np.round(xyz2[:, :2], round_blunder)
+    _, inv, first2 = (lambda u: (u[0], u[2], u[1]))(_kl_np.unique(k2, axis=0, return_index=True, return_inverse=True))
+    inv = _kl_np.asarray(inv).ravel()
+    z0 = xyz2[first2, 2][inv]
+    bm = _kl_np.abs(xyz2[:, 2] - z0) > z_tol
+    sample = [(float(xyz2[i, 0]), float(xyz2[i, 1]), float(z0[i]), float(xyz2[i, 2])) for i in _kl_np.nonzero(bm)[0][:10]]
+    # susun ulang per polyline
+    cnt = _kl_np.bincount(pid2, minlength=len(off) - 1)
+    off2 = _kl_np.concatenate([[0], _kl_np.cumsum(cnt)]).astype(_kl_np.int64)
+    out = kl_unflatten(xyz2, off2)
+    out = [c for c in out if c]
+    return out, dict(n_raw=int(n), n_dup=n_dup, n_blunder=int(bm.sum()), blunder_sample=sample)
+
+
+def _kl_extra(xyz, off, max_len, legacy):
+    n = len(xyz)
+    nxt = _kl_np.empty_like(xyz); nxt[:-1] = xyz[1:]; nxt[-1] = xyz[-1]
+    seg = _kl_np.hypot(nxt[:, 0] - xyz[:, 0], nxt[:, 1] - xyz[:, 1])
+    last = _kl_np.zeros(n, bool); last[off[1:] - 1] = True
+    seg[last] = 0.0
+    if legacy:      # perilaku lama: sisip bila seg > 1.5*max_len, sebanyak int(seg/max_len)-1
+        extra = _kl_np.where(seg > 1.5 * max_len, _kl_np.maximum(_kl_np.floor(seg / max_len).astype(_kl_np.int64) - 1, 0), 0)
+    else:
+        extra = _kl_np.where(seg > max_len, _kl_np.floor(seg / max_len).astype(_kl_np.int64), 0)
+    return nxt, extra
+
+
+def kl_densify_count(contours, max_len, legacy=False):
+    """Jumlah titik yang AKAN disisipkan (tanpa membuatnya) -- untuk membatasi ledakan titik."""
+    xyz, off = kl_flatten(contours)
+    if len(xyz) < 2 or not max_len or max_len <= 0:
+        return 0
+    return int(_kl_extra(xyz, off, max_len, legacy)[1].sum())
+
+
+def kl_densify(contours, max_len, legacy=False):
+    """Sisipkan titik linear pada segmen panjang (urutan polyline dipertahankan, vektor). Return (contours, n_ditambah)."""
+    if not max_len or max_len <= 0 or not contours:
+        return contours, 0
+    xyz, off = kl_flatten(contours)
+    n = len(xyz)
+    if n < 2:
+        return contours, 0
+    nxt, extra = _kl_extra(xyz, off, max_len, legacy)
+    tot = int(extra.sum())
+    if tot == 0:
+        return contours, 0
+    cnt = 1 + extra
+    st_ = _kl_np.concatenate([[0], _kl_np.cumsum(cnt)[:-1]])
+    src = _kl_np.repeat(_kl_np.arange(n), cnt)
+    k = _kl_np.arange(int(cnt.sum())) - _kl_np.repeat(st_, cnt)
+    t = (k / (extra[src] + 1.0))[:, None]
+    out = xyz[src] + t * (nxt[src] - xyz[src])
+    newlen = _kl_np.add.reduceat(cnt, off[:-1]) if len(off) > 1 else cnt
+    # reduceat gagal utk polyline kosong; polyline kosong sudah dibuang di kl_clean, tetap aman:
+    off2 = _kl_np.concatenate([[0], _kl_np.cumsum(newlen)]).astype(_kl_np.int64)
+    return kl_unflatten(out, off2), tot
+
+
+def _kl_thin_polyline(p, tol, tol_z):
+    """p Nx3. Flat-Z -> Douglas-Peucker 2D; selainnya -> radial 3D (jarak >= tol atau |dz| >= tol_z)."""
+    n = len(p)
+    if n <= 2:
+        return p
+    if _kl_np.ptp(p[:, 2]) < max(tol_z, 0.02):
+        from shapely.geometry import LineString
+        ls = LineString(p[:, :2]).simplify(tol, preserve_topology=False)
+        idx = _kl_np.asarray(ls.coords)
+        if len(idx) >= n:
+            return p
+        # petakan kembali ke indeks asli (titik hasil simplify = subset persis titik asli, urutan sama)
+        keep = [0]; j = 1
+        for i in range(1, n - 1):
+            if j < len(idx) - 1 and p[i, 0] == idx[j, 0] and p[i, 1] == idx[j, 1]:
+                keep.append(i); j += 1
+        keep.append(n - 1)
+        return p[keep]
+    keep = [0]; last = p[0]
+    for i in range(1, n - 1):
+        if _kl_np.hypot(p[i, 0] - last[0], p[i, 1] - last[1]) >= tol or abs(p[i, 2] - last[2]) >= tol_z:
+            keep.append(i); last = p[i]
+    keep.append(n - 1)
+    return p[keep]
+
+
+def kl_simplify(contours, tol):
+    """Kurangi vertex per polyline dgn toleransi tol (m). Titik tunggal (POINT) di-snap/dedup pada grid tol."""
+    tol_z = max(0.5 * tol, 0.05)
+    out, singles = [], []
+    for c in contours:
+        if len(c) <= 1:
+            singles.extend(c)
+            continue
+        p = _kl_np.asarray(c, float)
+        out.append(list(map(tuple, _kl_thin_polyline(p, tol, tol_z).tolist())))
+    if singles:
+        s = _kl_np.asarray(singles, float)
+        key = _kl_np.round(s[:, :2] / max(tol, 1e-6)).astype(_kl_np.int64)
+        _, idx = _kl_np.unique(key, axis=0, return_index=True)
+        out.extend([[tuple(s[i].tolist())] for i in sorted(idx)])
+    return out
+
+
+def kl_cap(contours, max_pts):
+    """Batas keras jumlah titik: ambil tiap k-ke-n vertex per polyline (ujung dipertahankan)."""
+    n = sum(len(c) for c in contours)
+    if n <= max_pts:
+        return contours
+    k = int(_kl_np.ceil(n / float(max_pts)))
+    out = []
+    for c in contours:
+        if len(c) <= 2:
+            out.append(c); continue
+        sel = list(range(0, len(c), k))
+        if sel[-1] != len(c) - 1:
+            sel.append(len(c) - 1)
+        out.append([c[i] for i in sel])
+    return out
+
+
+def kl_optimize(contours, mode="auto", target=KL_AUTO_TARGET):
+    """Return (contours_baru, info). mode: auto|none|ringan|sedang|agresif."""
+    n0 = sum(len(c) for c in contours)
+    info = dict(mode=mode, n_before=n0, tol=0.0, capped=False)
+    if mode == "none" or n0 == 0:
+        info["n_after"] = n0
+        return contours, info
+    if mode in _KL_TOL:
+        tol = _KL_TOL[mode]
+        out = kl_simplify(contours, tol)
+        info["tol"] = tol
+    else:   # auto: hanya bila > target; naikkan toleransi bertahap
+        if n0 <= target:
+            info["n_after"] = n0; info["mode"] = "auto (tanpa pengurangan)"
+            return contours, info
+        out = contours
+        for tol in (0.05, 0.1, 0.25, 0.5, 1.0, 2.0):
+            out = kl_simplify(contours, tol)
+            info["tol"] = tol
+            if sum(len(c) for c in out) <= target:
+                break
+    n1 = sum(len(c) for c in out)
+    if mode == "auto" and n1 > target:
+        out = kl_cap(out, target); info["capped"] = True
+    info["n_after"] = sum(len(c) for c in out)
+    return out, info
+
+
+def kl_pack(contours, meta=None):
+    """Kompres kontur terkunci -> bytes (.npz). xy disimpan relatif terhadap titik asal (float32) supaya kecil tapi presisi ~mm."""
+    xyz, off = kl_flatten(contours)
+    ox, oy = (float(xyz[:, 0].min()), float(xyz[:, 1].min())) if len(xyz) else (0.0, 0.0)
+    buf = _kl_io.BytesIO()
+    _kl_np.savez_compressed(buf, x=(xyz[:, 0] - ox).astype(_kl_np.float32), y=(xyz[:, 1] - oy).astype(_kl_np.float32), z=xyz[:, 2].astype(_kl_np.float32),
+                            off=off, origin=_kl_np.array([ox, oy], float), meta=_kl_np.array(_kl_json.dumps(meta or {})))
+    return buf.getvalue()
+
+
+def kl_unpack(raw):
+    d = _kl_np.load(_kl_io.BytesIO(raw), allow_pickle=False)
+    ox, oy = [float(v) for v in d["origin"]]
+    xyz = _kl_np.column_stack([d["x"].astype(float) + ox, d["y"].astype(float) + oy, d["z"].astype(float)])
+    try:
+        meta = _kl_json.loads(str(d["meta"]))
+    except Exception:
+        meta = {}
+    return kl_unflatten(xyz, d["off"]), meta
+
+
+def kl_key(raw_bytes, mode):
+    return _kl_hash.md5(raw_bytes).hexdigest() + ":" + str(mode)
+
+
+def kl_cache_get(key):
+    return _KL_CACHE.get(key)
+
+
+def kl_cache_put(key, val):
+    if key in _KL_CACHE:
+        _KL_CACHE.pop(key)
+    _KL_CACHE[key] = val
+    while len(_KL_CACHE) > _KL_CACHE_MAX:
+        _KL_CACHE.pop(next(iter(_KL_CACHE)))
+
+
 import plotly.graph_objects as go
 from scipy.interpolate import griddata
 from scipy.ndimage import gaussian_filter
@@ -8753,10 +8980,22 @@ with tab1:
                                     "upload again unless you want to replace it.",
                                 ))
                             st.file_uploader(
-                                _t("Upload Kontur DXF", "Upload Contour DXF"),
-                                type=["dxf"],
+                                _t("Upload Kontur DXF (atau .npz kontur terkunci)", "Upload Contour DXF (or a locked .npz contour)"),
+                                type=["dxf", "npz"],
                                 key=f"kontur_dxf_{sid}"
                             )
+                            st.selectbox(
+                                _t("Optimasi & kunci kontur (untuk DXF luas)", "Optimise & lock the contour (for large DXFs)"),
+                                list(KL_MODES), index=0, key=f"kontur_opt_{sid}",
+                                format_func=lambda m: {"auto": _t("Otomatis (kurangi titik hanya bila > 300 rb)", "Automatic (thin only when > 300k points)"),
+                                                       "none": _t("Tanpa pengurangan titik (hanya dikunci)", "No thinning (lock only)"),
+                                                       "ringan": _t("Ringan (toleransi 0,05 m)", "Light (0.05 m tolerance)"),
+                                                       "sedang": _t("Sedang (toleransi 0,25 m)", "Medium (0.25 m tolerance)"),
+                                                       "agresif": _t("Agresif (toleransi 1 m)", "Aggressive (1 m tolerance)")}[m],
+                                help=_t("Kontur dibaca SEKALI lalu dikunci (tidak dibaca ulang tiap klik). Titik berlebih pada garis lurus/rapat dibuang dengan toleransi tertentu; "
+                                        "elevasi tidak diubah. Setelah dibaca, kontur terkunci bisa diunduh (.npz, kecil) dan di-upload ulang menggantikan DXF.",
+                                        "The contour is read ONCE and then locked (not re-read on every click). Redundant points on straight/dense lines are removed within a tolerance; "
+                                        "elevations are unchanged. Afterwards the locked contour can be downloaded (.npz, small) and uploaded instead of the DXF."))
                             _trainee_tip(
                                 "**Format DXF kontur yang diterima:** LWPOLYLINE/POLYLINE (2D dgn elevasi/3D), SPLINE, 3DFACE, POINT, LINE, "
                                 "termasuk yang ada di dalam block INSERT. Tiap garis kontur HARUS punya elevasi Z (bukan 0) -- kalau DXF 2D "
@@ -9882,14 +10121,20 @@ with tab1:
                     ys = [p[1] for p in c]
                     ax.plot(xs, ys, color=color, linewidth=linewidth, alpha=alpha, zorder=5)
 
-            def read_contours(uploaded_dxf, return_diagnostics=False):
+            def _read_contours_raw(uploaded_dxf, return_diagnostics=False):
                 """Baca kontur dari DXF dengan cakupan entity lebih luas: POLYLINE 3D, LWPOLYLINE,
                 SPLINE, 3DFACE, POINT, dan entity di dalam block INSERT. Mengembalikan diagnostics
                 (jumlah titik, entity yang terpakai/terlewat, deteksi Z rata/blunder) agar pengguna
                 bisa memverifikasi kontur terbaca dengan benar sebelum surface dibangun."""
 
                 path = save_uploaded_dxf(uploaded_dxf)
-                doc = ezdxf.readfile(path)
+                try:
+                    doc = ezdxf.readfile(path)
+                finally:
+                    try:
+                        os.remove(path)          # file temp besar tidak dibiarkan menumpuk
+                    except Exception:
+                        pass
 
                 contours = []
                 elevation_hints = []
@@ -9899,53 +10144,23 @@ with tab1:
                 for e in doc.modelspace():
                     _flatten_entity(e, elevation_hints, contours, entities_used, entities_skipped)
 
-                # ---- dedup titik persis sama (x,y,z) untuk hindari triangulasi degenerate ----
-                cleaned_contours = []
-                seen_global = set()
-                n_raw = 0
-                n_dup = 0
-                for c in contours:
-                    new_c = []
-                    for pt in c:
-                        n_raw += 1
-                        key = (round(pt[0], 4), round(pt[1], 4), round(pt[2], 4))
-                        if key in seen_global:
-                            n_dup += 1
-                            continue
-                        seen_global.add(key)
-                        new_c.append(pt)
-                    if new_c:
-                        cleaned_contours.append(new_c)
-
-                # ---- deteksi blunder: titik (x,y) sama tapi z beda jauh (indikasi error digitasi) ----
-                xy_to_z = {}
-                blunders = []
-                for c in cleaned_contours:
-                    for x, y, z in c:
-                        key = (round(x, 2), round(y, 2))
-                        if key in xy_to_z and abs(xy_to_z[key] - z) > 0.01:
-                            blunders.append((x, y, xy_to_z[key], z))
-                        else:
-                            xy_to_z[key] = z
-
-                # ---- densifikasi: sisipkan titik di sepanjang segmen polyline yang panjang ----
-                # (bukan cuma andalkan vertex) -- lihat docstring _densify_contour di atas.
-                # Ambang panjang segmen dihitung adaptif dari median panjang segmen ASLI data
-                # ini sendiri (bukan angka fixed), supaya menyesuaikan skala/kerapatan tiap DXF.
-                _seg_lens = []
-                for c in cleaned_contours:
-                    for i in range(1, len(c)):
-                        x0, y0, _ = c[i - 1]
-                        x1, y1, _ = c[i]
-                        _seg_lens.append(((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5)
-                _median_seg_len = float(np.median(_seg_lens)) if _seg_lens else 0.0
-                # segmen yang lebih dari ~2.5x median dianggap "jarang vertex" & perlu disisipi.
+                # ---- dedup + deteksi blunder + densifikasi (versi vektor numpy; hasil setara versi loop lama) ----
+                cleaned_contours, _cl = kl_clean(contours)
+                n_raw, n_dup = _cl["n_raw"], _cl["n_dup"]
+                _xyz_c, _off_c = kl_flatten(cleaned_contours)
+                if len(_xyz_c) > 1:
+                    _dseg = np.hypot(np.diff(_xyz_c[:, 0]), np.diff(_xyz_c[:, 1]))
+                    _inpoly = np.ones(len(_dseg), bool)
+                    _inpoly[(_off_c[1:-1] - 1)[(_off_c[1:-1] - 1) < len(_dseg)]] = False      # segmen antar-polyline bukan segmen asli
+                    _seg_lens = _dseg[_inpoly]
+                else:
+                    _seg_lens = np.zeros(0)
+                _median_seg_len = float(np.median(_seg_lens)) if len(_seg_lens) else 0.0
                 _densify_max_len = _median_seg_len * 2.5 if _median_seg_len > 0 else 0.0
-
-                n_points_before_densify = sum(len(c) for c in cleaned_contours)
-                if _densify_max_len > 0:
-                    cleaned_contours = [_densify_contour(c, _densify_max_len) for c in cleaned_contours]
-                n_points_added_densify = sum(len(c) for c in cleaned_contours) - n_points_before_densify
+                n_points_before_densify = len(_xyz_c)
+                n_points_added_densify = 0
+                if _densify_max_len > 0 and kl_densify_count(cleaned_contours, _densify_max_len) <= 3_000_000:
+                    cleaned_contours, n_points_added_densify = kl_densify(cleaned_contours, _densify_max_len)
 
                 diagnostics = {
                     "n_entities_used": entities_used,
@@ -9954,8 +10169,8 @@ with tab1:
                     "n_duplicate_points": n_dup,
                     "n_layer_elevation_fallback": len(elevation_hints),
                     "layer_elevation_hints": elevation_hints[:20],
-                    "n_blunder_points": len(blunders),
-                    "blunder_sample": blunders[:10],
+                    "n_blunder_points": _cl["n_blunder"],
+                    "blunder_sample": _cl["blunder_sample"],
                     "n_points_added_densify": n_points_added_densify,
                     "densify_max_seg_len": _densify_max_len,
                     "all_z_zero": all(
@@ -9966,6 +10181,56 @@ with tab1:
                 if return_diagnostics:
                     return cleaned_contours, diagnostics
                 return cleaned_contours
+
+            def read_contours(uploaded_dxf, return_diagnostics=False, opt="auto"):
+                """Kontur terkunci: isi file di-hash -> hasil parse+optimasi di-cache (tidak dibaca ulang tiap interaksi).
+                Menerima .dxf maupun .npz (kontur terkunci hasil unduhan). opt: auto|none|ringan|sedang|agresif."""
+                try:
+                    uploaded_dxf.seek(0)
+                    _raw = uploaded_dxf.read()
+                    uploaded_dxf.seek(0)
+                except Exception:
+                    return _read_contours_raw(uploaded_dxf, return_diagnostics)
+                _nm = str(getattr(uploaded_dxf, "name", "") or "").lower()
+                _is_npz = _nm.endswith(".npz")
+                _key = kl_key(_raw, "npz" if _is_npz else opt)
+                _hit = kl_cache_get(_key)
+                if _hit is None:
+                    with st.spinner(_t("Membaca & mengoptimasi kontur (sekali saja, lalu dikunci)…", "Reading & optimising the contour (once, then locked)…")):
+                        if _is_npz:
+                            _c, _meta = kl_unpack(_raw)
+                            _n = sum(len(c) for c in _c)
+                            _diag = {"n_entities_used": {"NPZ (kontur terkunci)": len(_c)}, "n_entities_skipped": {}, "n_raw_points": int(_meta.get("n_raw", _n)),
+                                     "n_duplicate_points": 0, "n_layer_elevation_fallback": 0, "layer_elevation_hints": [], "n_blunder_points": 0, "blunder_sample": [],
+                                     "n_points_added_densify": 0, "densify_max_seg_len": 0.0,
+                                     "all_z_zero": bool(_n == 0 or all(abs(p[2]) < 1e-9 for c in _c for p in c))}
+                            _info = dict(mode="npz terkunci", n_before=int(_meta.get("n_raw", _n)), n_after=_n, tol=float(_meta.get("tol", 0.0)), capped=False, from_lock=True)
+                        else:
+                            _c, _diag = _read_contours_raw(uploaded_dxf, True)
+                            _c, _info = kl_optimize(_c, opt)
+                            _info["from_lock"] = False
+                            _info["n_raw_points"] = int(_diag.get("n_raw_points", _info["n_before"]))
+                    _diag = dict(_diag); _diag["lock"] = _info
+                    _hit = dict(contours=_c, diag=_diag, info=_info, packed=None, src_name=_nm)
+                    kl_cache_put(_key, _hit)
+                if return_diagnostics:
+                    return _hit["contours"], _hit["diag"]
+                return _hit["contours"]
+
+            def _kl_packed_bytes(uploaded_dxf, opt):
+                """Bytes .npz kontur terkunci (dibuat sekali, disimpan di cache)."""
+                try:
+                    uploaded_dxf.seek(0); _raw = uploaded_dxf.read(); uploaded_dxf.seek(0)
+                    _nm = str(getattr(uploaded_dxf, "name", "") or "").lower()
+                    _hit = kl_cache_get(kl_key(_raw, "npz" if _nm.endswith(".npz") else opt))
+                    if _hit is None:
+                        return None
+                    if _hit["packed"] is None:
+                        _hit["packed"] = kl_pack(_hit["contours"], dict(n_raw=_hit["info"].get("n_raw_points", _hit["info"].get("n_before")), tol=_hit["info"].get("tol", 0.0),
+                                                                          mode=str(_hit["info"].get("mode")), source=_hit.get("src_name", "")))
+                    return _hit["packed"]
+                except Exception:
+                    return None
 
             def read_section_dxf(uploaded_dxf):
 
@@ -11626,7 +11891,19 @@ with tab1:
                         )
                         continue
 
-                    contours, contour_diag = read_contours(kontur_dxf, return_diagnostics=True)
+                    contours, contour_diag = read_contours(kontur_dxf, return_diagnostics=True, opt=st.session_state.get(f"kontur_opt_{sid}", "auto"))
+                    _kli = (contour_diag or {}).get("lock") or {}
+                    if _kli:
+                        _n0 = int(_kli.get("n_raw_points", _kli.get("n_before", 0))); _n1 = int(_kli.get("n_after", 0))
+                        st.caption(_t(f"🔒 Kontur terkunci: {_n0:,} → {_n1:,} titik" + (f" (toleransi {_kli.get('tol', 0):g} m)" if _kli.get("tol") else "")
+                                      + (" — dimuat dari file .npz" if _kli.get("from_lock") else "") + ". Tidak dibaca ulang saat Anda mengubah pengaturan.",
+                                      f"🔒 Contour locked: {_n0:,} → {_n1:,} points" + (f" (tolerance {_kli.get('tol', 0):g} m)" if _kli.get("tol") else "")
+                                      + (" — loaded from the .npz file" if _kli.get("from_lock") else "") + ". It is not re-read when you change settings."))
+                        if not _kli.get("from_lock"):
+                            _pk = _kl_packed_bytes(kontur_dxf, st.session_state.get(f"kontur_opt_{sid}", "auto"))
+                            if _pk:
+                                st.download_button(_t("Unduh kontur terkunci (.npz, kecil)", "Download locked contour (.npz, small)"), data=_pk,
+                                                   file_name=f"kontur_terkunci_{sid}.npz", mime="application/octet-stream", key=f"kontur_lock_dl_{sid}")
 
                     # ---- orthophoto (opsional) -- cache di session_state supaya tidak decode ulang tiap rerun ----
                     orthophoto_data = None
@@ -11641,19 +11918,10 @@ with tab1:
                                 orthophoto_data = _load_orthophoto(orthophoto_file)
                             st.session_state[_ortho_cache_key] = {"sig": _ortho_sig, "data": orthophoto_data}
 
-                    x_all = []
-                    y_all = []
-                    z_all = []
-
-                    for contour in contours:
-                        for x, y, z in contour:
-                            x_all.append(x)
-                            y_all.append(y)
-                            z_all.append(z)
-
-                    x_all = np.array(x_all)
-                    y_all = np.array(y_all)
-                    z_all = np.array(z_all)
+                    _xyz_all, _ = kl_flatten(contours)
+                    x_all = np.ascontiguousarray(_xyz_all[:, 0])
+                    y_all = np.ascontiguousarray(_xyz_all[:, 1])
+                    z_all = np.ascontiguousarray(_xyz_all[:, 2])
 
                     if len(x_all) < 10:
                         st.error(_t("Kontur tidak terbaca", "Contour could not be read"))
@@ -11823,7 +12091,7 @@ with tab1:
 
                     bbox_diag = float(np.hypot(x_all.max() - x_all.min(), y_all.max() - y_all.min()))
                     # target: sel grid kira-kira separuh dari jarak titik median (Nyquist-ish), dibatasi 150-1200 px
-                    _suggested_res = int(np.clip(bbox_diag / max(_median_spacing / 2, 1e-6), 150, 1200))
+                    _suggested_res = int(np.clip(bbox_diag / max(_median_spacing / 2, 1e-6), 150, 800))
 
                     with st.expander(f"Pengaturan surface (resolusi grid & smoothing) — {seg_label}", expanded=False):
                         grid_res = st.slider(
@@ -11832,6 +12100,9 @@ with tab1:
                             help="Disarankan otomatis berdasar kerapatan titik kontur asli. Naikkan untuk detail lebih "
                                  "tinggi (lebih lambat), turunkan jika terlalu berat."
                         )
+                        if grid_res >= 900:
+                            _ui_warning(_t(f"Grid {grid_res}×{grid_res} (~{grid_res * grid_res / 1e6:.1f} juta sel) sangat berat: triangulasi & 3D bisa kehabisan memori/waktu. Turunkan ke ≤ 800 untuk area luas.",
+                                           f"A {grid_res}×{grid_res} grid (~{grid_res * grid_res / 1e6:.1f} M cells) is very heavy: triangulation & 3D may run out of memory/time. Use ≤ 800 for large areas."))
                         smooth_sigma = st.slider(
                             _t("Smoothing permukaan (sigma gaussian)", "Surface smoothing (gaussian sigma)"), 0.0, 2.0, value=0.0, step=0.1,
                             key=f"smooth_sigma_{sid}",
@@ -11898,26 +12169,15 @@ with tab1:
                         # ikut mahal spt griddata/triangulasi di bawah -- hanya perlu dihitung ulang saat
                         # DEM-nya sendiri benar-benar dihitung ulang.
                         _dens_target = max(_median_spacing, 1e-3)
-                        _xd, _yd, _zd = [], [], []
-                        for _contour_d in contours:
-                            _n_cv = len(_contour_d)
-                            for _iv in range(_n_cv):
-                                _cx0, _cy0, _cz0 = _contour_d[_iv]
-                                _xd.append(_cx0); _yd.append(_cy0); _zd.append(_cz0)
-                                if _iv < _n_cv - 1:
-                                    _cx1, _cy1, _cz1 = _contour_d[_iv + 1]
-                                    _dseg = float(np.hypot(_cx1 - _cx0, _cy1 - _cy0))
-                                    if _dseg > _dens_target * 1.5:
-                                        _n_ins = int(_dseg / _dens_target)
-                                        for _ki in range(1, _n_ins):
-                                            _fr = _ki / _n_ins
-                                            _xd.append(_cx0 + _fr * (_cx1 - _cx0))
-                                            _yd.append(_cy0 + _fr * (_cy1 - _cy0))
-                                            _zd.append(_cz0 + _fr * (_cz1 - _cz0))
-                        if len(_xd) > len(x_all):
-                            x_all = np.array(_xd)
-                            y_all = np.array(_yd)
-                            z_all = np.array(_zd)
+                        # vektor + BATAS jumlah titik (>1,5 juta -> jarak sisip dinaikkan) supaya tidak meledak di area luas
+                        for _try in range(8):
+                            if len(x_all) + kl_densify_count(contours, _dens_target, legacy=True) <= 1_500_000:
+                                break
+                            _dens_target *= 2.0
+                        _cd, _nadd = kl_densify(contours, _dens_target, legacy=True)
+                        if _nadd > 0:
+                            _xd_all, _ = kl_flatten(_cd)
+                            x_all = np.ascontiguousarray(_xd_all[:, 0]); y_all = np.ascontiguousarray(_xd_all[:, 1]); z_all = np.ascontiguousarray(_xd_all[:, 2])
 
                         # ---- bersihkan titik blunder sebelum interpolasi/triangulasi ----
                         # SEBELUMNYA: dedup cuma di presisi 6 desimal (np.round(...,6)) -- untuk
@@ -11989,21 +12249,8 @@ with tab1:
                         tri = Delaunay(points)
 
                         # Filter triangle yang benar-benar berada di dalam boundary
-                        valid_triangles = []
-
-                        for simplex in tri.simplices:
-
-                            p1 = points[simplex[0]]
-                            p2 = points[simplex[1]]
-                            p3 = points[simplex[2]]
-
-                            cx = (p1[0] + p2[0] + p3[0]) / 3
-                            cy = (p1[1] + p2[1] + p3[1]) / 3
-
-                            if boundary.contains(Point(cx, cy)):
-                                valid_triangles.append(simplex)
-
-                        valid_triangles = np.array(valid_triangles)
+                        _cent = points[tri.simplices].mean(axis=1)
+                        valid_triangles = tri.simplices[vectorized.contains(boundary, _cent[:, 0], _cent[:, 1])]
 
                         surface_mask = inside.copy()
 
