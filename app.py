@@ -24380,7 +24380,73 @@ def _dump_show_result(R):
     _dump_section_ui(res, "single")
 
 
-def _dump_own_dxf_seg():
+def _dump_read_boundary(up):
+    """Baca boundary dari DXF: polyline tertutup -> polygon; bila tidak ada, garis/polyline terbuka dirangkai
+    (polygonize). Mengembalikan shapely polygon (union) atau None."""
+    import tempfile as _tf
+    import ezdxf as _ez
+    from shapely.geometry import Polygon as _Pg, LineString as _Ls
+    from shapely.ops import unary_union as _uu, polygonize as _pz
+    from shapely.validation import make_valid as _mv
+    with _tf.NamedTemporaryFile(delete=False, suffix=".dxf") as tmp:
+        tmp.write(up.getvalue())
+        path = tmp.name
+    doc = _ez.readfile(path)
+    polys, lines = [], []
+    def _walk(ents, depth=0):
+        for e in ents:
+            t = e.dxftype()
+            pts, closed = None, False
+            if t == "LWPOLYLINE":
+                pts = [(p[0], p[1]) for p in e.get_points()]; closed = bool(e.closed)
+            elif t == "POLYLINE":
+                try:
+                    pts = [(v.dxf.location.x, v.dxf.location.y) for v in e.vertices]; closed = bool(e.is_closed)
+                except Exception:
+                    pts = None
+            elif t == "LINE":
+                lines.append(_Ls([(e.dxf.start.x, e.dxf.start.y), (e.dxf.end.x, e.dxf.end.y)]))
+            elif t == "INSERT" and depth < 3:
+                try:
+                    _walk(e.virtual_entities(), depth + 1)
+                except Exception:
+                    pass
+            if pts and len(pts) >= 2:
+                if closed or (len(pts) >= 4 and np.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) < 1e-6):
+                    if len(pts) >= 3:
+                        try:
+                            pg = _Pg(pts)
+                            pg = pg if pg.is_valid else _mv(pg)
+                            if not pg.is_empty and pg.area > 0:
+                                polys.append(pg)
+                        except Exception:
+                            pass
+                else:
+                    lines.append(_Ls(pts))
+    _walk(doc.modelspace())
+    if not polys and lines:
+        try:
+            polys = [g for g in _pz(_uu(lines))]
+        except Exception:
+            polys = []
+    polys = [p for p in polys if p.geom_type in ("Polygon", "MultiPolygon") and not p.is_empty]
+    if not polys:
+        return None
+    return _uu(polys)
+
+
+def _dump_inside(boundary, X, Y):
+    """Mask titik (X,Y) di dalam boundary (vektor)."""
+    X = np.asarray(X, float); Y = np.asarray(Y, float)
+    try:
+        import shapely
+        return np.asarray(shapely.contains_xy(boundary, X, Y))
+    except Exception:
+        from shapely import vectorized as _vec
+        return np.asarray(_vec.contains(boundary, X, Y))
+
+
+def _dump_own_dxf_seg(need_boundary=False):
     """Sumber kontur MANDIRI untuk tab Simulasi Dumping: upload DXF/NPZ langsung di tab ini (tak bergantung
     pada Erosion Mapping). Dibangun grid DEM + boundary (selubung titik kontur)."""
     from scipy.interpolate import griddata
@@ -24403,12 +24469,36 @@ def _dump_own_dxf_seg():
     if len(pts) < 20:
         st.error(_t("Titik kontur terlalu sedikit.", "Too few contour points."))
         return None
+    ub = None
+    ub_poly = None
+    if need_boundary:
+        ub = st.file_uploader(_t("Upload boundary (DXF; polyline tertutup atau garis yang membentuk area)", "Upload boundary (DXF; closed polyline or lines forming an area)"),
+                              type=["dxf"], key="dsim_own_bnd",
+                              help=_t("Hanya kontur & desain di DALAM boundary ini yang dipakai/ditampilkan. Koordinat harus sama dengan DXF kontur.",
+                                      "Only contour & design INSIDE this boundary are used/shown. Coordinates must match the contour DXF."))
+        if ub is None:
+            _ui_info(_t("Upload DXF boundary untuk melanjutkan.", "Upload the boundary DXF to continue."))
+            return None
+        try:
+            ub_poly = _dump_read_boundary(ub)
+        except Exception as e:
+            st.error(_t(f"Gagal membaca boundary: {e}", f"Failed to read boundary: {e}"))
+            return None
+        if ub_poly is None:
+            st.error(_t("Tidak ditemukan polygon/garis tertutup di DXF boundary.", "No closed polygon/lines found in the boundary DXF."))
+            return None
+        _in0 = _dump_inside(ub_poly, pts[:, 0], pts[:, 1])
+        if int(_in0.sum()) < 20:
+            st.error(_t("Boundary tidak beririsan dengan kontur (cek sistem koordinat).", "The boundary does not overlap the contour (check the coordinate system)."))
+            return None
+        st.caption(_t(f"Boundary: luas {ub_poly.area:,.0f} m² · {100.0 * _in0.mean():.0f}% titik kontur ada di dalam.",
+                      f"Boundary: area {ub_poly.area:,.0f} m² · {100.0 * _in0.mean():.0f}% of contour points inside."))
     x0, x1, y0, y1 = pts[:, 0].min(), pts[:, 0].max(), pts[:, 1].min(), pts[:, 1].max()
     area = max((x1 - x0) * (y1 - y0), 1.0)
     res_auto = float(np.clip(np.sqrt(area / 90000.0), 0.5, 50.0))
     res = st.number_input(_t("Ukuran sel grid (m)", "Grid cell size (m)"), 0.25, 100.0, float(round(res_auto, 2)), 0.25, key="dsim_own_res",
                           help=_t("Makin kecil makin detail tapi lebih berat. Maks ~250 ribu sel.", "Smaller = more detail but heavier. Max ~250k cells."))
-    ck = (hash(up.getvalue()) if hasattr(up, "getvalue") else id(up), float(res))
+    ck = (hash(up.getvalue()) if hasattr(up, "getvalue") else id(up), float(res), hash(ub.getvalue()) if ub is not None else None)
     cache = st.session_state.get("_dsim_own_cache")
     if cache and cache[0] == ck:
         return cache[1]
@@ -24420,13 +24510,18 @@ def _dump_own_dxf_seg():
             _vec = None
         samp = pts[:: max(1, len(pts) // 20000)]
         mp = MultiPoint([(float(a), float(b)) for a, b, _ in samp])
-        try:
-            import shapely
-            bnd = shapely.concave_hull(mp, ratio=0.3)
-            if bnd.geom_type != "Polygon" or bnd.area < 0.2 * mp.convex_hull.area:
+        if ub_poly is not None:
+            bnd = ub_poly
+            bx0, by0, bx1, by1 = bnd.bounds
+            x0, x1, y0, y1 = max(x0, bx0), min(x1, bx1), max(y0, by0), min(y1, by1)
+        else:
+            try:
+                import shapely
+                bnd = shapely.concave_hull(mp, ratio=0.3)
+                if bnd.geom_type != "Polygon" or bnd.area < 0.2 * mp.convex_hull.area:
+                    bnd = mp.convex_hull
+            except Exception:
                 bnd = mp.convex_hull
-        except Exception:
-            bnd = mp.convex_hull
         r = float(res)
         while ((x1 - x0) / r + 1) * ((y1 - y0) / r + 1) > 250000:
             r *= 1.25
@@ -24434,12 +24529,13 @@ def _dump_own_dxf_seg():
         ys_ = np.arange(y0, y1 + r, r)
         GX, GY = np.meshgrid(xs_, ys_, indexing="ij")
         GZ = griddata(pts[:, :2], pts[:, 2], (GX, GY), method="linear")
-        if _vec is not None:
-            ins = _vec.contains(bnd, GX, GY)
-        else:
+        try:
+            ins = _dump_inside(bnd, GX, GY)
+        except Exception:
             ins = np.ones_like(GZ, bool)
         GZ = np.where(ins, GZ, np.nan)
-    seg = {"grid_x": GX, "grid_y": GY, "grid_z": GZ, "boundary": bnd, "label": getattr(up, "name", "DXF"), "own_dxf": True}
+    seg = {"grid_x": GX, "grid_y": GY, "grid_z": GZ, "boundary": bnd, "label": getattr(up, "name", "DXF"), "own_dxf": True,
+           "own_boundary": ub_poly is not None}
     st.session_state["_dsim_own_cache"] = (ck, seg)
     return seg
 
@@ -24465,11 +24561,12 @@ def _dump_sim_tab():
     except Exception as e:
         st.error(_t(f"Modul simulasi dumping gagal dimuat: {e}", f"Dump simulation module failed to load: {e}"))
         return
-    _src_mode = st.radio(_t("Sumber kontur", "Contour source"), ["seg", "dxf"], horizontal=True, key="dsim_srcmode",
+    _src_mode = st.radio(_t("Sumber kontur", "Contour source"), ["seg", "dxf", "dxfb"], horizontal=True, key="dsim_srcmode",
                          format_func=lambda c: _t("Segmen dari Erosion Mapping", "Segment from Erosion Mapping") if c == "seg"
-                         else _t("Upload DXF sendiri (tab ini)", "Upload own DXF (this tab)"))
-    if _src_mode == "dxf":
-        _own = _dump_own_dxf_seg()
+                         else (_t("Upload DXF sendiri (tab ini)", "Upload own DXF (this tab)") if c == "dxf"
+                               else _t("Upload DXF + boundary sendiri", "Upload own DXF + boundary")))
+    if _src_mode in ("dxf", "dxfb"):
+        _own = _dump_own_dxf_seg(need_boundary=(_src_mode == "dxfb"))
         if _own is None:
             return
         segs = {"dxf_own": _own}
@@ -24959,6 +25056,17 @@ def _dump_stage_ui(dsm, dsc, seg, sid, segs, xs, ys, z, zmin, zmax, sub_mode=Fal
             st.error(_t(f"Berkas desain gagal dibaca: {e}", f"Could not read the design file: {e}"))
             return
     dinfo, fn = cache["info"], cache["fn"]
+    _bnd_clip = seg.get("boundary")
+    if _bnd_clip is not None:
+        _clip_on = st.checkbox(_t("Tampilkan/pakai desain hanya di dalam boundary", "Show/use the design only inside the boundary"),
+                               value=bool(seg.get("own_boundary", False)), key=K + "_clip_design",
+                               help=_t("Bagian desain di luar boundary diabaikan (tidak masuk volume, jadwal, maupun tampilan 3D).",
+                                       "Design outside the boundary is ignored (not in volume, schedule or the 3D view)."))
+        if _clip_on:
+            _fn0 = fn
+            def fn(X, Y, _f=_fn0, _b=_bnd_clip):
+                _Z = np.asarray(_f(X, Y), float)
+                return np.where(_dump_inside(_b, X, Y), _Z, np.nan)
     st.caption(_t(f"Terbaca {dinfo['n_pts']:,} titik · elevasi {dinfo['zmin']:.2f} – {dinfo['zmax']:.2f} m · X {dinfo['bbox'][0]:.0f}…{dinfo['bbox'][1]:.0f} · Y {dinfo['bbox'][2]:.0f}…{dinfo['bbox'][3]:.0f}.",
                   f"Read {dinfo['n_pts']:,} points · elevation {dinfo['zmin']:.2f} – {dinfo['zmax']:.2f} m · X {dinfo['bbox'][0]:.0f}…{dinfo['bbox'][1]:.0f} · Y {dinfo['bbox'][2]:.0f}…{dinfo['bbox'][3]:.0f}."))
     b = dinfo["bbox"]
