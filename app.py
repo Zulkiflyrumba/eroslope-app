@@ -22647,7 +22647,7 @@ def default_access(dom, zd, mask):
     return float(dom["X"][i]), float(dom["Y"][j])
 
 
-def design_domain(xs, ys, z, zd_fn, n_target=96, margin_m=25.0, max_half_m=600.0, thr=0.10):
+def design_domain(xs, ys, z, zd_fn, n_target=96, margin_m=25.0, max_half_m=600.0, thr=0.10, full_extent=None, levels=None):
     """Domain persegi yang memuat seluruh footprint timbunan (zd - z0 > thr) + margin. zd_fn(X,Y) -> permukaan desain (NaN di luar)."""
     from scipy.ndimage import map_coordinates
     xs = np.asarray(xs, float); ys = np.asarray(ys, float)
@@ -22660,10 +22660,31 @@ def design_domain(xs, ys, z, zd_fn, n_target=96, margin_m=25.0, max_half_m=600.0
     if not m.any():
         return None
     x0, x1, y0, y1 = Xc[m].min(), Xc[m].max(), Yc[m].min(), Yc[m].max()
+    if full_extent is not None:
+        # jendela mencakup seluruh area (boundary/DEM), bukan hanya footprint timbunan
+        x0, x1, y0, y1 = [float(v) for v in full_extent]
+    elif levels:
+        # sertakan SELURUH kolam air/lumpur (cekungan di bawah muka air/lumpur yang terhubung ke footprint),
+        # supaya air/lumpur tidak 'meluap' hanya karena tepi jendela memotong kolam.
+        zs = z[::sx, ::sy]
+        zf = np.where(m, zs, np.inf)
+        k = int(np.argmin(zf)); seed = (float(Xc.flat[k]), float(Yc.flat[k]))
+        for lv in levels:
+            if lv is None:
+                continue
+            try:
+                bb = pond_bbox(xs, ys, z, float(lv), seed, radius_m=max(30.0, 2.0 * float(sx) * float(xs[1] - xs[0])))
+            except Exception:
+                bb = None
+            if bb is not None:
+                x0, x1, y0, y1 = min(x0, bb[0]), max(x1, bb[1]), min(y0, bb[2]), max(y1, bb[3])
     cx, cy = 0.5 * (x0 + x1), 0.5 * (y0 + y1)
-    half = min(float(max_half_m), 0.5 * max(x1 - x0, y1 - y0) + float(margin_m))
+    half_need = 0.5 * max(x1 - x0, y1 - y0) + float(margin_m)
+    half = min(float(max_half_m), half_need)
     half = max(half, 30.0)
-    dom = prepare_domain(xs, ys, z, (cx, cy), half_m=half, n_target=n_target)
+    dom = prepare_domain(xs, ys, z, (cx, cy), half_m=half, n_target=n_target, max_half_m=float(max_half_m))
+    dom["window_clipped"] = bool(half_need > float(max_half_m) + 1e-6)
+    dom["window_need_half"] = float(half_need)
     dom["zd"] = zd_fn(dom["X"][:, None] * np.ones((1, dom["ny"])), dom["Y"][None, :] * np.ones((dom["nx"], 1)))
     return dom
 
@@ -25181,8 +25202,35 @@ def _dump_stage_ui(dsm, dsc, seg, sid, segs, xs, ys, z, zmin, zmax, sub_mode=Fal
     sc1, sc2, sc3 = st.columns(3)
     lift_h = sc1.number_input(_t("Tinggi lift (m)", "Lift height (m)"), 0.5, 30.0, float(min(max(round((zhi - zfp) / 3.0, 1), 1.0), 10.0)), 0.5, key="dsim_s_lift")
     bpl = sc2.number_input(_t("Blok per lift", "Blocks per lift"), 1, 12, 4, 1, key="dsim_s_bpl")
-    grid_n = sc3.selectbox(_t("Resolusi grid", "Grid resolution"), [64, 80, 96], index=1, key="dsim_s_grid",
-                           format_func=lambda n: {64: _t("Cepat (64)", "Fast (64)"), 80: _t("Normal (80)", "Normal (80)"), 96: _t("Halus (96, lambat)", "Fine (96, slow)")}[n])
+    grid_n = sc3.selectbox(_t("Resolusi grid", "Grid resolution"), [64, 80, 96, 128], index=1, key="dsim_s_grid",
+                           format_func=lambda n: {64: _t("Cepat (64)", "Fast (64)"), 80: _t("Normal (80)", "Normal (80)"), 96: _t("Halus (96, lambat)", "Fine (96, slow)"), 128: _t("Sangat halus (128, lambat sekali)", "Very fine (128, very slow)")}[n])
+    with st.expander(_t("Jendela tampilan simulasi (seberapa luas area yang ditampilkan)", "Simulation window (how much area is shown)")):
+        st.caption(_t("Secara default jendela = footprint timbunan desain + margin, berbentuk persegi, dan dibatasi setengah-lebar maksimum. "
+                      "Area boundary di luar jendela tidak ikut disimulasikan/ditampilkan. Jendela lebih luas = sel grid lebih kasar (jumlah sel tetap), "
+                      "jadi naikkan resolusi grid bila perlu.",
+                      "By default the window = design fill footprint + margin, square, limited by the maximum half-width. Boundary area outside "
+                      "the window is not simulated/shown. A wider window = coarser grid cells (fixed cell count), so raise the grid resolution if needed."))
+        wc1, wc2, wc3 = st.columns(3)
+        win_pond = st.checkbox(_t("Sertakan seluruh kolam air/lumpur di jendela (disarankan)", "Include the whole water/mud pond in the window (recommended)"),
+                               value=True, key="dsim_s_winpond",
+                               help=_t("Kalau jendela memotong kolam, air/lumpur tampak 'meluap' di tepi jendela padahal di lapangan masih tertampung. "
+                                       "Opsi ini melebarkan jendela sampai seluruh kolam masuk.",
+                                       "If the window cuts through the pond, water/mud appears to 'overflow' at the window edge though it is still contained in reality. "
+                                       "This widens the window until the whole pond fits."))
+        win_full = wc1.checkbox(_t("Perluas ke seluruh boundary/DEM", "Extend to the whole boundary/DEM"), value=False, key="dsim_s_winfull")
+        win_margin = wc2.number_input(_t("Margin di luar footprint (m)", "Margin beyond footprint (m)"), 0.0, 2000.0, 25.0, 5.0, key="dsim_s_winmargin")
+        win_half = wc3.number_input(_t("Setengah-lebar maks. (m)", "Max half-width (m)"), 100.0, 3000.0, 400.0, 50.0, key="dsim_s_winhalf",
+                                    help=_t("Batas atas ukuran jendela (lebar total = 2 × nilai ini).", "Upper limit of the window size (total width = 2 × this value)."))
+        _fin_ix = np.where(np.isfinite(z).any(axis=1))[0]; _fin_iy = np.where(np.isfinite(z).any(axis=0))[0]
+        _full_ext = (float(xs[_fin_ix[0]]), float(xs[_fin_ix[-1]]), float(ys[_fin_iy[0]]), float(ys[_fin_iy[-1]])) if (len(_fin_ix) and len(_fin_iy)) else None
+        if win_full and _full_ext is not None:
+            _wh = 0.5 * max(_full_ext[1] - _full_ext[0], _full_ext[3] - _full_ext[2]) + float(win_margin)
+            st.caption(_t(f"Jendela penuh ≈ {2 * _wh:,.0f} m per sisi; dengan grid {grid_n} sel ≈ {2 * _wh / grid_n:.1f} m/sel.",
+                          f"Full window ≈ {2 * _wh:,.0f} m per side; with a {grid_n}-cell grid ≈ {2 * _wh / grid_n:.1f} m/cell."))
+            if 2 * _wh / grid_n > 15:
+                st.warning(_t("Sel > 15 m: detail timbunan/lumpur kasar. Pertimbangkan grid 128 atau jendela lebih kecil.", "Cells > 15 m: coarse fill/mud detail. Consider grid 128 or a smaller window."))
+    _win_kw = dict(margin_m=float(win_margin), max_half_m=(max(float(win_half), 0.5 * max(_full_ext[1] - _full_ext[0], _full_ext[3] - _full_ext[2]) + float(win_margin)) if (win_full and _full_ext) else float(win_half)),
+                   full_extent=(_full_ext if win_full else None), levels=([lw, lm] if win_pond else None))
     am = st.radio(_t("Titik akses haul road (tempat truk masuk)", "Haul road access point"), ["auto", "manual"], horizontal=True, key="dsim_s_am",
                   format_func=lambda c: _t("Otomatis (tepi footprint tertinggi)", "Automatic (highest footprint edge)") if c == "auto" else _t("Manual (koordinat lokal)", "Manual (local coordinates)"))
     access = None
@@ -25308,7 +25356,7 @@ def _dump_stage_ui(dsm, dsc, seg, sid, segs, xs, ys, z, zmin, zmax, sub_mode=Fal
             gtd = st.number_input(_t("Target hari menuju U = 90 %", "Target days to U = 90 %"), 5.0, 2000.0, 90.0, 5.0, key="dsub_gtd")
             if st.button(_t("Hitung perbandingan", "Compare layouts"), key="dsub_cmp"):
                 try:
-                    dom_c = dsm.design_domain(xs, ys, z, fn, n_target=int(grid_n))
+                    dom_c = dsm.design_domain(xs, ys, z, fn, n_target=int(grid_n), **_win_kw)
                     hm_c, hw_c, pond_c = dsm.init_pond(dom_c, lw, lm)
                     pp_c = dsm.pour_point(dom_c, pond_c)
                     oxy = sub["outlet_xy"] or (pp_c["xy"] if pp_c else None)
@@ -25334,9 +25382,16 @@ def _dump_stage_ui(dsm, dsc, seg, sid, segs, xs, ys, z, zmin, zmax, sub_mode=Fal
     if run:
         pb = st.progress(0.0, text=_t("Menyiapkan domain & permukaan desain…", "Preparing the domain & design surface…"))
         try:
-            dom = dsm.design_domain(xs, ys, z, fn, n_target=int(grid_n))
+            dom = dsm.design_domain(xs, ys, z, fn, n_target=int(grid_n), **_win_kw)
             if dom is None:
                 raise ValueError(_t("Footprint timbunan tidak ditemukan.", "Fill footprint not found."))
+            if dom.get("window_clipped"):
+                st.warning(_t(f"Kolam/footprint butuh setengah-lebar ≈ {dom['window_need_half']:,.0f} m, tapi jendela dibatasi {float(win_half):,.0f} m. "
+                              "Air/lumpur yang tampak meluap di tepi jendela bisa jadi hanya karena jendela terpotong -- naikkan 'Setengah-lebar maks.' "
+                              "(dan grid) lalu jalankan ulang.",
+                              f"The pond/footprint needs a half-width ≈ {dom['window_need_half']:,.0f} m but the window is limited to {float(win_half):,.0f} m. "
+                              "Water/mud that seems to overflow at the window edge may only be because the window is cut -- raise 'Max half-width' "
+                              "(and the grid) and run again."))
             pb.progress(0.02, text=_t("Menjalankan simulasi tahapan (±1–4 menit)…", "Running the staged simulation (about 1–4 min)…"))
             res = dsm.run_staged(
                 dom, mats, sel_all, fleet, unit, level_w=lw, level_m=lm, mud=dict(rho=float(mud_rho), tau_y=float(mud_ty), manning=float(mud_n)), access_xy=access,
