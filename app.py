@@ -10331,57 +10331,59 @@ with tab1:
                 return _lokal_to_utm_xy(gx, gy)
 
             @st.cache_data(show_spinner=False, ttl=3600)
-            def _fetch_satellite_basemap_utm(utm_extent, out_size=1024, pad_frac=0.06):
-                """Ambil citra satelit terbaru (Esri World Imagery, gratis tanpa API key) untuk
-                bounding box UTM tertentu, lewat REST 'export' ArcGIS -- request-nya sudah minta
-                bboxSR & imageSR = UTM Zone 50S langsung, jadi hasilnya SUDAH georeferenced pas di
-                extent UTM yang diminta (tidak perlu reprojection manual lagi di sisi kita).
-
-                utm_extent: (xmin, xmax, ymin, ymax) dalam meter UTM.
-                Return dict {"rgb":..., "extent":...} -- format sama seperti _load_orthophoto()
-                supaya bisa dipakai lewat kode overlay yang sama.
-                """
+            def _fetch_satellite_basemap_utm_cached(utm_extent, out_size=1024, pad_frac=0.06):
+                """Ambil citra Esri World Imagery (UTM langsung, tanpa API key). SENGAJA melempar exception bila
+                gagal supaya kegagalan TIDAK ikut tersimpan di cache (dulu hasil None tersangkut 1 jam).
+                Mencoba ukuran bertahap (2048 -> 1280 -> 1024 -> 640 px) + retry, dan tidak meminta resolusi
+                lebih halus dari ~0.3 m/piksel (citra Esri tidak lebih rinci; permintaan terlalu halus bisa 500)."""
+                import time as _time
                 xmin, xmax, ymin, ymax = utm_extent
                 pad_x = (xmax - xmin) * pad_frac
                 pad_y = (ymax - ymin) * pad_frac
                 xmin, xmax = xmin - pad_x, xmax + pad_x
                 ymin, ymax = ymin - pad_y, ymax + pad_y
-
                 aspect = (xmax - xmin) / max(ymax - ymin, 1e-6)
-                if aspect >= 1:
-                    w = out_size
-                    h = max(64, int(out_size / aspect))
-                else:
-                    h = out_size
-                    w = max(64, int(out_size * aspect))
-
                 epsg_code = _COORD_UTM_EPSG.split(":")[1]
-                url = (
-                    "https://services.arcgisonline.com/arcgis/rest/services/"
-                    "World_Imagery/MapServer/export"
-                )
-                params = {
-                    "bbox": f"{xmin},{ymin},{xmax},{ymax}",
-                    "bboxSR": epsg_code,
-                    "imageSR": epsg_code,
-                    "size": f"{w},{h}",
-                    "format": "png32",
-                    "transparent": "false",
-                    "f": "image",
-                }
+                url = "https://services.arcgisonline.com/arcgis/rest/services/World_Imagery/MapServer/export"
+                long_m = max(xmax - xmin, ymax - ymin, 1.0)
+                last_err = None
+                tried = set()
+                for sz in (out_size, 1280, 1024, 640):
+                    sz = int(min(sz, out_size, max(256, long_m / 0.3)))
+                    if sz in tried:
+                        continue
+                    tried.add(sz)
+                    if aspect >= 1:
+                        w, h = sz, max(64, int(round(sz / aspect)))
+                    else:
+                        h, w = sz, max(64, int(round(sz * aspect)))
+                    params = {"bbox": f"{xmin},{ymin},{xmax},{ymax}", "bboxSR": epsg_code, "imageSR": epsg_code,
+                              "size": f"{w},{h}", "format": "jpg", "transparent": "false", "f": "image"}
+                    for attempt in range(2):
+                        try:
+                            resp = requests.get(url, params=params, timeout=40)
+                            resp.raise_for_status()
+                            if "image" not in resp.headers.get("Content-Type", "image"):
+                                raise RuntimeError("respons bukan gambar: " + resp.text[:120])
+                            img = PILImage.open(io.BytesIO(resp.content)).convert("RGB")
+                            return {"rgb": np.array(img), "extent": (xmin, xmax, ymin, ymax)}
+                        except Exception as e:
+                            last_err = e
+                            _time.sleep(0.8)
+                raise RuntimeError(str(last_err))
+
+            def _fetch_satellite_basemap_utm(utm_extent, out_size=1024, pad_frac=0.06):
                 try:
-                    resp = requests.get(url, params=params, timeout=30)
-                    resp.raise_for_status()
-                    img = PILImage.open(io.BytesIO(resp.content)).convert("RGB")
-                    rgb = np.array(img)
-                    return {"rgb": rgb, "extent": (xmin, xmax, ymin, ymax)}
+                    return _fetch_satellite_basemap_utm_cached(tuple(float(v) for v in utm_extent), out_size=out_size, pad_frac=pad_frac)
                 except Exception as e:
                     st.error(
                         f"Gagal mengambil citra satelit online (Esri World Imagery): {e}. "
-                        "Cek koneksi internet server, atau domain "
-                        "'services.arcgisonline.com' mungkin diblokir jaringan/firewall."
+                        "Sudah dicoba beberapa ukuran gambar. Cek koneksi internet server, atau domain "
+                        "'services.arcgisonline.com' mungkin diblokir jaringan/firewall; coba lagi beberapa saat."
                     )
                     return None
+
+            _fetch_satellite_basemap_utm.clear = _fetch_satellite_basemap_utm_cached.clear
 
             def _load_orthophoto(uploaded_ortho):
                 """Baca orthophoto georeferenced (ECW/GeoTIFF/JP2) via rasterio dan kembalikan
