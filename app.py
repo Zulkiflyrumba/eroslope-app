@@ -9128,11 +9128,12 @@ _tab_labels = [
     _t("Beban Unit & Tegangan", "Unit Load & Stress"),
     _t("Ketahanan Sekatan", "Bund Resistance"),
     _t("Mud Pocket", "Mud Pocket"),
+    _t("Domain Bench", "Bench Domains"),
 ]
 
 # Tab "Monitoring Deviation" dihapus dari aplikasi (semua role). Tab 1 = induk Erosion Mapping;
 # sub-tab (Cross Section ... Back Analysis) muncul saat induk diklik (JS+CSS di bawah).
-tab1, tab8, tab7, tab6, tab9, tab4, tab2, tab5, tabD, tabE, tabF, tabG = st.tabs(_tab_labels)
+tab1, tab8, tab7, tab6, tab9, tab4, tab2, tab5, tabD, tabE, tabF, tabG, tabH = st.tabs(_tab_labels)
 tab3 = None
 
 _NAV_ICONS = [
@@ -9148,6 +9149,7 @@ _NAV_ICONS = [
     "M12 3v13M7 11l5 5 5-5M4 21h16",
     "M12 3l8 3v6c0 5-4 8-8 9-4-1-8-4-8-9V6l8-3z",
     "M3 8h18M5 8v5a7 7 0 0 0 14 0V8M8 14c1.5-1 2.5 1 4 0s2.5 1 4 0",
+    "M3 20h5v-4h5v-4h5V8h3M3 20v1M21 8V4",
 ]
 try:
     import json as _json_nav
@@ -24469,12 +24471,12 @@ def _dump_inside(boundary, X, Y):
         return np.asarray(_vec.contains(boundary, X, Y))
 
 
-def _dump_own_dxf_seg(need_boundary=False):
+def _dump_own_dxf_seg(need_boundary=False, kp="dsim"):
     """Sumber kontur MANDIRI untuk tab Simulasi Dumping: upload DXF/NPZ langsung di tab ini (tak bergantung
     pada Erosion Mapping). Dibangun grid DEM + boundary (selubung titik kontur)."""
     from scipy.interpolate import griddata
     up = st.file_uploader(_t("Upload DXF kontur (khusus tab ini; .dxf atau .npz terkunci)", "Upload contour DXF (this tab only; .dxf or locked .npz)"),
-                          type=["dxf", "npz"], key="dsim_own_dxf")
+                          type=["dxf", "npz"], key=kp + "_own_dxf")
     if up is None:
         _ui_info(_t("Upload DXF kontur lokasi dumping. Boundary otomatis = selubung titik kontur (cekungan konkaf).",
                     "Upload the dump-site contour DXF. Boundary is automatic = envelope of the contour points (concave)."))
@@ -24496,7 +24498,7 @@ def _dump_own_dxf_seg(need_boundary=False):
     ub_poly = None
     if need_boundary:
         ub = st.file_uploader(_t("Upload boundary (DXF; polyline tertutup atau garis yang membentuk area)", "Upload boundary (DXF; closed polyline or lines forming an area)"),
-                              type=["dxf"], key="dsim_own_bnd",
+                              type=["dxf"], key=kp + "_own_bnd",
                               help=_t("Hanya kontur & desain di DALAM boundary ini yang dipakai/ditampilkan. Koordinat harus sama dengan DXF kontur.",
                                       "Only contour & design INSIDE this boundary are used/shown. Coordinates must match the contour DXF."))
         if ub is None:
@@ -24519,10 +24521,10 @@ def _dump_own_dxf_seg(need_boundary=False):
     x0, x1, y0, y1 = pts[:, 0].min(), pts[:, 0].max(), pts[:, 1].min(), pts[:, 1].max()
     area = max((x1 - x0) * (y1 - y0), 1.0)
     res_auto = float(np.clip(np.sqrt(area / 90000.0), 0.5, 50.0))
-    res = st.number_input(_t("Ukuran sel grid (m)", "Grid cell size (m)"), 0.25, 100.0, float(round(res_auto, 2)), 0.25, key="dsim_own_res",
+    res = st.number_input(_t("Ukuran sel grid (m)", "Grid cell size (m)"), 0.25, 100.0, float(round(res_auto, 2)), 0.25, key=kp + "_own_res",
                           help=_t("Makin kecil makin detail tapi lebih berat. Maks ~250 ribu sel.", "Smaller = more detail but heavier. Max ~250k cells."))
     ck = (hash(up.getvalue()) if hasattr(up, "getvalue") else id(up), float(res), hash(ub.getvalue()) if ub is not None else None)
-    cache = st.session_state.get("_dsim_own_cache")
+    cache = st.session_state.get("_" + kp + "_own_cache")
     if cache and cache[0] == ck:
         return cache[1]
     with st.spinner(_t("Membangun grid DEM dari DXF…", "Building DEM grid from DXF…")):
@@ -24559,7 +24561,7 @@ def _dump_own_dxf_seg(need_boundary=False):
         GZ = np.where(ins, GZ, np.nan)
     seg = {"grid_x": GX, "grid_y": GY, "grid_z": GZ, "boundary": bnd, "label": getattr(up, "name", "DXF"), "own_dxf": True,
            "own_boundary": ub_poly is not None}
-    st.session_state["_dsim_own_cache"] = (ck, seg)
+    st.session_state["_" + kp + "_own_cache"] = (ck, seg)
     return seg
 
 
@@ -26562,6 +26564,139 @@ def prepare(xs, ys, z, zd_fn, n_target=130, margin_m=30.0, min_body=0.10):
     return dict(X=X, Y=Y, dx=float(h), z0=z0, zd=zdn, body=bodyn, nx=len(X), ny=len(Y))
 
 
+# ---------------------------------------------------------------- sambungkan ujung sekatan ke kontur (dinding)
+def extend_to_contour(xs, ys, z, zd_fn, max_ext=60.0, embed=3.0, min_body=0.10, tol=0.05, max_cells=450, min_comp_frac=0.15):
+    """Tarik kedua ujung sekatan sepanjang sumbunya (elevasi puncak tetap, penampang SAMA dgn ujung desain: lebar puncak & lereng)
+    sampai seluruh lebar puncak masuk ke dinding kontur (z0 >= puncak), lalu tanam 'embed' m. Maks. 'max_ext' m per ujung.
+    Mengembalikan (zd_fn2, info_list). info: dict(comp, end, status('tersambung'|'diperpanjang'|'belum'|'data habis'), ext, zc, p0, p1)."""
+    from scipy import ndimage as ndi
+    from scipy.interpolate import RegularGridInterpolator
+    xs = np.asarray(xs, float); ys = np.asarray(ys, float); z = np.asarray(z, float)
+    sx, sy = max(1, int(math.ceil(len(xs) / max_cells))), max(1, int(math.ceil(len(ys) / max_cells)))
+    Xc, Yc = np.meshgrid(xs[::sx], ys[::sy], indexing="ij")
+    zc_ = z[::sx, ::sy]
+    zdc = np.asarray(zd_fn(Xc, Yc), float)
+    body = np.isfinite(zdc) & np.isfinite(zc_) & ((zdc - zc_) > min_body)
+    if body.sum() < 6:
+        return zd_fn, []
+    h = float(max(abs(xs[1] - xs[0]) * sx, abs(ys[1] - ys[0]) * sy))
+    lab, n = ndi.label(body, structure=np.ones((3, 3)))
+    sizes = ndi.sum(body, lab, index=np.arange(1, n + 1))
+    keep = [i + 1 for i, sz in enumerate(sizes) if sz >= max(6, min_comp_frac * sizes.max())]
+    itp = RegularGridInterpolator((xs, ys), z, bounds_error=False, fill_value=np.nan)
+
+    def z0_at(X, Y):
+        return itp(np.stack([np.ravel(X), np.ravel(Y)], axis=1)).reshape(np.shape(X))
+
+    exts, info = [], []
+    for ci, cid in enumerate(keep):
+        m = lab == cid
+        P = np.stack([Xc[m], Yc[m]], axis=1)
+        c0 = P.mean(axis=0)
+        w, v = np.linalg.eigh(np.cov((P - c0).T))
+        a = v[:, 1]
+        cv = np.array([-a[1], a[0]])
+        t_all = (P - c0) @ a
+        L = float(t_all.max() - t_all.min())
+        for end in (+1, -1):
+            tt = t_all * end
+            te = float(tt.max())
+            Lb = max(4.0 * h, min(0.3 * L, 60.0))
+            inb = tt >= te - Lb
+            sb = (P[inb] - c0) @ cv
+            # lattice penampang di pita ujung (hanya nilai desain yang valid)
+            ds = max(h * 0.5, 0.25)
+            s_lat = np.arange(sb.min() - 40.0, sb.max() + 40.0 + 1e-9, ds)
+            t_lat = np.arange(te - Lb, te + 40.0 + 1e-9, max(ds, Lb / 12.0))
+            TT, SS = np.meshgrid(t_lat, s_lat, indexing="ij")
+            Xw = c0[0] + end * TT * a[0] + SS * cv[0]
+            Yw = c0[1] + end * TT * a[1] + SS * cv[1]
+            zdv = np.asarray(zd_fn(Xw, Yw), float)
+            ok = np.isfinite(zdv)
+            if ok.sum() < 5:
+                continue
+            zmat = np.where(ok, zdv, np.nan)
+            with np.errstate(all="ignore"):
+                m_t = np.nanmax(zmat, axis=1)           # puncak per irisan t
+            if not np.isfinite(m_t).any():
+                continue
+            zc = float(np.nanmax(m_t))
+            full = np.isfinite(m_t) & (m_t >= zc - 0.15)
+            t_full = float(t_lat[full].max())          # irisan terakhir yang penampangnya penuh (sebelum ujung meruncing)
+            with np.errstate(all="ignore"):
+                env = np.nanmedian(zmat[full], axis=0)
+            fin = np.isfinite(env)
+            if fin.sum() < 3:
+                continue
+            crest_bins = fin & (env >= zc - 0.15)
+            if not crest_bins.any():
+                continue
+            scr = s_lat[crest_bins]
+            sc, wl, wr = 0.5 * (scr.min() + scr.max()), 0.5 * (scr.max() - scr.min()), 0.5 * (scr.max() - scr.min())
+            s_f, e_f = s_lat[fin], env[fin]
+            # kemiringan ekstrapolasi sisi kiri/kanan (dz/ds), minimal 0.15 supaya tidak melandai tak hingga
+            def _slope(side):
+                sel = (s_f > scr.max()) if side > 0 else (s_f < scr.min())
+                if sel.sum() >= 3:
+                    k = np.polyfit(s_f[sel][:12] if side > 0 else s_f[sel][-12:], e_f[sel][:12] if side > 0 else e_f[sel][-12:], 1)[0]
+                    return max(abs(float(k)), 0.15)
+                return 0.5
+            sl_r, sl_l = _slope(+1), _slope(-1)
+
+            def prof(sv, _sf=s_f, _ef=e_f, _zc=zc, _sc=sc, _hw=wl, _slr=sl_r, _sll=sl_l):
+                sv = np.asarray(sv, float)
+                val = np.interp(sv, _sf, _ef)
+                right = _ef[-1] - _slr * np.maximum(sv - _sf[-1], 0.0)
+                left = _ef[0] - _sll * np.maximum(_sf[0] - sv, 0.0)
+                val = np.where(sv > _sf[-1], right, np.where(sv < _sf[0], left, val))
+                return np.minimum(val, _zc)
+
+            # tarik sampai seluruh lebar puncak tertanam di dinding
+            step = max(h * 0.5, 0.25)
+            ss = np.linspace(sc - wl, sc + wr, 9)
+            status, t_seal = "belum", None
+            k = 0
+            while k * step <= max_ext + 1e-9:
+                tk = t_full + k * step
+                Xs = c0[0] + end * tk * a[0] + ss * cv[0]
+                Ys = c0[1] + end * tk * a[1] + ss * cv[1]
+                zz = z0_at(Xs, Ys)
+                if np.any(~np.isfinite(zz)):
+                    status, t_seal = "data habis", tk
+                    break
+                if np.all(zz >= zc - tol):
+                    status, t_seal = ("tersambung" if k == 0 else "diperpanjang"), tk
+                    break
+                k += 1
+            if t_seal is None:
+                t_seal = t_full + max_ext
+            t_end = t_seal + (embed if status in ("tersambung", "diperpanjang") else 0.0)
+            te = t_full
+            if status == "tersambung":
+                t_end = te        # sudah menempel: tidak perlu menambah
+            exts.append(dict(c0=c0, a=a, cv=cv, end=end, te=te, t_end=t_end, sc=sc, hw=wl, prof=prof, lat=100.0))
+            info.append(dict(comp=ci + 1, end=("+" if end > 0 else "-"), status=status, ext=float(max(t_end - te, 0.0)), zc=zc,
+                             p0=(float(c0[0] + end * te * a[0] + sc * cv[0]), float(c0[1] + end * te * a[1] + sc * cv[1])),
+                             p1=(float(c0[0] + end * t_end * a[0] + sc * cv[0]), float(c0[1] + end * t_end * a[1] + sc * cv[1])),
+                             sc=float(sc), hw=float(wl)))
+
+    def fn2(X, Y):
+        X = np.asarray(X, float); Y = np.asarray(Y, float)
+        out = np.asarray(zd_fn(X, Y), float)
+        for e in exts:
+            if e["t_end"] <= e["te"] + 1e-9:
+                continue
+            dx, dy = X - e["c0"][0], Y - e["c0"][1]
+            tq = (dx * e["a"][0] + dy * e["a"][1]) * e["end"]
+            sq = dx * e["cv"][0] + dy * e["cv"][1]
+            msk = (tq > e["te"] - 1e-9) & (tq <= e["t_end"]) & (np.abs(sq - e["sc"]) <= e["hw"] + e["lat"])
+            if msk.any():
+                val = e["prof"](sq - 0.0)
+                out = np.where(msk, np.fmax(out, val), out)
+        return out
+    return fn2, info
+
+
 def _flood(allowed, seed):
     from scipy import ndimage as ndi
     lab, n = ndi.label(allowed)
@@ -27574,6 +27709,66 @@ def _bund_tab():
         su = c3.number_input(_t("Lereng sisi kolam (H:V)", "Pond-side slope (H:V)"), 0.5, 6.0, 2.0, 0.25, key="bd_su")
         sd = c4.number_input(_t("Lereng sisi hilir (H:V)", "Downstream slope (H:V)"), 0.5, 6.0, 2.0, 0.25, key="bd_sd")
         zd_fn = bd.bund_surface_fn(axl, crest_z=float(crest_z), crest_w=float(cw), slope_up=float(su), slope_dn=float(sd))
+
+    # ---------------- 2b. sambungkan ujung sekatan ke kontur dinding
+    with st.expander(_t("Sambungkan ujung kiri-kanan sekatan ke kontur (dinding)", "Tie the left/right bund ends into the contour (walls)"), expanded=False):
+        st.caption(_t("Bila desain berhenti sebelum menyentuh dinding kontur (sering di bench/elevasi atas), ujungnya ditarik lurus mengikuti sumbu sekatan dengan "
+                      "elevasi puncak, lebar puncak & kemiringan lereng yang SAMA dengan ujung desain, sampai seluruh lebar puncak masuk ke dinding, lalu ditanam beberapa meter. "
+                      "Hanya diperpanjang secukupnya (batas maks. per sisi di bawah); desain Anda tidak diubah selain di ujung.",
+                      "If the design stops before touching the contour wall (common on upper benches), each end is extended straight along the bund axis with the SAME crest "
+                      "elevation, crest width and side slopes as the design end, until the full crest width is inside the wall, then keyed in a few metres. "
+                      "Only extended as needed (max per side below); the design is otherwise unchanged."))
+        ec1, ec2, ec3 = st.columns(3)
+        ext_on = ec1.checkbox(_t("Sambungkan ujung ke kontur", "Tie ends into the contour"), value=False, key="bd_ext_on")
+        ext_max = ec2.number_input(_t("Tarik maks. per sisi (m)", "Max extension per side (m)"), 1.0, 500.0, 60.0, 5.0, key="bd_ext_max")
+        ext_emb = ec3.number_input(_t("Tanam ke dinding (m)", "Key into wall (m)"), 0.0, 30.0, 3.0, 0.5, key="bd_ext_emb")
+        try:
+            _fn_ext, _ext_info = bd.extend_to_contour(xs, ys, z, zd_fn, max_ext=float(ext_max), embed=float(ext_emb))
+        except Exception as _e_ext:
+            _fn_ext, _ext_info = zd_fn, []
+            st.warning(_t(f"Analisis ujung gagal: {_e_ext}", f"End analysis failed: {_e_ext}"))
+        _lbl = {"tersambung": _t("sudah menyentuh kontur", "already touching the contour"), "diperpanjang": _t("perlu ditarik", "needs extension"),
+                "belum": _t("belum sampai dinding (naikkan batas tarik)", "wall not reached (raise the limit)"),
+                "data habis": _t("kontur berakhir (data habis) sebelum dinding", "contour data ends before the wall")}
+        if _ext_info:
+            _gaps = [i for i in _ext_info if i["status"] != "tersambung"]
+            st.dataframe(pd.DataFrame([{_t("Bagian", "Part"): i["comp"], _t("Ujung", "End"): i["end"], _t("Status", "Status"): _lbl.get(i["status"], i["status"]),
+                                        _t("Tambahan (m)", "Added (m)"): round(i["ext"], 1), _t("Elevasi puncak (m)", "Crest elev (m)"): round(i["zc"], 2)} for i in _ext_info]),
+                         hide_index=True, width="stretch")
+            if _gaps and not ext_on:
+                st.info(_t(f"Terdeteksi {len(_gaps)} ujung yang belum menyentuh kontur. Centang 'Sambungkan ujung ke kontur' untuk menyambungkan.",
+                           f"{len(_gaps)} end(s) not yet touching the contour. Tick 'Tie ends into the contour' to connect them."))
+            if any(i["status"] in ("belum", "data habis") for i in _ext_info):
+                st.warning(_t("Ada ujung yang tetap tidak sampai dinding (batas tarik atau data kontur habis). Naikkan batas tarik, atau perluas DXF kontur kolam.",
+                              "Some ends still do not reach the wall (extension limit or contour data ends). Raise the limit or extend the pond contour DXF."))
+            try:
+                _sx_, _sy_ = max(1, len(xs) // 200), max(1, len(ys) // 200)
+                _gx, _gy = np.meshgrid(xs[::_sx_], ys[::_sy_], indexing="ij")
+                _z_ = z[::_sx_, ::_sy_]
+                _z0b, _z1b = np.asarray(zd_fn(_gx, _gy), float), np.asarray(_fn_ext(_gx, _gy), float)
+                _b0 = np.isfinite(_z0b) & ((_z0b - _z_) > 0.10)
+                _b1 = np.isfinite(_z1b) & ((_z1b - _z_) > 0.10)
+                _fg = go.Figure()
+                _fg.add_trace(go.Contour(x=xs[::_sx_], y=ys[::_sy_], z=_z_.T, ncontours=24, colorscale="Greys", showscale=False, line=dict(width=0.6),
+                                         contours=dict(coloring="none"), hoverinfo="skip", name=_t("Kontur", "Contour")))
+                _fg.add_trace(go.Heatmap(x=xs[::_sx_], y=ys[::_sy_], z=np.where(_b0, 1.0, np.nan).T, colorscale=[[0, "#3b82f6"], [1, "#3b82f6"]], showscale=False,
+                                         opacity=0.85, hoverinfo="skip", name=_t("Desain asli", "Original design")))
+                _add = _b1 & ~_b0
+                if _add.any():
+                    _fg.add_trace(go.Heatmap(x=xs[::_sx_], y=ys[::_sy_], z=np.where(_add, 1.0, np.nan).T, colorscale=[[0, "#ef4444"], [1, "#ef4444"]], showscale=False,
+                                             opacity=0.9, hoverinfo="skip", name=_t("Tambahan sambungan", "Added tie-in")))
+                _fg.update_layout(height=380, margin=dict(l=10, r=10, t=10, b=10), yaxis=dict(scaleanchor="x", scaleratio=1), showlegend=False)
+                st.plotly_chart(_fg, width="stretch")
+                st.caption(_t("Biru = badan sekatan desain asli; merah = tambahan sambungan ke kontur.", "Blue = original bund body; red = added tie-in to the contour."))
+            except Exception:
+                pass
+        else:
+            st.caption(_t("Ujung sekatan tidak dapat dianalisis (badan sekatan terlalu kecil).", "Bund ends could not be analysed (bund body too small)."))
+        if ext_on and _ext_info:
+            zd_fn = _fn_ext
+            _tot = sum(i["ext"] for i in _ext_info)
+            st.success(_t(f"Sambungan aktif: total tambahan ±{_tot:,.0f} m (semua ujung). Dipakai di seluruh analisis di bawah.",
+                          f"Tie-in active: total added ±{_tot:,.0f} m (all ends). Used in all analyses below."))
 
     # ---------------- 3. isi kolam
     mode = st.radio(_t("Jenis analisis", "Analysis type"), ["force", "seep"], horizontal=True, key="bd_mode",
@@ -29559,6 +29754,429 @@ def _mudpocket_tab():
 
 with tabG:
     _mudpocket_tab()
+
+
+# =========================================================
+# ====== MODUL: DOMAIN BENCH (klasifikasi tinggi single bench dari kontur / desain) =====
+# =========================================================
+_BCH_PALETTE = ["#22c55e", "#a3e635", "#eab308", "#f97316", "#ef4444", "#a855f7", "#7f1d1d"]
+
+
+def _bch_fill_nearest(z):
+    from scipy import ndimage as ndi
+    bad = ~np.isfinite(z)
+    if not bad.any():
+        return z
+    idx = ndi.distance_transform_edt(bad, return_distances=False, return_indices=True)
+    return z[tuple(idx)]
+
+
+def _bch_shift(a, di, dj, fill):
+    """Geser array 2D (tanpa wrap): hasil[i,j] = a[i+di, j+dj]; sel di luar = fill."""
+    out = np.full_like(a, fill)
+    ni, nj = a.shape
+    i0, i1 = max(0, -di), min(ni, ni - di)
+    j0, j1 = max(0, -dj), min(nj, nj - dj)
+    if i1 > i0 and j1 > j0:
+        out[i0:i1, j0:j1] = a[i0 + di:i1 + di, j0 + dj:j1 + dj]
+    return out
+
+
+def _bch_propagate(z, mask, up, gx, gy, dx, dy, max_iter=400):
+    """Elevasi puncak (up=True) / kaki (up=False) lokal tiap sel muka bench: rambatkan nilai dari sel yang LEBIH TINGGI (atau lebih rendah)
+    di dalam mask (8 tetangga) sampai konvergen. Hasil = crest/toe di sepanjang jalur kemiringan yang sama (bukan seluruh komponen)."""
+    cur = np.where(mask, z, np.nan)
+    nb = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+    for _ in range(max_iter):
+        new = cur.copy()
+        for di, dj in nb:
+            nv = _bch_shift(cur, di, dj, np.nan)
+            nz = _bch_shift(z, di, dj, np.nan)
+            # hanya bergerak SEARAH kemiringan (sudut < ~60° terhadap garis lereng) supaya tidak merambat menyusur strike
+            stp = np.hypot(di * dx, dj * dy)
+            dot = (di * dx * gx + dj * dy * gy) / (np.hypot(gx, gy) * stp + 1e-12)
+            okdir = (dot >= 0.5) if up else (dot <= -0.5)
+            ok = np.isfinite(nv) & mask & okdir & ((nz >= z - 1e-6) if up else (nz <= z + 1e-6))
+            cand = np.where(ok, nv, np.nan)
+            with np.errstate(all="ignore"):
+                new = np.fmax(new, cand) if up else np.fmin(new, cand)
+        if np.array_equal(np.nan_to_num(new, nan=-9e9), np.nan_to_num(cur, nan=-9e9)):
+            break
+        cur = new
+    return cur
+
+
+def _bch_jenks(vals, k, nbin=160):
+    """Natural breaks (Jenks) 1D pada nilai 'vals'. Return (batas atas k-1 kelas ..., GVF)."""
+    v = np.sort(np.asarray(vals, float))
+    if v.size < k + 1:
+        return [], 0.0
+    qs = np.unique(np.quantile(v, np.linspace(0, 1, min(nbin, v.size) + 1)))
+    cnt, edges = np.histogram(v, bins=qs) if len(qs) > 2 else (np.array([v.size]), qs)
+    mid = 0.5 * (edges[1:] + edges[:-1])
+    w = cnt.astype(float)
+    keep = w > 0
+    mid, w = mid[keep], w[keep]
+    n = len(mid)
+    if n <= k:
+        return [float(x) for x in mid[:-1]], 1.0
+    cw, cwx, cwx2 = np.cumsum(w), np.cumsum(w * mid), np.cumsum(w * mid * mid)
+
+    def ssd(i, j):  # kelas dari i..j inklusif
+        W = cw[j] - (cw[i - 1] if i > 0 else 0.0)
+        X = cwx[j] - (cwx[i - 1] if i > 0 else 0.0)
+        X2 = cwx2[j] - (cwx2[i - 1] if i > 0 else 0.0)
+        return X2 - X * X / max(W, 1e-12)
+    D = np.full((k + 1, n), np.inf)
+    B = np.zeros((k + 1, n), int)
+    for j in range(n):
+        D[1, j] = ssd(0, j)
+    for c in range(2, k + 1):
+        for j in range(c - 1, n):
+            best, bi = np.inf, c - 1
+            for i in range(c - 1, j + 1):
+                val = D[c - 1, i - 1] + ssd(i, j)
+                if val < best:
+                    best, bi = val, i
+            D[c, j], B[c, j] = best, bi
+    brk, j = [], n - 1
+    for c in range(k, 1, -1):
+        i = B[c, j]
+        brk.append(float(0.5 * (mid[i - 1] + mid[i])))
+        j = i - 1
+    brk = sorted(brk)
+    sdam = ssd(0, n - 1)
+    gvf = float(1.0 - D[k, n - 1] / max(sdam, 1e-12))
+    return brk, gvf
+
+
+def _bch_analyze(xs, ys, z, face_min_deg=40.0, smooth_cells=1.0, min_area_m2=40.0, min_h=3.0, closing=1):
+    """Deteksi muka bench (lereng curam) dari DEM lalu hitung tinggi lokal tiap sel muka (crest - toe sepanjang jalur kemiringan).
+    Return dict(face[bool], H[float, nan di luar muka], crest, toe, slope, valid, dx, dy, labels, n_comp)."""
+    from scipy import ndimage as ndi
+    xs = np.asarray(xs, float); ys = np.asarray(ys, float); z = np.asarray(z, float)
+    valid = np.isfinite(z)
+    zf = _bch_fill_nearest(z)
+    dx, dy = float(abs(xs[1] - xs[0])), float(abs(ys[1] - ys[0]))
+    zs = ndi.gaussian_filter(zf, smooth_cells) if smooth_cells > 0 else zf
+    gx, gy = np.gradient(zs, dx, dy)
+    slope = np.degrees(np.arctan(np.hypot(gx, gy)))
+    face = valid & (slope >= face_min_deg)
+    if closing > 0:
+        face = ndi.binary_closing(face, structure=np.ones((3, 3)), iterations=int(closing)) & valid
+    lab, n = ndi.label(face, structure=np.ones((3, 3)))
+    if n:
+        areas = ndi.sum(face, lab, index=np.arange(1, n + 1)) * dx * dy
+        drop = np.isin(lab, np.nonzero(areas < min_area_m2)[0] + 1)
+        face &= ~drop
+    md = ndi.binary_dilation(face, structure=np.ones((3, 3)), iterations=1) & valid
+    crest = _bch_propagate(zf, md, True, gx, gy, dx, dy)      # elevasi asli (tak dihaluskan) supaya tinggi tidak terpangkas
+    toe = _bch_propagate(zf, md, False, gx, gy, dx, dy)
+    H = np.where(face, crest - toe, np.nan)
+    face &= np.isfinite(H) & (H >= min_h)
+    H = np.where(face, H, np.nan)
+    lab, n = ndi.label(face, structure=np.ones((3, 3)))
+    return dict(face=face, H=H, crest=np.where(face, crest, np.nan), toe=np.where(face, toe, np.nan), slope=slope, valid=valid,
+                dx=dx, dy=dy, labels=lab, n_comp=int(n), zs=zs)
+
+
+def _bch_classify(H, face, thresholds=None, auto=False, k_auto=None, max_k=6):
+    """Kelas tiap sel: 0 = bukan muka bench; 1..K = kelas tinggi (naik). Return (cls[int], breaks[list], names[list], gvf)."""
+    vals = H[face]
+    if vals.size == 0:
+        return np.zeros(H.shape, int), [], [], 0.0
+    gvf = None
+    if auto:
+        if k_auto:
+            brk, gvf = _bch_jenks(vals, int(k_auto))
+        else:
+            brk, gvf = [], 0.0
+            for k in range(2, max_k + 1):
+                brk, gvf = _bch_jenks(vals, k)
+                if gvf >= 0.88:
+                    break
+    else:
+        brk = sorted(float(t) for t in thresholds)
+    cls = np.zeros(H.shape, int)
+    cls[face] = 1 + np.searchsorted(np.asarray(brk), H[face], side="right") if brk else 1
+    names = []
+    edges = [None] + list(brk) + [None]
+    for i in range(len(brk) + 1):
+        lo, hi = edges[i], edges[i + 1]
+        names.append(f"≤ {hi:.1f} m" if lo is None else (f"> {lo:.1f} m" if hi is None else f"{lo:.1f} – {hi:.1f} m"))
+    return cls, [float(b) for b in brk], names, gvf
+
+
+def _bch_class_colors(K, manual_over=None):
+    if K <= 1:
+        return [_BCH_PALETTE[0]]
+    if K == 2:
+        return [_BCH_PALETTE[0], _BCH_PALETTE[4]]
+    pal = np.linspace(0, len(_BCH_PALETTE) - 1, K)
+    return [_BCH_PALETTE[int(round(p))] for p in pal]
+
+
+def _bch_domains(cls, xs, ys, H, crest, slope, dx, dy, names, min_cells=4):
+    """Domain = komponen terhubung dari tiap kelas. Return DataFrame ringkasan + label array."""
+    from scipy import ndimage as ndi
+    rows, lab_all = [], np.zeros(cls.shape, int)
+    nid = 0
+    X, Y = np.meshgrid(xs, ys, indexing="ij")
+    for c in range(1, int(cls.max()) + 1):
+        lab, n = ndi.label(cls == c, structure=np.ones((3, 3)))
+        for i in range(1, n + 1):
+            m = lab == i
+            if m.sum() < min_cells:
+                continue
+            nid += 1
+            lab_all[m] = nid
+            h = H[m]
+            rows.append(dict(ID=nid, Kelas=names[c - 1], Tinggi_rata_m=round(float(np.nanmean(h)), 2), Tinggi_maks_m=round(float(np.nanmax(h)), 2),
+                             Elev_crest_m=round(float(np.nanmedian(crest[m])), 2), Sudut_rata_deg=round(float(np.nanmean(slope[m])), 1),
+                             Luas_muka_m2=round(float(m.sum() * dx * dy), 0), X=round(float(X[m].mean()), 1), Y=round(float(Y[m].mean()), 1)))
+    return pd.DataFrame(rows), lab_all
+
+
+def _bch_hillshade(xs, ys, z, az=315.0, alt=40.0):
+    dx, dy = float(abs(xs[1] - xs[0])), float(abs(ys[1] - ys[0]))
+    gx, gy = np.gradient(_bch_fill_nearest(z), dx, dy)
+    sl, asp = np.arctan(np.hypot(gx, gy)), np.arctan2(-gx, gy)
+    azr, altr = np.radians(360.0 - az + 90.0), np.radians(alt)
+    hs = np.sin(altr) * np.cos(sl) + np.cos(altr) * np.sin(sl) * np.cos(azr - asp)
+    return np.clip(hs, 0, 1)
+
+
+def _bch_dxf(xs, ys, cls, names, colors_hex):
+    """DXF garis tepi domain tiap kelas (layer BENCH_<kelas>) via contourpy -- koordinat sama dengan input."""
+    import ezdxf, contourpy, io as _io
+    doc = ezdxf.new("R2010")
+    msp = doc.modelspace()
+    for c in range(1, len(names) + 1):
+        m = (cls == c).astype(float)
+        if not m.any():
+            continue
+        lay = "BENCH_" + "".join(ch if ch.isalnum() else "_" for ch in names[c - 1])
+        try:
+            doc.layers.add(lay, color=min(250, 1 + 40 * c))
+        except Exception:
+            pass
+        gen = contourpy.contour_generator(np.asarray(xs, float), np.asarray(ys, float), np.pad(m, 1).T[1:-1, 1:-1].T if False else m.T)
+        for ln in gen.lines(0.5):
+            if len(ln) >= 3:
+                msp.add_lwpolyline([(float(a), float(b)) for a, b in ln], dxfattribs={"layer": lay})
+    buf = _io.StringIO()
+    doc.write(buf)
+    return buf.getvalue().encode("utf-8")
+
+
+def _bench_tab():
+    _sub_header(_t("Domain Bench: Klasifikasi Tinggi Single Bench", "Bench Domains: Single-Bench Height Classification"))
+    st.caption(_t(
+        "Unggah kontur (atau kontur + desain). Aplikasi mendeteksi muka bench (lereng curam), mengukur tinggi tiap muka (crest − toe di sepanjang jalur kemiringan), "
+        "lalu memetakan domain: mana yang melebihi batas tinggi single bench (mis. 16 m) -- atau klasifikasi OTOMATIS ke kelompok tinggi alami tanpa input angka.",
+        "Upload the contour (or contour + design). The app detects bench faces (steep slopes), measures each face height (crest − toe along the slope path), then maps domains: "
+        "which exceed a single-bench height limit (e.g. 16 m) -- or classifies AUTOMATICALLY into natural height groups with no input number."))
+    _ui_warning(_t(
+        "Hasil bergantung pada resolusi & kualitas kontur: kontur yang diinterpolasi membuat muka tampak lebih landai/bergerigi dan tinggi bisa meleset beberapa desimeter hingga meter. "
+        "Bench ganda/tanpa berm tampak sebagai muka tinggi (> batas) -- itulah yang ditandai. Bukan pengganti survei point-cloud (mis. Maptek PointStudio) atau audit desain resmi.",
+        "Results depend on contour resolution/quality: interpolated contours make faces look gentler/jagged and heights can be off by decimetres to metres. "
+        "Double benches / benches without a berm appear as tall faces (> limit) -- that is what is flagged. Not a substitute for a point-cloud survey (e.g. Maptek PointStudio) or an official design audit."))
+
+    # ---------------- 1. sumber permukaan
+    _sub_header(_t("1. Data permukaan", "1. Surface data"))
+    src = st.radio(_t("Sumber kontur", "Contour source"), ["dxf", "dxfb", "seg"], horizontal=True, key="bch_src",
+                   format_func=lambda c: {"dxf": _t("Upload DXF kontur", "Upload contour DXF"), "dxfb": _t("Upload DXF kontur + boundary", "Upload contour DXF + boundary"),
+                                          "seg": _t("Segmen Erosion Mapping", "Erosion Mapping segment")}[c])
+    if src in ("dxf", "dxfb"):
+        seg = _dump_own_dxf_seg(need_boundary=(src == "dxfb"), kp="bch")
+        if seg is None:
+            return
+    else:
+        segs = st.session_state.get("segment_results", {})
+        if not segs:
+            _ui_info(_t("Belum ada hasil RUN ANALYSIS tersimpan -- unggah DXF kontur.", "No saved RUN ANALYSIS yet -- upload a contour DXF."))
+            return
+        sids = list(segs.keys())
+        sid = st.selectbox(_t("Segmen", "Segment"), sids, format_func=lambda s: segs[s].get("label", s), key="bch_seg")
+        seg = segs[sid]
+    if seg.get("grid_x") is None or seg.get("grid_z") is None:
+        st.error(_t("Grid elevasi tidak tersedia.", "Elevation grid not available."))
+        return
+    gx_, gy_, gz_ = np.asarray(seg["grid_x"], float), np.asarray(seg["grid_y"], float), np.asarray(seg["grid_z"], float)
+    xs, ys, z0 = gx_[:, 0], gy_[0, :], gz_
+    if not np.isfinite(z0).any():
+        st.error(_t("Grid elevasi kosong.", "Empty elevation grid."))
+        return
+    use_design = st.checkbox(_t("Tambahkan data desain (DXF/CSV)", "Add design data (DXF/CSV)"), value=False, key="bch_use_design")
+    surf_mode = "exist"
+    zd_grid = None
+    if use_design:
+        fdz = st.file_uploader(_t("Berkas desain (DXF kontur/3DFACE/titik atau CSV X,Y,Z; koordinat sama)", "Design file (DXF contours/3DFACE/points or CSV X,Y,Z; same coordinates)"),
+                               type=["dxf", "csv", "txt", "xyz"], key="bch_design_file")
+        if fdz is not None:
+            try:
+                dsm_, _dsc = _dump_load_modules()
+                ck = ("bchd", fdz.name, fdz.size)
+                if st.session_state.get("bch_design_ck") != ck:
+                    P_, _inf = dsm_.parse_design_file(fdz.name, fdz.getvalue())
+                    st.session_state["bch_design_ck"] = ck
+                    st.session_state["bch_design_fn"] = dsm_.make_design_fn(P_)
+                fnd = st.session_state["bch_design_fn"]
+                GXg, GYg = np.meshgrid(xs, ys, indexing="ij")
+                zd_grid = np.asarray(fnd(GXg, GYg), float)
+                zd_grid = np.where(np.isfinite(z0), zd_grid, np.nan)
+                n_cov = int(np.isfinite(zd_grid).sum())
+                if n_cov < 20:
+                    st.error(_t("Desain tidak beririsan dengan kontur (cek sistem koordinat) / di luar boundary.", "The design does not overlap the contour (check coordinates) / is outside the boundary."))
+                    zd_grid = None
+                else:
+                    st.caption(_t(f"Desain menutup {100.0 * n_cov / max(int(np.isfinite(z0).sum()), 1):.0f}% area kontur.", f"Design covers {100.0 * n_cov / max(int(np.isfinite(z0).sum()), 1):.0f}% of the contour area."))
+            except Exception as e:
+                st.error(_t(f"Berkas desain gagal dibaca: {e}", f"Could not read the design file: {e}"))
+        if zd_grid is not None:
+            surf_mode = st.radio(_t("Permukaan yang dianalisis", "Surface to analyse"), ["exist", "merge", "both"], horizontal=True, key="bch_surf",
+                                 format_func=lambda c: {"exist": _t("Kontur eksisting saja", "Existing contour only"),
+                                                        "merge": _t("Gabungan (desain menimpa kontur di area desain)", "Merged (design overrides contour in the design area)"),
+                                                        "both": _t("Bandingkan eksisting vs gabungan", "Compare existing vs merged")}[c])
+    surfaces = {"exist": z0}
+    if zd_grid is not None and surf_mode in ("merge", "both"):
+        surfaces["merge"] = np.where(np.isfinite(zd_grid), zd_grid, z0)
+    if surf_mode == "merge":
+        surfaces = {"merge": surfaces["merge"]}
+
+    # ---------------- 2. parameter
+    _sub_header(_t("2. Klasifikasi tinggi bench", "2. Bench height classification"))
+    cm = st.radio(_t("Cara klasifikasi", "Classification method"), ["manual", "auto"], horizontal=True, key="bch_mode",
+                  format_func=lambda c: _t("Manual: batas tinggi single bench saya", "Manual: my single-bench height limit") if c == "manual"
+                  else _t("Otomatis: kelompok tinggi alami (tanpa input angka)", "Automatic: natural height groups (no number needed)"))
+    thr, k_auto = [], None
+    if cm == "manual":
+        mc1, mc2 = st.columns([1, 2])
+        thr1 = mc1.number_input(_t("Batas tinggi single bench (m)", "Single-bench height limit (m)"), 2.0, 100.0, 16.0, 0.5, key="bch_thr")
+        extra = mc2.text_input(_t("Batas tambahan (opsional, pisahkan koma)", "Extra limits (optional, comma-separated)"), "", key="bch_thr_extra",
+                               help=_t("Mis. '8, 24' => kelas ≤8, 8–16, 16–24, >24 bersama batas utama.", "E.g. '8, 24' => classes ≤8, 8–16, 16–24, >24 together with the main limit."))
+        thr = [float(thr1)]
+        try:
+            thr += [float(v) for v in extra.replace(";", ",").split(",") if v.strip()]
+        except Exception:
+            st.warning(_t("Batas tambahan tidak valid -- diabaikan.", "Invalid extra limits -- ignored."))
+        thr = sorted(set(thr))
+    else:
+        kk = st.selectbox(_t("Jumlah kelompok", "Number of groups"), ["auto", 2, 3, 4, 5, 6], key="bch_k",
+                          format_func=lambda v: _t("Otomatis (disarankan)", "Automatic (recommended)") if v == "auto" else str(v))
+        k_auto = None if kk == "auto" else int(kk)
+    with st.expander(_t("Pengaturan deteksi muka bench", "Bench face detection settings")):
+        d1, d2, d3, d4 = st.columns(4)
+        face_deg = d1.number_input(_t("Sudut minimum muka (°)", "Minimum face angle (°)"), 15.0, 85.0, 40.0, 1.0, key="bch_face_deg",
+                                   help=_t("Sel dengan kemiringan ≥ ini dianggap muka bench. Kontur terinterpolasi biasanya lebih landai dari sudut desain; turunkan bila muka tidak terdeteksi.",
+                                           "Cells steeper than this count as bench face. Interpolated contours are usually gentler than the design angle; lower it if faces are missed."))
+        min_h = d2.number_input(_t("Tinggi muka minimum (m)", "Minimum face height (m)"), 0.5, 20.0, 3.0, 0.5, key="bch_min_h")
+        min_a = d3.number_input(_t("Luas muka minimum (m²)", "Minimum face area (m²)"), 5.0, 5000.0, 40.0, 5.0, key="bch_min_a")
+        smo = d4.number_input(_t("Haluskan DEM (sel)", "Smooth DEM (cells)"), 0.0, 5.0, 1.0, 0.5, key="bch_smooth")
+
+    # ---------------- 3. analisis
+    for key, zz in surfaces.items():
+        title = {"exist": _t("Kontur eksisting", "Existing contour"), "merge": _t("Gabungan kontur + desain", "Merged contour + design")}[key]
+        if len(surfaces) > 1 or zd_grid is not None:
+            _sub_header(title)
+        sx_ = max(1, int(np.ceil(np.sqrt(np.isfinite(zz).sum() / 300000.0))))
+        xa, ya, za = xs[::sx_], ys[::sx_], zz[::sx_, ::sx_]
+        sig = (key, za.shape, float(np.nanmean(za)), float(face_deg), float(min_h), float(min_a), float(smo), cm, tuple(thr), k_auto)
+        ckey = f"bch_res_{key}"
+        cached = st.session_state.get(ckey)
+        if cached and cached[0] == sig:
+            A, cls, brk, names, gvf, dom, lab = cached[1]
+        else:
+            with st.spinner(_t("Menganalisis muka bench…", "Analysing bench faces…")):
+                try:
+                    A = _bch_analyze(xa, ya, za, face_min_deg=float(face_deg), smooth_cells=float(smo), min_area_m2=float(min_a), min_h=float(min_h))
+                    cls, brk, names, gvf = _bch_classify(A["H"], A["face"], thresholds=thr, auto=(cm == "auto"), k_auto=k_auto)
+                    dom, lab = _bch_domains(cls, xa, ya, A["H"], A["crest"], A["slope"], A["dx"], A["dy"], names) if len(names) else (pd.DataFrame(), np.zeros(cls.shape, int))
+                except Exception as e:
+                    st.error(_t(f"Analisis gagal: {e}", f"Analysis failed: {e}"))
+                    continue
+            st.session_state[ckey] = (sig, (A, cls, brk, names, gvf, dom, lab))
+        if not A["face"].any():
+            st.warning(_t("Tidak ada muka bench terdeteksi. Turunkan 'Sudut minimum muka' atau 'Tinggi muka minimum' di pengaturan deteksi.",
+                          "No bench face detected. Lower 'Minimum face angle' or 'Minimum face height' in the detection settings."))
+            continue
+        K = len(names)
+        colors = _bch_class_colors(K)
+        Hf = A["H"][A["face"]]
+        cell_a = A["dx"] * A["dy"]
+        tot_face = float(A["face"].sum() * cell_a)
+        m1, m2, m3, m4 = st.columns(4)
+        _metric_card(_t("Muka bench terdeteksi", "Bench faces detected"), f"{A['n_comp']:,}", container=m1)
+        _metric_card(_t("Tinggi muka (median / maks)", "Face height (median / max)"), f"{np.median(Hf):.1f} / {Hf.max():.1f} m", container=m2)
+        if cm == "manual":
+            over = float(((Hf > thr[0]).sum()) * cell_a)
+            _metric_card(_t(f"Luas muka > {thr[0]:g} m", f"Face area > {thr[0]:g} m"), f"{over:,.0f} m² ({100 * over / max(tot_face, 1):.0f}%)", container=m3)
+            nd = int((dom["Kelas"] == names[-1]).sum()) if len(dom) else 0
+            _metric_card(_t(f"Domain kelas tertinggi", "Domains of top class"), f"{nd}", container=m4)
+        else:
+            _metric_card(_t("Kelompok alami", "Natural groups"), f"{K}", container=m3)
+            _metric_card(_t("Kualitas pemisahan (GVF)", "Separation quality (GVF)"), f"{gvf:.2f}" if gvf is not None else "-", container=m4,
+                         help_text=_t("Mendekati 1 = kelompok sangat terpisah.", "Close to 1 = well separated groups."))
+        # peta denah
+        hs = _bch_hillshade(xa, ya, za)
+        cdisp = max(1, int(np.ceil(max(len(xa), len(ya)) / 600.0)))
+        xd, yd = xa[::cdisp], ya[::cdisp]
+        fig = go.Figure()
+        fig.add_trace(go.Heatmap(x=xd, y=yd, z=np.where(A["valid"], hs, np.nan)[::cdisp, ::cdisp].T, colorscale="Greys", showscale=False, hoverinfo="skip", zmin=0, zmax=1))
+        for c in range(1, K + 1):
+            mm = np.where(cls == c, 1.0, np.nan)
+            fig.add_trace(go.Heatmap(x=xd, y=yd, z=mm[::cdisp, ::cdisp].T, colorscale=[[0, colors[c - 1]], [1, colors[c - 1]]], showscale=False, opacity=0.9,
+                                     hovertemplate="X %{x:.0f}<br>Y %{y:.0f}<extra>" + names[c - 1] + "</extra>", name=names[c - 1]))
+            fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers", marker=dict(size=12, color=colors[c - 1], symbol="square"), name=names[c - 1]))
+        fig.update_layout(height=520, margin=dict(l=10, r=10, t=10, b=10), yaxis=dict(scaleanchor="x", scaleratio=1), legend=dict(orientation="h", y=-0.08))
+        st.plotly_chart(fig, width="stretch")
+        # 3D
+        with st.expander(_t("Tampilan 3D (domain berwarna di atas permukaan)", "3D view (coloured domains on the surface)")):
+            cd3 = max(1, int(np.ceil(max(len(xa), len(ya)) / 140.0)))
+            Z3 = np.where(A["valid"], za, np.nan)[::cd3, ::cd3]
+            C3 = cls[::cd3, ::cd3].astype(float)
+            C3 = np.where(np.isfinite(Z3), C3, np.nan)
+            kk_ = K
+            # skala diskret sederhana: normalisasi 0..K
+            cs = []
+            for c in range(0, kk_ + 1):
+                col = "#6b7280" if c == 0 else colors[c - 1]
+                lo, hi = c / (kk_ + 1), (c + 1) / (kk_ + 1)
+                cs += [[lo, col], [hi, col]]
+            f3 = go.Figure(go.Surface(x=xa[::cd3], y=ya[::cd3], z=Z3.T, surfacecolor=C3.T, colorscale=cs, cmin=0, cmax=kk_ + 1 - 1e-6, showscale=False,
+                                      lighting=dict(ambient=0.55, diffuse=0.8), hoverinfo="skip"))
+            f3.update_layout(height=560, margin=dict(l=0, r=0, t=0, b=0), scene=dict(aspectmode="data", xaxis_visible=False, yaxis_visible=False, zaxis_visible=False))
+            st.plotly_chart(f3, width="stretch")
+        # histogram
+        hh = go.Figure()
+        hh.add_trace(go.Histogram(x=Hf, nbinsx=40, marker_color="#3b82f6", name=_t("Sel muka", "Face cells")))
+        for b in brk:
+            hh.add_vline(x=b, line=dict(color="#ef4444", dash="dash"))
+        hh.update_layout(height=240, margin=dict(l=10, r=10, t=10, b=10), xaxis_title=_t("Tinggi muka bench (m)", "Bench face height (m)"), yaxis_title=_t("Jumlah sel", "Cells"), showlegend=False)
+        st.plotly_chart(hh, width="stretch")
+        if cm == "auto":
+            st.caption(_t("Batas kelompok alami (Jenks): " + ", ".join(f"{b:.1f} m" for b in brk) + ". Kelompok terpisah berarti ada populasi tinggi bench berbeda (mis. single vs double bench).",
+                          "Natural group breaks (Jenks): " + ", ".join(f"{b:.1f} m" for b in brk) + ". Separate groups mean different bench-height populations (e.g. single vs double bench)."))
+        if len(dom):
+            st.dataframe(dom.sort_values(["Tinggi_maks_m"], ascending=False), hide_index=True, width="stretch")
+            e1, e2 = st.columns(2)
+            e1.download_button(_t("Unduh tabel domain (CSV)", "Download domain table (CSV)"), data=dom.to_csv(index=False).encode("utf-8"),
+                               file_name=f"domain_bench_{key}.csv", mime="text/csv", key=f"bch_csv_{key}")
+            try:
+                e2.download_button(_t("Unduh batas domain (DXF)", "Download domain outlines (DXF)"), data=_bch_dxf(xa, ya, cls, names, colors),
+                                   file_name=f"domain_bench_{key}.dxf", mime="application/dxf", key=f"bch_dxf_{key}")
+            except Exception as e:
+                e2.caption(_t(f"DXF tidak tersedia: {e}", f"DXF unavailable: {e}"))
+    st.caption(_t("Tinggi tiap sel muka = elevasi puncak lokal − elevasi kaki lokal sepanjang jalur kemiringan yang sama (bukan selisih seluruh area). "
+                  "Kelas tertinggi pada mode manual = muka yang melampaui batas single bench; biasanya double bench, bench tanpa berm, atau muka yang perlu direvisi.",
+                  "Each face cell's height = local crest elevation − local toe elevation along the same slope path (not the whole area's range). "
+                  "The top class in manual mode = faces exceeding the single-bench limit; typically double benches, benches without a berm, or faces to revise."))
+
+
+with tabH:
+    _bench_tab()
+
+
 
 
 # =========================================================
