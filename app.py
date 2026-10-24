@@ -29903,7 +29903,7 @@ def _bch_jenks(vals, k, nbin=160):
     return sorted(brk), float(1.0 - D[k, n - 1] / max(ssd(0, n - 1), 1e-12))
 
 
-def _bch_analyze(xs, ys, z, face_deg=None, smooth_cells=1.0, min_area_m2=40.0, min_h=3.0):
+def _bch_analyze_core(xs, ys, z, face_deg=None, smooth_cells=1.0, min_area_m2=40.0, min_h=3.0, split_berm=True, split_ratio=0.75, berm_w=12.0):
     """Deteksi muka bench (adaptif) + tinggi lokal. face_deg=None -> ambang Otsu otomatis. Histeresis: biji >= ambang, tumbuh ke sel >= 0.55*ambang
     (maks 3 sel) agar kaki/puncak muka & celah tidak 'kosong'. Return dict."""
     from scipy import ndimage as ndi
@@ -29922,6 +29922,22 @@ def _bch_analyze(xs, ys, z, face_deg=None, smooth_cells=1.0, min_area_m2=40.0, m
     grow = ndi.binary_dilation(seeds, structure=np.ones((3, 3)), iterations=2) & low & ok_l
     face = seeds | grow
     face = ndi.binary_closing(face, structure=np.ones((3, 3)), iterations=1) & valid
+    # --- DETEKSI PEMISAH BENCH: berm/ramp sempit DI DALAM lereng curam (kemiringan turun tajam di antara dua zona curam) ---
+    dips = np.zeros(face.shape, bool)
+    if split_berm:
+        zl = ndi.gaussian_filter(zf, 0.5)
+        gxl, gyl = np.gradient(zl, dx, dy)
+        sl_d = np.degrees(np.arctan(np.hypot(gxl, gyl)))
+        kmax = int(max(1, round(float(berm_w) / (2.0 * max(dx, dy)))))
+        for kk in range(1, kmax + 1):
+            for di, dj in ((1, 0), (0, 1), (1, 1), (1, -1)):
+                sp = _bch_shift(sl_d, kk * di, kk * dj, 0.0)
+                sm_ = _bch_shift(sl_d, -kk * di, -kk * dj, 0.0)
+                dips |= (sp >= thr) & (sm_ >= thr) & (sl_d < np.asarray(split_ratio) * np.minimum(sp, sm_))
+        dips &= valid
+        dips = ndi.binary_closing(dips, structure=np.ones((3, 3)), iterations=1) | dips
+        dips &= valid
+        face &= ~dips
     holes = ndi.binary_fill_holes(face) & ~face        # isi hanya lubang KECIL (bukan cincin berm di antara muka)
     if holes.any():
         hl, hn = ndi.label(holes)
@@ -29929,6 +29945,7 @@ def _bch_analyze(xs, ys, z, face_deg=None, smooth_cells=1.0, min_area_m2=40.0, m
         face = face | np.isin(hl, np.nonzero(hsz <= 12)[0] + 1)
     face &= valid
     face = ndi.binary_opening(face, structure=np.ones((3, 3)), iterations=1) | (face & ndi.binary_dilation(seeds, iterations=1))
+    face &= ~dips
     lab, n = ndi.label(face, structure=np.ones((3, 3)))
     if n:
         areas = ndi.sum(face, lab, index=np.arange(1, n + 1)) * dx * dy
@@ -29945,7 +29962,42 @@ def _bch_analyze(xs, ys, z, face_deg=None, smooth_cells=1.0, min_area_m2=40.0, m
     H = np.where(face, Hm, np.nan)
     lab, n = ndi.label(face, structure=np.ones((3, 3)))
     return dict(face=face, H=H, crest=np.where(face, crest, np.nan), toe=np.where(face, toe, np.nan), slope=slope, valid=valid, dx=dx, dy=dy,
-                labels=lab, n_comp=int(n), zs=zs, face_deg=thr)
+                labels=lab, n_comp=int(n), zs=zs, face_deg=thr, dips=dips & valid)
+
+
+def _bch_analyze(xs, ys, z, face_deg=None, smooth_cells=1.0, min_area_m2=40.0, min_h=3.0, split_berm=True, split_ratio=0.75, berm_w=12.0, refine=True, tall_factor=1.7):
+    """Analisis muka bench + PEMISAH bench (berm/ramp sempit). Refinement adaptif: muka yang tingginya >= tall_factor x median (kemungkinan beberapa single bench
+    yang tergabung) dideteksi ulang dengan sensitivitas lebih tinggi HANYA di area itu (sampai 2 putaran, rasio maks 0.95)."""
+    from scipy import ndimage as ndi
+    A = _bch_analyze_core(xs, ys, z, face_deg, smooth_cells, min_area_m2, min_h, split_berm, split_ratio, berm_w)
+    A["refined"] = 0
+    if not (split_berm and refine) or not A["face"].any():
+        return A
+    ratio_map = np.full(A["face"].shape, float(split_ratio))
+    for it in range(2):
+        H = A["H"]
+        ref = float(np.nanmedian(H[A["face"]]))
+        lab, n = ndi.label(A["face"], structure=np.ones((3, 3)))
+        if n == 0:
+            break
+        # tinggi per komponen muka (median)
+        meds = ndi.median(np.nan_to_num(H, nan=0.0), lab, index=np.arange(1, n + 1))
+        tall_ids = [i + 1 for i, m in enumerate(meds) if m >= tall_factor * ref]
+        if not tall_ids:
+            break
+        tall = ndi.binary_dilation(np.isin(lab, tall_ids), structure=np.ones((3, 3)), iterations=3)
+        new_r = np.where(tall, np.minimum(ratio_map + 0.1, 0.95), ratio_map)
+        if np.allclose(new_r, ratio_map):
+            break
+        ratio_map = new_r
+        B = _bch_analyze_core(xs, ys, z, face_deg, smooth_cells, min_area_m2, min_h, split_berm, ratio_map, berm_w)
+        # terima hasil hanya kalau memang memecah (jumlah piksel muka tinggi berkurang)
+        if np.nanpercentile(B["H"][B["face"]], 95) < np.nanpercentile(A["H"][A["face"]], 95) if B["face"].any() else False:
+            B["refined"] = it + 1
+            A = B
+        else:
+            break
+    return A
 
 
 def _bch_classify(H, face, thresholds=None, auto=False, k_auto=None, max_k=6):
@@ -30052,8 +30104,9 @@ def _bch_hillshade(xs, ys, z, az=315.0, alt=40.0):
     return np.clip(np.sin(altr) * np.cos(sl) + np.cos(altr) * np.sin(sl) * np.cos(azr - asp), 0, 1)
 
 
-def _bch_textures(cls, zone, valid, hs, colors, max_px=1792):
-    """Tekstur halus untuk tampilan: (png_domain, png_plain) sebagai bytes. Kelas di-upsample lewat peta probabilitas -> batas mulus (bukan piksel)."""
+def _bch_textures(cls, zone, valid, hs, colors, dips=None, lab=None, max_px=1792):
+    """Tekstur halus untuk tampilan: (png_domain, png_deteksi, png_polos) bytes. Kelas di-upsample lewat peta probabilitas -> batas mulus.
+    Garis berm/ramp sempit terdeteksi (dips) digambar cyan; di tampilan 'deteksi' tiap unit muka single bench diberi warna berbeda."""
     from scipy import ndimage as ndi
     import io as _io
     nx, ny = cls.shape
@@ -30065,26 +30118,35 @@ def _bch_textures(cls, zone, valid, hs, colors, max_px=1792):
     hsu = np.clip(up(hs), 0, 1)
     vu = up(valid.astype(float)) > 0.5
     base = (0.42 + 0.58 * hsu)[..., None] * np.array([0.78, 0.8, 0.82])
-    rgb_plain = base.copy()
+    shade = (0.55 + 0.6 * hsu)[..., None]
+    cyan = np.array([0.45, 0.95, 1.0])
+    dip_u = (up(dips.astype(float)) > 0.30) if dips is not None else np.zeros(hsu.shape, bool)
+    rgb = base.copy()
+    face_u = up((cls > 0).astype(float)) > 0.5
     if K and (full > 0).any():
         pr = np.stack([up((full == c).astype(float)) for c in range(1, K + 1)], axis=0)
         am = np.argmax(pr, axis=0)
-        mx = pr.max(axis=0)
-        face_u = up((cls > 0).astype(float)) > 0.5
-        zone_u = (mx > 0.5) & ~face_u
+        zone_u = (pr.max(axis=0) > 0.5) & ~face_u
         cols = np.array([[int(h[1:3], 16), int(h[3:5], 16), int(h[5:7], 16)] for h in colors], float) / 255.0
         cu = cols[am]
-        shade = (0.55 + 0.6 * hsu)[..., None]
-        rgb = base.copy()
         rgb = np.where(face_u[..., None], np.clip(cu * shade, 0, 1), rgb)
         rgb = np.where(zone_u[..., None], np.clip(0.45 * cu * shade + 0.55 * base, 0, 1), rgb)
-    else:
-        rgb = base
+    rgb_dom = np.where(dip_u[..., None], cyan * shade, rgb)
+    # tampilan deteksi: tiap unit muka berbeda warna
+    rgb_det = base.copy()
+    if lab is not None and lab.max() > 0:
+        pal = np.array([[0.90, 0.30, 0.30], [0.30, 0.65, 0.95], [0.95, 0.75, 0.20], [0.40, 0.80, 0.40], [0.75, 0.45, 0.90], [0.95, 0.55, 0.20],
+                        [0.30, 0.85, 0.80], [0.90, 0.45, 0.65], [0.60, 0.75, 0.25], [0.45, 0.50, 0.95], [0.85, 0.65, 0.45], [0.55, 0.85, 0.95]])
+        lu = ndi.zoom(lab.astype(np.int32), f, order=0, mode="nearest")
+        cu2 = pal[(lu - 1) % len(pal)]
+        rgb_det = np.where((lu > 0)[..., None], np.clip(cu2 * shade, 0, 1), rgb_det)
+        rgb_det = ndi.gaussian_filter(rgb_det, (0.7, 0.7, 0))
+    rgb_det = np.where(dip_u[..., None], cyan, rgb_det)
     def png(a):
         im = np.clip(np.where(vu[..., None], a, 0.08) * 255, 0, 255).astype(np.uint8)
         im = np.transpose(im, (1, 0, 2))[::-1]      # baris 0 = y maks
         b = _io.BytesIO(); PILImage.fromarray(im).save(b, format="PNG", optimize=False); return b.getvalue()
-    return png(rgb), png(rgb_plain)
+    return png(rgb_dom), png(rgb_det), png(base)
 
 
 def _bch_dxf(xs, ys, cls, names):
@@ -30119,7 +30181,7 @@ html,body{margin:0;height:100%;background:#0b1220;color:#e5e7eb;font:12px/1.35 s
 #leg{left:10px;top:10px;max-width:290px}#ctl{right:10px;top:10px;min-width:170px}#hov{left:10px;bottom:10px;min-width:200px}
 .sw{display:inline-block;width:11px;height:11px;border-radius:2px;margin-right:6px;vertical-align:-1px}
 button{background:#1e293b;color:#e5e7eb;border:1px solid #334155;border-radius:6px;padding:3px 8px;margin:2px 2px 2px 0;cursor:pointer;font-size:11px}
-button:hover{background:#334155}label{display:block;margin:3px 0}input[type=range]{width:100%}
+button:hover{background:#334155}button.on{background:#2563eb;border-color:#3b82f6}label{display:block;margin:3px 0}input[type=range]{width:100%}
 #err{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:#0b1220;padding:20px;text-align:center}
 b.t{font-size:13px}.m{color:#94a3b8}
 </style></head><body>
@@ -30127,7 +30189,7 @@ b.t{font-size:13px}.m{color:#94a3b8}
 <div class="p" id="leg"></div>
 <div class="p" id="ctl">
 <button id="bReset">Reset</button><button id="bTop">Atas</button><button id="bSide">Samping</button>
-<label><input type="checkbox" id="kDom" checked> Domain berwarna</label>
+<div style="margin:4px 0"><button id="vDom" class="on">Domain</button><button id="vDet">Deteksi bench</button><button id="vPlain">Polos</button></div>
 <label><input type="checkbox" id="kWire"> Mesh (wireframe)</label>
 <label>Eksagerasi vertikal: <span id="veV">1.0</span>×<input type="range" id="ve" min="0.5" max="4" step="0.1" value="1"></label>
 <div class="m">Kiri: putar · Kanan/Shift: geser · Roda: zoom</div>
@@ -30165,7 +30227,7 @@ for(var i=0;i<nv;i++){uv[2*i]=(pos[3*i]-X0)/(X1-X0);uv[2*i+1]=(-pos[3*i+2]-Y0)/(
 g.setAttribute('uv',new T.BufferAttribute(uv,2));g.setIndex(new T.BufferAttribute(idx,1));
 var loader=new T.TextureLoader(),texD,texP;
 function mk(u){var t=loader.load(u,function(){draw();});t.anisotropy=8;t.minFilter=T.LinearMipmapLinearFilter;t.magFilter=T.LinearFilter;return t;}
-texD=mk(P.texD);texP=mk(P.texP);
+texD=mk(P.texD);texP=mk(P.texP);var texU=mk(P.texU);
 var mat=new T.MeshBasicMaterial({map:texD,side:T.DoubleSide});
 var mesh=new T.Mesh(g,mat);scene.add(mesh);
 var wire=new T.Mesh(g,new T.MeshBasicMaterial({color:0x0f172a,wireframe:true,transparent:true,opacity:0.35}));wire.visible=false;scene.add(wire);
@@ -30200,7 +30262,7 @@ el.addEventListener('touchstart',function(e){tp=e.touches.length===2?[e.touches[
 el.addEventListener('touchmove',function(e){if(e.touches.length===2&&tp){var d0=Math.hypot(tp[0].clientX-tp[1].clientX,tp[0].clientY-tp[1].clientY),d1=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY);if(d0>0){R*=d0/d1;place();draw();}tp=[e.touches[0],e.touches[1]];}},{passive:true});
 // hover info
 var ray=new T.Raycaster(),mv=new T.Vector2();
-var cg=P.cg, cls=b64(cg.cls), Hh=new Uint16Array(b64(cg.H).buffer);
+var cg=P.cg, cls=b64(cg.cls), Hh=new Uint16Array(b64(cg.H).buffer), UD=new Uint16Array(b64(cg.uid).buffer), CR=new Uint16Array(b64(cg.crest).buffer), TO=new Uint16Array(b64(cg.toe).buffer);
 function hover(e){
   var r=el.getBoundingClientRect();mv.set(((e.clientX-r.left)/r.width)*2-1,-((e.clientY-r.top)/r.height)*2+1);
   ray.setFromCamera(mv,cam);var h=ray.intersectObject(mesh,false);
@@ -30210,16 +30272,21 @@ function hover(e){
   i=Math.min(Math.max(i,0),cg.nx-1);j=Math.min(Math.max(j,0),cg.ny-1);
   var k=j*cg.nx+i,c=cls[k],hv=Hh[k]/100;
   var nm=c>0?P.names[c-1]:'bukan muka bench';
-  $('hov').innerHTML='<b class="t">'+nm+'</b>'+(c>0?'<br>Tinggi muka ≈ '+hv.toFixed(1)+' m':'')+'<br><span class="m">X '+(x+P.org[0]).toFixed(1)+' · Y '+(y+P.org[1]).toFixed(1)+' · Z '+z.toFixed(1)+' m</span>';
+  var ex=(c>0)?'<br>Bench #'+UD[k]+' · crest '+(CR[k]/10+cg.zmn).toFixed(1)+' m · toe '+(TO[k]/10+cg.zmn).toFixed(1)+' m':'';
+  $('hov').innerHTML='<b class="t">'+nm+'</b>'+(c>0?'<br>Tinggi single bench ≈ '+hv.toFixed(1)+' m'+ex:'')+'<br><span class="m">X '+(x+P.org[0]).toFixed(1)+' · Y '+(y+P.org[1]).toFixed(1)+' · Z '+z.toFixed(1)+' m</span>';
 }
 $('bReset').onclick=reset;
 $('bTop').onclick=function(){ph=0.02;place();draw();};
 $('bSide').onclick=function(){ph=1.35;place();draw();};
-$('kDom').onchange=function(){mat.map=this.checked?texD:texP;mat.needsUpdate=true;draw();};
+function setView(t,id){mat.map=t;mat.needsUpdate=true;['vDom','vDet','vPlain'].forEach(function(k){$(k).className=(k===id)?'on':'';});
+  $('legDom').style.display=(id==='vDom')?'block':'none';$('legDet').style.display=(id==='vDet')?'block':'none';draw();}
+$('vDom').onclick=function(){setView(texD,'vDom');};$('vDet').onclick=function(){setView(texU,'vDet');};$('vPlain').onclick=function(){setView(texP,'vPlain');};
 $('kWire').onchange=function(){wire.visible=this.checked;draw();};
 $('ve').oninput=function(){setVE(parseFloat(this.value));place();draw();};
 var lg='<b class="t">'+P.title+'</b><br>';
 for(var q=0;q<P.names.length;q++){lg+='<div><span class="sw" style="background:'+P.colors[q]+'"></span>'+P.names[q]+' <span class="m">· '+P.areas[q]+' m²</span></div>';}
+lg='<div id="legDom">'+lg+'<div><span class="sw" style="background:#73f2ff"></span>Berm/ramp sempit (pemisah bench)</div></div>';
+lg+='<div id="legDet" style="display:none"><b class="t">Hasil deteksi</b><br>Tiap muka single bench = warna berbeda<br><span class="sw" style="background:#73f2ff"></span>Berm/ramp sempit = pemisah bench</div>';
 lg+='<div class="m" style="margin-top:4px">'+P.note+'</div>';
 $('leg').innerHTML=lg;
 window.addEventListener('resize',resize);
@@ -30232,7 +30299,7 @@ loadThree(start);
 </script></body></html>"""
 
 
-def _bch_scene_html(xa, ya, za, valid, cls, zone, hs, names, colors, H, title, note, three_inline=None):
+def _bch_scene_html(xa, ya, za, valid, cls, zone, hs, names, colors, H, title, note, three_inline=None, dips=None, lab=None, crest=None, toe=None):
     """Viewer 3D three.js (putar/geser/zoom bebas). Mesh = grid DEM (<=~280 simpul per sisi, tanpa lubang di luar boundary) + tekstur domain halus."""
     import base64 as _b64, json as _json
     nx, ny = len(xa), len(ya)
@@ -30253,18 +30320,23 @@ def _bch_scene_html(xa, ya, za, valid, cls, zone, hs, names, colors, H, title, n
     a0, b0, c0, d0 = gid[:-1, :-1][q], gid[1:, :-1][q], gid[:-1, 1:][q], gid[1:, 1:][q]
     tri = np.concatenate([np.stack([a0, b0, d0], 1), np.stack([a0, d0, c0], 1)], axis=0).astype(np.uint32)
     pos = np.nan_to_num(pos, nan=0.0)
-    pD, pP = _bch_textures(cls, zone, valid, hs, colors)
+    pD, pU, pP = _bch_textures(cls, zone, valid, hs, colors, dips=dips, lab=lab)
     du = lambda b: "data:image/png;base64," + _b64.b64encode(b).decode("ascii")
     cs = max(1, int(np.ceil(max(nx, ny) / 400.0)))
     cc = cls[::cs, ::cs]
     Hc = np.nan_to_num(H[::cs, ::cs], nan=0.0)
-    cg = dict(nx=int(cc.shape[0]), ny=int(cc.shape[1]),
+    zmn = float(np.nanmin(za))
+    enc = lambda a_: _b64.b64encode(np.ascontiguousarray(np.round(np.nan_to_num(a_[::cs, ::cs] - zmn, nan=0.0) * 10).clip(0, 65535).T).astype(np.uint16).tobytes()).decode("ascii")
+    lb = np.zeros(cls.shape, np.uint16) if lab is None else np.asarray(lab).astype(np.uint16)
+    cg = dict(nx=int(cc.shape[0]), ny=int(cc.shape[1]), zmn=zmn,
+              uid=_b64.b64encode(np.ascontiguousarray(lb[::cs, ::cs].T).tobytes()).decode("ascii"),
+              crest=enc(crest if crest is not None else np.full(cls.shape, np.nan)), toe=enc(toe if toe is not None else np.full(cls.shape, np.nan)),
               cls=_b64.b64encode(np.ascontiguousarray(cc.T).astype(np.uint8).tobytes()).decode("ascii"),
               H=_b64.b64encode(np.ascontiguousarray(np.round(Hc.T * 100)).astype(np.uint16).tobytes()).decode("ascii"))
     areas = [int(round(float((cls == c).sum()) * abs(xa[1] - xa[0]) * abs(ya[1] - ya[0]))) for c in range(1, len(names) + 1)]
     payload = dict(pos=_b64.b64encode(pos.tobytes()).decode("ascii"), idx=_b64.b64encode(tri.tobytes()).decode("ascii"),
                    ext=[float(xa[0] - cx), float(xa[-1] - cx), float(ya[0] - cy), float(ya[-1] - cy)],
-                   zr=[float(np.nanmin(Zs) - zc), float(np.nanmax(Zs) - zc)], org=[cx, cy], texD=du(pD), texP=du(pP), cg=cg,
+                   zr=[float(np.nanmin(Zs) - zc), float(np.nanmax(Zs) - zc)], org=[cx, cy], texD=du(pD), texU=du(pU), texP=du(pP), cg=cg,
                    names=list(names), colors=list(colors), areas=areas, title=title, note=note, three_cdn=list(_WSIM_THREE_CDN))
     html = _BCH_HTML.replace("/*__PAYLOAD__*/null", _json.dumps(payload)).replace("/*__THREE_INLINE__*/", three_inline or "")
     return html, int(tri.shape[0])
@@ -30375,6 +30447,16 @@ def _bench_tab():
         min_h = d2.number_input(_t("Tinggi muka minimum (m)", "Minimum face height (m)"), 0.5, 20.0, 3.0, 0.5, key="bch_min_h")
         min_a = d3.number_input(_t("Luas muka minimum (m²)", "Minimum face area (m²)"), 5.0, 5000.0, 40.0, 5.0, key="bch_min_a")
         smo = d4.number_input(_t("Haluskan DEM (sel)", "Smooth DEM (cells)"), 0.0, 5.0, 1.0, 0.5, key="bch_smooth")
+        st.markdown(_t("**Deteksi pemisah bench (berm/ramp sempit)**", "**Bench separator detection (narrow berms/ramps)**"))
+        sp1, sp2, sp3, sp4 = st.columns(4)
+        split_on = sp1.checkbox(_t("Pisahkan multi-bench", "Split multi-bench"), value=True, key="bch_split_on",
+                                help=_t("Deteksi berm/ramp sempit di DALAM lereng curam (garis hitam/glowing di data Anda) dan jadikan batas antar single bench, sehingga tinggi yang dihitung = tinggi tiap single bench, bukan tinggi gabungan.",
+                                        "Detect narrow berms/ramps INSIDE steep slopes and use them as boundaries between single benches, so the height computed = each single bench's height, not the combined height."))
+        split_r = sp2.slider(_t("Sensitivitas pemisah", "Separator sensitivity"), 0.40, 0.95, 0.75, 0.05, key="bch_split_r", disabled=not split_on,
+                             help=_t("Makin tinggi = makin banyak berm/ramp (yang kemiringannya hanya sedikit lebih landai dari muka) dianggap pemisah.", "Higher = more berms/ramps (only slightly gentler than the faces) count as separators."))
+        berm_w = sp3.number_input(_t("Lebar berm/ramp sempit maks (m)", "Max narrow berm/ramp width (m)"), 2.0, 40.0, 12.0, 1.0, key="bch_berm_w", disabled=not split_on)
+        refine_on = sp4.checkbox(_t("Perhalus otomatis muka yang terlalu tinggi", "Auto-refine overly tall faces"), value=True, key="bch_refine", disabled=not split_on,
+                                 help=_t("Muka ≥ 1,7× tinggi median dideteksi ulang dengan sensitivitas lebih tinggi, hanya di area itu.", "Faces ≥ 1.7× the median height are re-detected with higher sensitivity, only in that area."))
         zc1, zc2 = st.columns(2)
         zone_on = zc1.checkbox(_t("Warnai juga berm/lantai terdekat (zona bench)", "Also colour the nearest berm/floor (bench zone)"), value=True, key="bch_zone_on")
         zone_m = zc2.number_input(_t("Jangkauan zona berm (m)", "Berm zone reach (m)"), 0.0, 200.0, 25.0, 5.0, key="bch_zone_m", disabled=not zone_on)
@@ -30386,7 +30468,7 @@ def _bench_tab():
             _sub_header(title)
         sx_ = max(1, int(np.ceil(np.sqrt(np.isfinite(zz).sum() / 300000.0))))
         xa, ya, za = xs[::sx_], ys[::sx_], zz[::sx_, ::sx_]
-        sig = (key, za.shape, float(np.nanmean(za)), None if auto_deg else float(face_deg), float(min_h), float(min_a), float(smo), cm, tuple(thr), k_auto, bool(zone_on), float(zone_m), 7)
+        sig = (key, za.shape, float(np.nanmean(za)), None if auto_deg else float(face_deg), float(min_h), float(min_a), float(smo), cm, tuple(thr), k_auto, bool(zone_on), float(zone_m), bool(split_on), float(split_r), float(berm_w), bool(refine_on), 8)
         ckey = f"bch_res_{key}"
         cached = st.session_state.get(ckey)
         if cached and cached[0] == sig:
@@ -30394,7 +30476,8 @@ def _bench_tab():
         else:
             with st.spinner(_t("Menganalisis muka bench…", "Analysing bench faces…")):
                 try:
-                    A = _bch_analyze(xa, ya, za, face_deg=(None if auto_deg else float(face_deg)), smooth_cells=float(smo), min_area_m2=float(min_a), min_h=float(min_h))
+                    A = _bch_analyze(xa, ya, za, face_deg=(None if auto_deg else float(face_deg)), smooth_cells=float(smo), min_area_m2=float(min_a), min_h=float(min_h),
+                                     split_berm=bool(split_on), split_ratio=float(split_r), berm_w=float(berm_w), refine=bool(refine_on))
                     if not A["face"].any():
                         R = dict(A=A, empty=True)
                     else:
@@ -30407,7 +30490,7 @@ def _bench_tab():
                         R = dict(A=A, empty=False, cls=cls, zone=zone, brk=brk, names=names, info=info, dom=dom, hs=hs, K=K, colors=_bch_class_colors(K))
                         R["html"], R["ntri"] = _bch_scene_html(xa, ya, za, A["valid"], cls, zone, hs, names, R["colors"], A["H"], title=str(title),
                                                                note=_t(f"Muka terdeteksi: sudut ≥ {A['face_deg']:.0f}°", f"Faces detected: angle ≥ {A['face_deg']:.0f}°"),
-                                                               three_inline=_wsim_find_local_three())
+                                                               three_inline=_wsim_find_local_three(), dips=A.get('dips'), lab=A['labels'], crest=A['crest'], toe=A['toe'])
                 except Exception as e:
                     st.error(_t(f"Analisis gagal: {e}", f"Analysis failed: {e}"))
                     continue
@@ -30422,8 +30505,11 @@ def _bench_tab():
         cell_a = A["dx"] * A["dy"]
         tot_face = float(A["face"].sum() * cell_a)
         m1, m2, m3, m4 = st.columns(4)
-        _metric_card(_t("Muka bench terdeteksi", "Bench faces detected"), f"{A['n_comp']:,}", container=m1,
-                     help_text=_t(f"Ambang sudut {A['face_deg']:.0f}°", f"Angle threshold {A['face_deg']:.0f}°"))
+        from scipy import ndimage as _ndi_b
+        _nd = int(_ndi_b.label(A["dips"], structure=np.ones((3, 3)))[1]) if A.get("dips") is not None and A["dips"].any() else 0
+        _metric_card(_t("Single bench terdeteksi", "Single benches detected"), f"{A['n_comp']:,}", container=m1,
+                     help_text=_t(f"Ambang sudut {A['face_deg']:.0f}° · {_nd} garis berm/ramp sempit sebagai pemisah" + (f" · perhalusan {A['refined']}×" if A.get("refined") else ""),
+                                  f"Angle threshold {A['face_deg']:.0f}° · {_nd} narrow berm/ramp separator lines" + (f" · refined {A['refined']}×" if A.get("refined") else "")))
         _metric_card(_t("Tinggi muka (median / maks)", "Face height (median / max)"), f"{np.median(Hf):.1f} / {Hf.max():.1f} m", container=m2)
         if cm == "manual":
             over = float(((Hf > thr[0]).sum()) * cell_a)
@@ -30441,6 +30527,10 @@ def _bench_tab():
         else:
             import streamlit.components.v1 as _bchc
             _bchc.html(R["html"], height=640, scrolling=False)
+        st.caption(_t("Tombol 'Deteksi bench' di viewer menampilkan tiap single bench dengan warna berbeda dan garis berm/ramp sempit (cyan) yang dipakai sebagai pemisah. "
+                      "Kalau muka tinggi masih tergabung, naikkan 'Sensitivitas pemisah'; pada kontur kasar (interval besar / sel > 3 m) berm sempit bisa tidak terlihat dan tinggi tetap tergabung.",
+                      "The 'Deteksi bench' button in the viewer shows each single bench in a different colour and the narrow berm/ramp lines (cyan) used as separators. "
+                      "If tall faces still merge, raise 'Separator sensitivity'; on coarse contours (large interval / cells > 3 m) narrow berms may be invisible and heights stay merged."))
         st.caption(_t(f"Mesh {R['ntri']:,} segitiga. Putar dengan klik-kiri, geser dengan klik-kanan/Shift, zoom dengan roda; arahkan kursor untuk melihat tinggi muka.",
                       f"Mesh {R['ntri']:,} triangles. Rotate with left-drag, pan with right-drag/Shift, zoom with the wheel; hover to read the face height."))
         # histogram
