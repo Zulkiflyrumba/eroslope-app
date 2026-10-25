@@ -30467,8 +30467,15 @@ def _bch_analyze2(xs, ys, z, P=None):
     vi = (ci - idx_f[0]) * dx
     vj = (cj - idx_f[1]) * dy
     dot = vi * gx[tuple(idx_f)] + vj * gy[tuple(idx_f)]       # cincin di sisi menanjak muka (crest) -> dot > 0
-    up_r = ring & (dot > 0)
-    lo_r = ring & ~up_r
+    gmag = np.hypot(gx[tuple(idx_f)], gy[tuple(idx_f)])
+    cosa = dot / np.maximum(np.hypot(vi, vj) * gmag, 1e-9)    # 1 = tepat menanjak dari muka, -1 = tepat menurun, ~0 = tepi samping
+    up_ring = ring & (cosa > 0.5)                              # tepi samping (mis. bidang di elevasi tengah) TIDAK dipakai sbg crest/toe
+    lo_ring = ring & (cosa < -0.5)
+    # crest/toe = BIDANG DATAR terdekat yang searah menanjak/menurun (bukan sekadar tepi mask muka): bila muka hanya bagian curam dari lereng
+    # yang lebih panjang (tepi landai/membulat), tinggi tetap mengacu ke bidang datar sebenarnya.
+    cand = vm & ~sl & (P0 | dips | np.isin(typ, (1, 2, 5)))
+    up_r = cand & (cosa > 0.5)
+    lo_r = cand & (cosa < -0.5)
     # elevasi platform datar = median bidang (bukan nilai tepi yang terdistorsi interpolasi antar-kontur)
     zfix = zf.copy()
     bm = (typ == 1) | (typ == 5)
@@ -30486,6 +30493,12 @@ def _bch_analyze2(xs, ys, z, P=None):
         return zfix[tuple(ix)], d
     zc_, dc_ = _near(up_r)
     zt_, dt_ = _near(lo_r)
+    zc2, dc2 = _near(up_ring)
+    zt2, dt2 = _near(lo_ring)
+    use2c = ~(dc_ <= 150.0)
+    use2t = ~(dt_ <= 150.0)
+    zc_ = np.where(use2c, zc2, zc_); dc_ = np.where(use2c, dc2, dc_)
+    zt_ = np.where(use2t, zt2, zt_); dt_ = np.where(use2t, dt2, dt_)
     dmax = 150.0
     Hraw = np.where(sl & (dc_ <= dmax) & (dt_ <= dmax), zc_ - zt_, np.nan)
     crest = np.where(np.isfinite(Hraw), zc_, np.nan)
@@ -30520,15 +30533,17 @@ def _bch_analyze2(xs, ys, z, P=None):
         cid = lab_s[tuple(idx_f)]
         plat = (P0 | dips | (typ >= 1) & (typ <= 5))
         rr = ring & (cid > 0)
-        cu = cid[rr & up_r]; cl = cid[rr & lo_r]
-        pu = cid[rr & up_r & plat]; pl = cid[rr & lo_r & plat]
+        cu = cid[rr & up_ring]; cl = cid[rr & lo_ring]
+        pu = cid[rr & up_ring & plat]; pl = cid[rr & lo_ring & plat]
         nu = np.bincount(cu, minlength=ns + 1)[1:]; nl_ = np.bincount(cl, minlength=ns + 1)[1:]
         su = np.bincount(pu, minlength=ns + 1)[1:] / np.maximum(nu, 1)
         sd = np.bincount(pl, minlength=ns + 1)[1:] / np.maximum(nl_, 1)
         sup_min = np.minimum(np.where(nu > 0, su, 0.0), np.where(nl_ > 0, sd, 0.0))
         is_mod = np.asarray(ndi.mean(mod.astype(float), lab_s, index=ids)) > 0.5
         c_c = np.where(sup_min >= 0.5, 1, np.where(sup_min >= 0.25, 2, 3))
-        c_c = np.where((hmed > P["h_flag"]) | (nu == 0) | (nl_ == 0), 3, c_c)
+        pf = np.asarray(ndi.mean((~use2c & ~use2t & (dc_ <= 40.0) & (dt_ <= 40.0)).astype(float), lab_s, index=ids))
+        c_c = np.where((c_c == 3) & (pf >= 0.7), 2, c_c)          # crest & toe dijangkarkan ke bidang datar di dekatnya -> minimal 'sedang'
+        c_c = np.where(hmed > P["h_flag"], 3, c_c)
         c_c = np.where((c_c == 1) & ((is_mod) | (cell > hmed / 4.0)), 2, c_c)
         t_c = np.where((hmed > P["h_flag"]) | is_mod, 4, 3).astype(np.uint8)
         lut_t = np.concatenate([[0], t_c]).astype(np.uint8)
@@ -30775,9 +30790,36 @@ def _bch_group_h(rid, rtype, crest, toe, hmed, area, r=3):
     return out
 
 
-def _bch_ct_lines(A, xa, ya, tol=1.0, min_len=15.0, win_m=20.0):
-    """Garis crest (tepi atas muka) & toe (tepi bawah) dari kontur tepi muka; elevasi dari crest/toe hasil perhitungan tinggi; outlier
-    (elevasi menyimpang > tol dari median berjalan) dibuang dan garis diputus di situ; potongan < min_len dibuang."""
+def _bch_dp(xy, tol):
+    """Douglas-Peucker (indeks titik yang dipertahankan)."""
+    n = len(xy)
+    if n <= 2:
+        return np.arange(n)
+    keep = np.zeros(n, bool); keep[0] = keep[-1] = True
+    st_ = [(0, n - 1)]
+    while st_:
+        i, j = st_.pop()
+        if j <= i + 1:
+            continue
+        p, q = xy[i], xy[j]
+        d = q - p
+        L = float(np.hypot(*d))
+        seg = xy[i + 1:j]
+        if L < 1e-9:
+            dist = np.hypot(*(seg - p).T)
+        else:
+            dist = np.abs(d[0] * (seg[:, 1] - p[1]) - d[1] * (seg[:, 0] - p[0])) / L
+        k = int(np.argmax(dist))
+        if dist[k] > tol:
+            keep[i + 1 + k] = True
+            st_ += [(i, i + 1 + k), (i + 1 + k, j)]
+    return np.nonzero(keep)[0]
+
+
+def _bch_ct_lines(A, xa, ya, tol=1.0, min_len=15.0, win_m=20.0, smooth_m=14.0, link_m=18.0, simp_m=1.0):
+    """Garis crest (tepi atas muka) & toe (tepi bawah): tepi muka (mask dihaluskan) -> sisi atas/bawah dari beda elevasi di kedua sisi tepi ->
+    elevasi dari crest/toe hasil hitung -> outlier elevasi dibuang -> potongan dirapikan (dihaluskan sepanjang garis), DISAMBUNG bila ujungnya
+    berdekatan & elevasinya sama, lalu disederhanakan (Douglas-Peucker) agar lurus/tidak bergerigi."""
     from scipy import ndimage as ndi
     from skimage import measure as _ms
     face = A["face"]
@@ -30785,22 +30827,31 @@ def _bch_ct_lines(A, xa, ya, tol=1.0, min_len=15.0, win_m=20.0):
     if not face.any():
         return res
     dx, dy = float(xa[1] - xa[0]), float(ya[1] - ya[0])
+    cell = max(abs(dx), abs(dy))
     nx, ny = face.shape
-    fs = ndi.gaussian_filter(face.astype(float), 1.0)
+    fs = ndi.gaussian_filter(face.astype(float), max(1.5, 4.0 / cell))
     gmx, gmy = np.gradient(fs, abs(dx), abs(dy))
-    gzx, gzy = np.gradient(A["zs"], abs(dx), abs(dy))
+    zs = A["zs"]
     def nn(m):
         ok = np.isfinite(m)
         ix = ndi.distance_transform_edt(~ok, return_distances=False, return_indices=True)
         return m[tuple(ix)]
     cmap, tmap = nn(A["crest"]), nn(A["toe"])
+    d_off = max(2.0 * cell, 4.0)
+    step = max(cell, 1.0)
+    raw = {True: [], False: []}
     for c in _ms.find_contours(fs, 0.5):
         if len(c) < 8:
             continue
         i, j = c[:, 0], c[:, 1]
-        sm_ = lambda a: ndi.map_coordinates(a, [i, j], order=1, mode="nearest")
-        up = (-(sm_(gmx) * sm_(gzx) + sm_(gmy) * sm_(gzy))) > 0
-        up = ndi.median_filter(up.astype(int), size=7, mode="nearest") > 0
+        smp = lambda a, ii, jj: ndi.map_coordinates(a, [np.clip(ii, 0, nx - 1), np.clip(jj, 0, ny - 1)], order=1, mode="nearest")
+        gxv, gyv = smp(gmx, i, j), smp(gmy, i, j)
+        nrm = np.hypot(gxv, gyv) + 1e-12
+        ox, oy = -gxv / nrm, -gyv / nrm                         # normal keluar muka
+        zo = smp(zs, i + ox * d_off / abs(dx), j + oy * d_off / abs(dy))
+        zi = smp(zs, i - ox * d_off / abs(dx), j - oy * d_off / abs(dy))
+        up = (zo - zi) > 0
+        up = ndi.median_filter(up.astype(int), size=max(9, int(round(10.0 / step)) | 1), mode="nearest") > 0
         x = xa[0] + i * dx
         y = ya[0] + j * dy
         brk = np.nonzero(np.diff(up.astype(int)) != 0)[0] + 1
@@ -30812,8 +30863,7 @@ def _bch_ct_lines(A, xa, ya, tol=1.0, min_len=15.0, win_m=20.0):
             jj = np.clip(np.round(j[seg]).astype(int), 0, ny - 1)
             zz = (cmap if is_up else tmap)[ii, jj]
             xs_, ys_ = x[seg], y[seg]
-            step = float(np.median(np.hypot(np.diff(xs_), np.diff(ys_)))) if len(seg) > 2 else 1.0
-            k = int(max(5, round(win_m / max(step, 1e-3)))) | 1
+            k = int(max(5, round(win_m / max(float(np.median(np.hypot(np.diff(xs_), np.diff(ys_)))), 1e-3)))) | 1
             med = ndi.median_filter(zz, size=min(k, len(zz) | 1), mode="nearest")
             keep = np.abs(zz - med) <= tol
             res["n_all"] += len(seg)
@@ -30822,9 +30872,54 @@ def _bch_ct_lines(A, xa, ya, tol=1.0, min_len=15.0, win_m=20.0):
             for piece in np.split(np.arange(len(seg)), kb):
                 if len(piece) < 3 or not keep[piece[0]]:
                     continue
-                px, py, pz = xs_[piece], ys_[piece], zz[piece]
-                if float(np.hypot(np.diff(px), np.diff(py)).sum()) >= min_len:
-                    res["crest" if is_up else "toe"].append(np.column_stack([px, py, pz]))
+                raw[is_up].append(np.column_stack([xs_[piece], ys_[piece], zz[piece]]))
+
+    def smooth_line(P):
+        d = np.concatenate([[0.0], np.cumsum(np.hypot(np.diff(P[:, 0]), np.diff(P[:, 1])))])
+        if d[-1] < 2 * step:
+            return P
+        t = np.arange(0.0, d[-1] + 1e-9, step)
+        Q = np.column_stack([np.interp(t, d, P[:, k]) for k in range(3)])
+        sg = max(1.0, smooth_m / step / 2.0)
+        for k in range(2):
+            Q[:, k] = ndi.gaussian_filter1d(Q[:, k], sg, mode="nearest")
+        Q[:, 2] = ndi.median_filter(Q[:, 2], size=max(3, int(round(smooth_m * 2 / step)) | 1), mode="nearest")
+        Q[:, 2] = ndi.gaussian_filter1d(Q[:, 2], sg, mode="nearest")
+        return Q
+
+    def chain(lines):
+        lines = [l for l in lines]
+        zt = max(tol, 1.0)
+        while True:
+            best = None
+            n = len(lines)
+            for a in range(n):
+                for b in range(a + 1, n):
+                    for ea in (0, -1):
+                        for eb in (0, -1):
+                            pa, pb = lines[a][ea], lines[b][eb]
+                            dd = float(np.hypot(pa[0] - pb[0], pa[1] - pb[1]))
+                            if dd <= link_m and abs(pa[2] - pb[2]) <= zt and (best is None or dd < best[0]):
+                                best = (dd, a, b, ea, eb)
+            if best is None:
+                return lines
+            _, a, b, ea, eb = best
+            A_ = lines[a] if ea == -1 else lines[a][::-1]
+            B_ = lines[b] if eb == 0 else lines[b][::-1]
+            lines = [l for k, l in enumerate(lines) if k not in (a, b)] + [np.vstack([A_, B_])]
+
+    for is_up, key in ((True, "crest"), (False, "toe")):
+        L = [smooth_line(p) for p in raw[is_up]]
+        if len(L) > 400:
+            L = sorted(L, key=lambda p: -len(p))[:400]
+        L = chain(L)
+        for p in L:
+            p = smooth_line(p)
+            ln = float(np.hypot(np.diff(p[:, 0]), np.diff(p[:, 1])).sum())
+            if ln < min_len or len(p) < 2:
+                continue
+            idx = _bch_dp(p[:, :2], simp_m)
+            res[key].append(p[idx])
     return res
 
 
