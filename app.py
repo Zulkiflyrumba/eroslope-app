@@ -30190,6 +30190,7 @@ def _bch_dxf(xs, ys, cls, names):
 
 
 
+
 # ===================== DOMAIN BENCH v4: permukaan ala Erosion Map + klasifikasi berbasis geometri =====================
 # Acuan nilai bawaan (umum, BUKAN dari Maptek -- halaman Maptek tidak dapat diakses saat penyusunan):
 #   - kemiringan jalan angkut/ramp tambang umumnya 8-12 % (maks ~10-12 %, mis. praktik desain haul road, Kaufman & Ault 1977);
@@ -30580,7 +30581,7 @@ def _bch_analyze2(xs, ys, z, P=None):
                 cr_pts=cr_pts, to_pts=to_pts, g_loc=g_loc, w_loc=w_loc, zf=zf)
 
 
-def _bch_type_texture(typ, conf, valid, hs, max_px=1792):
+def _bch_type_texture(typ, conf, valid, hs, max_px=1792, ncls=6, colors=None):
     """Tekstur jenis (Bench/Ramp/Slope/...) -- batas mulus lewat peta probabilitas; keyakinan rendah dibuat pucat."""
     from scipy import ndimage as ndi
     import io as _io
@@ -30591,13 +30592,15 @@ def _bch_type_texture(typ, conf, valid, hs, max_px=1792):
     vu = up(valid.astype(float)) > 0.5
     base = (0.42 + 0.58 * hsu)[..., None] * np.array([0.78, 0.8, 0.82])
     shade = (0.55 + 0.6 * hsu)[..., None]
-    pr = np.stack([up(typ == t) for t in range(1, 7)], axis=0)
+    pr = np.stack([up(typ == t) for t in range(1, ncls + 1)], axis=0)
     am = np.argmax(pr, axis=0)
     inside = pr.max(axis=0) > 0.5
-    cols = np.array([[int(_BCH_TYPES[t][1][i:i + 2], 16) for i in (1, 3, 5)] for t in range(1, 7)], float) / 255.0
+    cl_ = colors or [_BCH_TYPES[t][1] for t in range(1, 7)]
+    cols = np.array([[int(h[i:i + 2], 16) for i in (1, 3, 5)] for h in cl_], float) / 255.0
     cu = cols[am]
-    low = up((conf == 3) & (typ > 0)) > 0.5
-    cu = np.where(low[..., None], 0.55 * cu + 0.45, cu)
+    if conf is not None:
+        low = up((conf == 3) & (typ > 0)) > 0.5
+        cu = np.where(low[..., None], 0.55 * cu + 0.45, cu)
     rgb = np.where(inside[..., None], np.clip(cu * shade, 0, 1), base)
     im = np.clip(np.where(vu[..., None], rgb, 0.08) * 255, 0, 255).astype(np.uint8)
     im = np.transpose(im, (1, 0, 2))[::-1]
@@ -30643,12 +30646,89 @@ def _bch_section_runs(d, z, t):
     return pd.DataFrame(rows)
 
 
+_BCH_CLEAN_NAMES = {True: ["Bench / Ramp (bidang datar)", "Slope: muka bench", "Slope: tinggi / multi-bench"],
+                    False: ["Bench (bidang datar)", "Ramp", "Slope: muka bench", "Slope: tinggi / multi-bench"]}
+_BCH_CLEAN_COLORS = {True: ["#22c55e", "#dc2626", "#7c3aed"], False: ["#22c55e", "#f59e0b", "#dc2626", "#7c3aed"]}
+
+
+def _bch_nearest_fill_int(a, mask_known):
+    from scipy import ndimage as ndi
+    if not mask_known.any():
+        return a
+    idx = ndi.distance_transform_edt(~mask_known, return_distances=False, return_indices=True)
+    return a[tuple(idx)]
+
+
+def _bch_vote(g, K, valid, sigma, min_cells):
+    """Pemungutan suara halus (Gaussian one-hot + argmax) pada SEMUA sel valid + buang pulau kecil -> zona/blok rapi tanpa bintik."""
+    from scipy import ndimage as ndi
+    out = g.copy()
+    for _pass in range(3):
+        sc = np.stack([ndi.gaussian_filter(((out == c) & valid).astype(float), sigma) for c in range(1, K + 1)], axis=0)
+        out = np.where(valid, 1 + np.argmax(sc, axis=0), 0)
+        changed = False
+        for c in range(1, K + 1):
+            lab, n = ndi.label(out == c, structure=np.ones((3, 3)))
+            if n:
+                sz = ndi.sum(out == c, lab, index=np.arange(1, n + 1))
+                small = np.isin(lab, np.nonzero(sz < min_cells)[0] + 1)
+                if small.any():
+                    out = np.where(small, 0, out)
+                    changed = True
+        if changed:
+            out = np.where(valid, _bch_nearest_fill_int(out, out > 0), 0)
+        else:
+            break
+    return out
+
+
+def _bch_clean_types(A, min_area=400.0, sigma_m=5.0, merge=True):
+    """Versi BERSIH peta jenis: bench+ramp (+berm sempit & bidang landai belum pasti) digabung jadi satu domain datar, muka bench & muka tinggi
+    tetap slope; sel tak terklasifikasi diisi dari tetangga terdekat, lalu dirapikan (voting + buang pulau kecil) sehingga membentuk zona/blok."""
+    typ, valid = A["typ"], A["valid"]
+    dx, dy = A["dx"], A["dy"]
+    cell = max(dx, dy)
+    if merge:
+        lut = {1: 1, 2: 1, 5: 1, 6: 1, 3: 2, 4: 3}
+    else:
+        lut = {1: 1, 2: 2, 5: 1, 6: 1, 3: 3, 4: 4}
+    g = np.zeros(typ.shape, int)
+    for k, v in lut.items():
+        g[typ == k] = v
+    K = int(max(lut.values()))
+    g = np.where(valid, _bch_nearest_fill_int(g, g > 0), 0)
+    out = _bch_vote(g, K, valid, max(1.0, sigma_m / cell), max(4, int(min_area / (dx * dy))))
+    return out, K
+
+
+def _bch_clean_height(A, ctyp, brk, K, sigma_m=5.0, min_area=400.0, slope_classes=(2, 3)):
+    """Domain tinggi versi bersih: ekstensi = domain slope bersih; tiap sel memakai tinggi muka terdekat, dikelaskan, lalu dirapikan."""
+    from scipy import ndimage as ndi
+    dx, dy = A["dx"], A["dy"]
+    cell = max(dx, dy)
+    mask = np.isin(ctyp, slope_classes) & A["valid"]
+    Hr = np.where(A["face"] & np.isfinite(A["H"]), A["H"], np.nan)
+    if not np.isfinite(Hr).any() or not mask.any():
+        return np.zeros(ctyp.shape, int), Hr
+    ok = np.isfinite(Hr)
+    ix = ndi.distance_transform_edt(~ok, return_distances=False, return_indices=True)
+    Hx = Hr[tuple(ix)]
+    c0 = np.where(mask, (1 + np.searchsorted(np.asarray(brk), Hx, side="right")) if len(brk) else 1, 0)
+    c0 = np.where(mask, c0, 0)
+    out = np.zeros(ctyp.shape, int)
+    if K <= 1:
+        out = np.where(mask, 1, 0)
+    else:
+        out = _bch_vote(c0, K, mask, max(1.0, sigma_m / cell), max(4, int(min_area / (dx * dy))))
+    return out, np.where(mask, Hx, np.nan)
+
+
 _BCH_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 html,body{margin:0;height:100%;background:#0b1220;color:#e5e7eb;font:12px/1.35 system-ui,Segoe UI,Roboto,sans-serif;overflow:hidden}
 #c{position:absolute;inset:0}canvas{display:block;width:100%;height:100%;touch-action:none}
 .p{position:absolute;background:rgba(15,23,42,.84);border:1px solid rgba(148,163,184,.25);border-radius:8px;padding:8px 10px}
-#leg{left:10px;top:10px;max-width:300px}#ctl{right:10px;top:10px;min-width:180px}#hov{left:10px;bottom:10px;min-width:220px;max-width:380px}
+#leg{left:10px;top:10px;max-width:300px}#ctl{right:10px;top:10px;min-width:180px}#hov{left:10px;bottom:10px;min-width:220px;max-width:380px}#meas{right:10px;bottom:10px;min-width:210px;max-width:330px;display:none}
 .sw{display:inline-block;width:11px;height:11px;border-radius:2px;margin-right:6px;vertical-align:-1px}
 button{background:#1e293b;color:#e5e7eb;border:1px solid #334155;border-radius:6px;padding:3px 8px;margin:2px 2px 2px 0;cursor:pointer;font-size:11px}
 button:hover{background:#334155}button.on{background:#2563eb;border-color:#3b82f6}label{display:block;margin:3px 0}input[type=range]{width:100%}
@@ -30659,13 +30739,15 @@ b.t{font-size:13px}.m{color:#94a3b8}
 <div class="p" id="leg"></div>
 <div class="p" id="ctl">
 <button id="bReset">Reset</button><button id="bTop">Atas</button><button id="bSide">Samping</button>
-<div style="margin:4px 0"><button id="vTyp" class="on">Jenis</button><button id="vDom">Tinggi</button><button id="vDet">Unit</button><button id="vPlain">Polos</button></div>
+<div style="margin:4px 0"><button id="vCln" class="on">Bersih</button><button id="vTyp">Jenis</button><button id="vDom">Tinggi</button><button id="vDet">Unit</button><button id="vPlain">Polos</button></div>
+<div style="margin:4px 0"><button id="bRul">📏 Ukur</button><button id="bClr">Hapus ukur</button></div>
 <label><input type="checkbox" id="kWire"> Mesh (wireframe)</label>
 <label><input type="checkbox" id="kLn"> Garis DXF kontur</label>
 <label><input type="checkbox" id="kCT"> Titik crest (merah) / toe (biru)</label>
 <label>Eksagerasi vertikal: <span id="veV">1.0</span>×<input type="range" id="ve" min="0.5" max="4" step="0.1" value="1"></label>
 <div class="m">Kiri: putar · Kanan/Shift: geser · Roda: zoom</div>
 </div>
+<div class="p" id="meas"></div>
 <div class="p" id="hov"><span class="m">Arahkan kursor ke permukaan</span></div>
 <div id="err"><div id="errT"></div></div>
 <script>/*__THREE_INLINE__*/</script>
@@ -30699,8 +30781,8 @@ for(var i=0;i<nv;i++){uv[2*i]=(pos[3*i]-X0)/(X1-X0);uv[2*i+1]=(-pos[3*i+2]-Y0)/(
 g.setAttribute('uv',new T.BufferAttribute(uv,2));g.setIndex(new T.BufferAttribute(idx,1));
 var loader=new T.TextureLoader();
 function mk(u){var t=loader.load(u,function(){draw();});t.anisotropy=8;t.minFilter=T.LinearMipmapLinearFilter;t.magFilter=T.LinearFilter;return t;}
-var texT=mk(P.texT),texD=mk(P.texD),texU=mk(P.texU),texP=mk(P.texP);
-var mat=new T.MeshBasicMaterial({map:texT,side:T.DoubleSide});
+var texC=mk(P.texC),texT=mk(P.texT),texD=mk(P.texD),texU=mk(P.texU),texP=mk(P.texP);
+var mat=new T.MeshBasicMaterial({map:texC,side:T.DoubleSide});
 var grp=new T.Group();scene.add(grp);
 var mesh=new T.Mesh(g,mat);grp.add(mesh);
 var wire=new T.Mesh(g,new T.MeshBasicMaterial({color:0x0f172a,wireframe:true,transparent:true,opacity:0.35}));wire.visible=false;grp.add(wire);
@@ -30732,22 +30814,45 @@ var tp=null;
 el.addEventListener('touchstart',function(e){tp=e.touches.length===2?[e.touches[0],e.touches[1]]:null;},{passive:true});
 el.addEventListener('touchmove',function(e){if(e.touches.length===2&&tp){var d0=Math.hypot(tp[0].clientX-tp[1].clientX,tp[0].clientY-tp[1].clientY),d1=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY);if(d0>0){R*=d0/d1;place();draw();}tp=[e.touches[0],e.touches[1]];}},{passive:true});
 var ray=new T.Raycaster(),mv=new T.Vector2();
-var cg=P.cg, RID=new Uint16Array(b64(cg.rid).buffer);
+var cg=P.cg, RID=new Uint16Array(b64(cg.rid).buffer), CC=b64(cg.cc);
 function hover(e){
   var r=el.getBoundingClientRect();mv.set(((e.clientX-r.left)/r.width)*2-1,-((e.clientY-r.top)/r.height)*2+1);
   ray.setFromCamera(mv,cam);var h=ray.intersectObject(mesh,false);
   if(!h.length){return;}
-  var p=h[0].point;var x=p.x,y=-p.z,z=p.y/ve;
+  var p=h[0].point;var x=p.x,y=-p.z,z=p.y/ve+P.zc;
   var i=Math.round((x-X0)/(X1-X0)*(cg.nx-1)),j=Math.round((y-Y0)/(Y1-Y0)*(cg.ny-1));
   i=Math.min(Math.max(i,0),cg.nx-1);j=Math.min(Math.max(j,0),cg.ny-1);
   var k=j*cg.nx+i,rid=RID[k];
-  var tx=rid>0?P.regs[rid-1]:'<b class="t">Tidak terklasifikasi</b>';
+  var cc=CC[k],cl=cc>0?'<span class="sw" style="background:'+P.ccolors[cc-1]+'"></span><b>Domain: '+P.cnames[cc-1]+'</b><br>':'';
+  var tx=cl+(rid>0?P.regs[rid-1]:'<span class="m">Sel transisi (tidak terklasifikasi mentah)</span>');
   $('hov').innerHTML=tx+'<br><span class="m">X '+(x+P.org[0]).toFixed(1)+' · Y '+(y+P.org[1]).toFixed(1)+' · Z '+z.toFixed(1)+' m</span>';
 }
+// ---- penggaris / ukur manual ----
+var rul=false,pA=null,meas=[],mkr=[],msz=size*0.004;
+function loc(p){return grp.worldToLocal(p.clone());}
+function addMk(v,col){var m=new T.Mesh(new T.SphereGeometry(msz,12,10),new T.MeshBasicMaterial({color:col,depthTest:false}));m.position.copy(v);m.renderOrder=10;grp.add(m);mkr.push(m);}
+function addLn(a,b){var gg=new T.BufferGeometry().setFromPoints([a,b]);var l=new T.Line(gg,new T.LineBasicMaterial({color:0xfacc15,depthTest:false}));l.renderOrder=9;grp.add(l);mkr.push(l);}
+function fmt(v){return (v+0).toFixed(2);}
+function showMeas(){var el=$('meas');if(!meas.length){el.style.display='none';return;}el.style.display='block';
+  var h='<b class="t">Hasil ukur</b>'+(rul?'':'');
+  for(var i=0;i<meas.length;i++){var m=meas[i];h+='<div style="margin-top:4px"><b>#'+(i+1)+'</b> Δ tinggi <b>'+fmt(m.dz)+' m</b> · horizontal '+fmt(m.dh)+' m · miring '+fmt(m.ds)+' m · sudut '+fmt(m.ang)+'°<br><span class="m">Z '+fmt(m.za)+' → '+fmt(m.zb)+' m</span></div>';}
+  el.innerHTML=h;}
+function pick(e){var r=el.getBoundingClientRect();mv.set(((e.clientX-r.left)/r.width)*2-1,-((e.clientY-r.top)/r.height)*2+1);ray.setFromCamera(mv,cam);var h=ray.intersectObject(mesh,false);return h.length?loc(h[0].point):null;}
+var downX=0,downY=0;
+el.addEventListener('pointerdown',function(e){downX=e.clientX;downY=e.clientY;});
+el.addEventListener('pointerup',function(e){
+  if(!rul||e.button!==0||Math.hypot(e.clientX-downX,e.clientY-downY)>4)return;
+  var p=pick(e);if(!p)return;
+  if(!pA){pA=p;addMk(p,0xfacc15);}
+  else{var dh=Math.hypot(p.x-pA.x,p.z-pA.z),dz=p.y-pA.y,ds=Math.hypot(dh,dz);
+    addMk(p,0xfacc15);addLn(pA,p);meas.push({dz:Math.abs(dz),dh:dh,ds:ds,ang:Math.atan2(Math.abs(dz),Math.max(dh,1e-9))*180/Math.PI,za:pA.y+P.zc,zb:p.y+P.zc});pA=null;showMeas();}
+  draw();});
+$('bRul').onclick=function(){rul=!rul;this.className=rul?'on':'';el.style.cursor=rul?'crosshair':'';pA=null;};
+$('bClr').onclick=function(){mkr.forEach(function(o){grp.remove(o);});mkr=[];meas=[];pA=null;showMeas();draw();};
 $('bReset').onclick=reset;
 $('bTop').onclick=function(){ph=0.02;place();draw();};
 $('bSide').onclick=function(){ph=1.35;place();draw();};
-var VW={vTyp:[texT,'legTyp'],vDom:[texD,'legDom'],vDet:[texU,'legDet'],vPlain:[texP,'legPl']};
+var VW={vCln:[texC,'legCln'],vTyp:[texT,'legTyp'],vDom:[texD,'legDom'],vDet:[texU,'legDet'],vPlain:[texP,'legPl']};
 function setView(id){mat.map=VW[id][0];mat.needsUpdate=true;for(var k in VW){$(k).className=(k===id)?'on':'';$(VW[k][1]).style.display=(k===id)?'block':'none';}draw();}
 Object.keys(VW).forEach(function(k){$(k).onclick=function(){setView(k);};});
 $('kWire').onchange=function(){wire.visible=this.checked;draw();};
@@ -30755,13 +30860,16 @@ $('kLn').onchange=function(){if(oLn)oLn.visible=this.checked;draw();};
 $('kCT').onchange=function(){if(oC)oC.visible=this.checked;if(oT)oT.visible=this.checked;draw();};
 $('ve').oninput=function(){setVE(parseFloat(this.value));place();draw();};
 var lg='<b class="t">'+P.title+'</b><br>';
-var lt='<div id="legTyp">',q;
+var lc='<div id="legCln"><b class="t">Domain bersih</b>',q;
+for(q=0;q<P.cnames.length;q++){lc+='<div><span class="sw" style="background:'+P.ccolors[q]+'"></span>'+P.cnames[q]+' <span class="m">· '+P.careas[q]+' m²</span></div>';}
+lc+='<div class="m">Versi dirapikan: bintik kecil digabung ke zona sekitarnya.</div></div>';
+var lt='<div id="legTyp" style="display:none">';
 for(q=0;q<P.tnames.length;q++){lt+='<div><span class="sw" style="background:'+P.tcolors[q]+'"></span>'+P.tnames[q]+' <span class="m">· '+P.tareas[q]+' m²</span></div>';}
 lt+='<div class="m">Warna pucat = keyakinan rendah</div></div>';
 var ld='<div id="legDom" style="display:none"><b class="t">Domain tinggi muka</b>';
 for(q=0;q<P.names.length;q++){ld+='<div><span class="sw" style="background:'+P.colors[q]+'"></span>'+P.names[q]+' <span class="m">· '+P.areas[q]+' m²</span></div>';}
 ld+='</div>';
-lg+=lt+ld+'<div id="legDet" style="display:none">Tiap unit muka = warna berbeda<br><span class="sw" style="background:#73f2ff"></span>Berm sempit = pemisah</div><div id="legPl" style="display:none">Hillshade polos</div>';
+lg+=lc+lt+ld+'<div id="legDet" style="display:none">Tiap unit muka = warna berbeda<br><span class="sw" style="background:#73f2ff"></span>Berm sempit = pemisah</div><div id="legPl" style="display:none">Hillshade polos</div>';
 lg+='<div class="m" style="margin-top:4px">'+P.note+'</div>';
 $('leg').innerHTML=lg;
 window.addEventListener('resize',resize);
@@ -30795,7 +30903,7 @@ def _bch_reg_html(A):
     return out
 
 
-def _bch_scene_html(xa, ya, za, A, cls, zone, hs, names, colors, title, note, three_inline=None, lines=None):
+def _bch_scene_html(xa, ya, za, A, cls, zone, hs, names, colors, title, note, three_inline=None, lines=None, ctyp=None, cK=0, cnames=None, ccolors=None, dips_on=True):
     """Viewer 3D three.js (putar/geser/zoom bebas). Mesh = grid DEM yang sama dgn analisis (<=~360 simpul/sisi) + tekstur jenis/domain/unit + overlay DXF & crest/toe."""
     import base64 as _b64, json as _json
     valid = A["valid"]
@@ -30817,14 +30925,18 @@ def _bch_scene_html(xa, ya, za, A, cls, zone, hs, names, colors, title, note, th
     a0, b0, c0, d0 = gid[:-1, :-1][q], gid[1:, :-1][q], gid[:-1, 1:][q], gid[1:, 1:][q]
     tri = np.concatenate([np.stack([a0, b0, d0], 1), np.stack([a0, d0, c0], 1)], axis=0).astype(np.uint32)
     pos = np.nan_to_num(pos, nan=0.0)
-    pD, pU, pP = _bch_textures(cls, zone, valid, hs, colors, dips=A.get("dips"), lab=A["labels"])
+    pD, pU, pP = _bch_textures(cls, zone, valid, hs, colors, dips=(A.get("dips") if dips_on else None), lab=A["labels"])
+    pC = _bch_type_texture(ctyp, None, valid, hs, ncls=cK, colors=ccolors)
     pT = _bch_type_texture(A["typ"], A["conf"], valid, hs)
     du = lambda b: "data:image/png;base64," + _b64.b64encode(b).decode("ascii")
     cs = max(1, int(np.ceil(max(nx, ny) / 400.0)))
     rid = np.minimum(A["rid"], 65535)[::cs, ::cs]
-    cg = dict(nx=int(rid.shape[0]), ny=int(rid.shape[1]), rid=_b64.b64encode(np.ascontiguousarray(rid.T).astype(np.uint16).tobytes()).decode("ascii"))
+    ccm = ctyp[::cs, ::cs]
+    cg = dict(nx=int(rid.shape[0]), ny=int(rid.shape[1]), rid=_b64.b64encode(np.ascontiguousarray(rid.T).astype(np.uint16).tobytes()).decode("ascii"),
+              cc=_b64.b64encode(np.ascontiguousarray(ccm.T).astype(np.uint8).tobytes()).decode("ascii"))
     dxm, dym = abs(xa[1] - xa[0]), abs(ya[1] - ya[0])
     areas = [int(round(float((cls == c).sum()) * dxm * dym)) for c in range(1, len(names) + 1)]
+    careas = [int(round(float((ctyp == c).sum()) * dxm * dym)) for c in range(1, cK + 1)]
     tareas = [int(round(float((A["typ"] == t).sum()) * dxm * dym)) for t in range(1, 7)]
 
     def _lin(arrs):
@@ -30850,8 +30962,8 @@ def _bch_scene_html(xa, ya, za, A, cls, zone, hs, names, colors, title, note, th
     rng_ = np.random.default_rng(1)
     payload = dict(pos=_b64.b64encode(pos.tobytes()).decode("ascii"), idx=_b64.b64encode(tri.tobytes()).decode("ascii"),
                    ext=[float(xa[0] - cx), float(xa[-1] - cx), float(ya[0] - cy), float(ya[-1] - cy)],
-                   zr=[float(np.nanmin(Zs) - zc), float(np.nanmax(Zs) - zc)], org=[cx, cy], texT=du(pT), texD=du(pD), texU=du(pU), texP=du(pP), cg=cg,
-                   regs=_bch_reg_html(A), names=list(names), colors=list(colors), areas=areas,
+                   zr=[float(np.nanmin(Zs) - zc), float(np.nanmax(Zs) - zc)], org=[cx, cy], zc=zc, texC=du(pC), texT=du(pT), texD=du(pD), texU=du(pU), texP=du(pP), cg=cg,
+                   regs=_bch_reg_html(A), cnames=list(cnames), ccolors=list(ccolors), careas=careas, names=list(names), colors=list(colors), areas=areas,
                    tnames=[_BCH_TYPES[t][0] for t in range(1, 7)], tcolors=[_BCH_TYPES[t][1] for t in range(1, 7)], tareas=tareas,
                    lines=_lin(lines) if lines else None, cpts=_pts(A["cr_pts"]), tpts=_pts(A["to_pts"]),
                    title=title, note=note, three_cdn=list(_WSIM_THREE_CDN))
@@ -31003,21 +31115,12 @@ def _bench_tab():
 
     # ---------------- 1. sumber permukaan
     _sub_header(_t("1. Data permukaan", "1. Surface data"))
-    src = st.radio(_t("Sumber kontur", "Contour source"), ["dxf", "dxfb", "seg"], horizontal=True, key="bch_src",
-                   format_func=lambda c: {"dxf": _t("Upload DXF kontur", "Upload contour DXF"), "dxfb": _t("Upload DXF kontur + boundary", "Upload contour DXF + boundary"),
-                                          "seg": _t("Segmen Erosion Mapping", "Erosion Mapping segment")}[c])
-    if src in ("dxf", "dxfb"):
-        seg = _dump_own_dxf_seg(need_boundary=(src == "dxfb"), kp="bch", surf="erosion")
-        if seg is None:
-            return
-    else:
-        segs = st.session_state.get("segment_results", {})
-        if not segs:
-            _ui_info(_t("Belum ada hasil RUN ANALYSIS tersimpan -- unggah DXF kontur.", "No saved RUN ANALYSIS yet -- upload a contour DXF."))
-            return
-        sids = list(segs.keys())
-        sid = st.selectbox(_t("Segmen", "Segment"), sids, format_func=lambda s: segs[s].get("label", s), key="bch_seg")
-        seg = segs[sid]
+    src = st.radio(_t("Sumber data", "Data source"), ["dxf", "dxfb", "dxfd"], horizontal=True, key="bch_src2",
+                   format_func=lambda c: {"dxf": _t("Kontur", "Contour"), "dxfb": _t("Kontur + boundary", "Contour + boundary"),
+                                          "dxfd": _t("Kontur + design (cut / fill)", "Contour + design (cut / fill)")}[c])
+    seg = _dump_own_dxf_seg(need_boundary=(src == "dxfb"), kp="bch", surf="erosion")
+    if seg is None:
+        return
     if seg.get("grid_x") is None or seg.get("grid_z") is None:
         st.error(_t("Grid elevasi tidak tersedia.", "Elevation grid not available."))
         return
@@ -31026,13 +31129,14 @@ def _bench_tab():
     if not np.isfinite(z0).any():
         st.error(_t("Grid elevasi kosong.", "Empty elevation grid."))
         return
-    use_design = st.checkbox(_t("Tambahkan data desain (DXF/CSV) -- dianalisis TERPISAH dari kondisi aktual", "Add design data (DXF/CSV) -- analysed SEPARATELY from the actual surface"), value=False, key="bch_use_design")
     surf_mode = "exist"
     zd_grid = None
-    if use_design:
-        fdz = st.file_uploader(_t("Berkas desain (DXF kontur/3DFACE/titik atau CSV X,Y,Z; koordinat sama)", "Design file (DXF contours/3DFACE/points or CSV X,Y,Z; same coordinates)"),
+    if src == "dxfd":
+        fdz = st.file_uploader(_t("Berkas design (DXF kontur/3DFACE/titik atau CSV X,Y,Z; koordinat sama dengan kontur)", "Design file (DXF contours/3DFACE/points or CSV X,Y,Z; same coordinates as the contour)"),
                                type=["dxf", "csv", "txt", "xyz"], key="bch_design_file")
-        if fdz is not None:
+        if fdz is None:
+            _ui_info(_t("Unggah design. Selama belum ada, yang dianalisis hanya kontur.", "Upload the design. Until then only the contour is analysed."))
+        else:
             try:
                 dsm_, _dsc = _dump_load_modules()
                 ck = ("bchd", fdz.name, fdz.size)
@@ -31046,22 +31150,28 @@ def _bench_tab():
                 zd_grid = np.where(np.isfinite(z0), zd_grid, np.nan)
                 n_cov = int(np.isfinite(zd_grid).sum())
                 if n_cov < 20:
-                    st.error(_t("Desain tidak beririsan dengan kontur (cek sistem koordinat) / di luar boundary.", "The design does not overlap the contour (check coordinates) / is outside the boundary."))
+                    st.error(_t("Design tidak beririsan dengan kontur (cek sistem koordinat) / di luar boundary.", "The design does not overlap the contour (check coordinates) / is outside the boundary."))
                     zd_grid = None
                 else:
-                    st.caption(_t(f"Desain menutup {100.0 * n_cov / max(int(np.isfinite(z0).sum()), 1):.0f}% area kontur.", f"Design covers {100.0 * n_cov / max(int(np.isfinite(z0).sum()), 1):.0f}% of the contour area."))
+                    cell_ = abs(xs[1] - xs[0]) * abs(ys[1] - ys[0])
+                    dzz = np.where(np.isfinite(zd_grid), zd_grid - z0, np.nan)
+                    cut = float(np.nansum(np.where(dzz < 0, -dzz, 0.0)) * cell_)
+                    fill = float(np.nansum(np.where(dzz > 0, dzz, 0.0)) * cell_)
+                    q1, q2, q3 = st.columns(3)
+                    q1.metric(_t("Cakupan design", "Design coverage"), f"{100.0 * n_cov / max(int(np.isfinite(z0).sum()), 1):.0f}%")
+                    q2.metric(_t("Cut (design di bawah kontur)", "Cut (design below contour)"), f"{cut:,.0f} m³")
+                    q3.metric(_t("Fill (design di atas kontur)", "Fill (design above contour)"), f"{fill:,.0f} m³")
             except Exception as e:
-                st.error(_t(f"Berkas desain gagal dibaca: {e}", f"Could not read the design file: {e}"))
+                st.error(_t(f"Berkas design gagal dibaca: {e}", f"Could not read the design file: {e}"))
         if zd_grid is not None:
-            surf_mode = st.radio(_t("Permukaan yang dianalisis", "Surface to analyse"), ["exist", "merge", "both"], horizontal=True, key="bch_surf",
-                                 format_func=lambda c: {"exist": _t("Kontur aktual saja", "Actual contour only"),
-                                                        "merge": _t("Desain (menimpa kontur di area desain)", "Design (overrides contour in the design area)"),
-                                                        "both": _t("Dua-duanya (hasil terpisah)", "Both (separate results)")}[c])
+            surf_mode = st.radio(_t("Permukaan yang dianalisis", "Surface to analyse"), ["merge", "both"], horizontal=True, key="bch_surf2",
+                                 format_func=lambda c: {"merge": _t("Hasil kontur + design (design memotong / menambah kontur)", "Result contour + design (design cuts / adds to the contour)"),
+                                                        "both": _t("Dua-duanya: kontur awal & hasil (terpisah)", "Both: original contour & result (separate)")}[c])
     surfaces = {"exist": z0}
-    if zd_grid is not None and surf_mode in ("merge", "both"):
+    if zd_grid is not None:
         surfaces["merge"] = np.where(np.isfinite(zd_grid), zd_grid, z0)
-    if surf_mode == "merge":
-        surfaces = {"merge": surfaces["merge"]}
+        if surf_mode == "merge":
+            surfaces = {"merge": surfaces["merge"]}
 
     # ---------------- 2. parameter
     _sub_header(_t("2. Klasifikasi tinggi bench", "2. Bench height classification"))
@@ -31132,6 +31242,13 @@ def _bench_tab():
         zc1, zc2 = st.columns(2)
         zone_on = zc1.checkbox(_t("Warnai berm/lantai terdekat pada tampilan tinggi", "Colour the nearest berm/floor in the height view"), value=True, key="bch_zone_on")
         zone_m = zc2.number_input(_t("Jangkauan zona (m)", "Zone reach (m)"), 0.0, 200.0, 25.0, 5.0, key="bch_zone_m", disabled=not zone_on)
+    with st.expander(_t("Kerapian domain (versi bersih)", "Domain tidiness (clean version)"), expanded=False):
+        k1, k2, k3, k4 = st.columns(4)
+        clean_on = k1.checkbox(_t("Domain bersih", "Clean domains"), value=True, key="bch_clean_on",
+                               help=_t("Menggabung bintik kecil ke zona sekitarnya sehingga domain berupa blok yang jelas antara slope dan bench/ramp.", "Merges small specks into the surrounding zone so domains are clear blocks of slope vs bench/ramp."))
+        clean_a = k2.number_input(_t("Luas domain minimum (m²)", "Minimum domain area (m²)"), 20.0, 50000.0, 400.0, 50.0, key="bch_clean_a", disabled=not clean_on)
+        clean_s = k3.number_input(_t("Kehalusan batas (m)", "Boundary smoothness (m)"), 1.0, 40.0, 5.0, 1.0, key="bch_clean_s", disabled=not clean_on)
+        clean_m = k4.checkbox(_t("Bench & Ramp satu domain", "Bench & Ramp one domain"), value=True, key="bch_clean_m", disabled=not clean_on)
     cint_auto = float((seg.get("qc") or {}).get("cint") or 0.0)
     cint = float(cint_in) if cint_in > 0 else cint_auto
     Pp = dict(face_deg=float(face_deg), grow_deg=min(float(grow_deg), float(face_deg) - 1.0), ir_deg=float(ir_deg), h_flag=float(h_flag), flat_deg=float(flat_deg), bench_min_w=float(bench_w),
@@ -31145,7 +31262,7 @@ def _bench_tab():
             _sub_header(title)
         sx_ = max(1, int(np.ceil(np.sqrt(np.isfinite(zz).sum() / 700000.0))))
         xa, ya, za = xs[::sx_], ys[::sx_], zz[::sx_, ::sx_]
-        sig = (key, za.shape, float(np.nanmean(za)), float(np.nanstd(za)), tuple(sorted(Pp.items())), cm, tuple(thr), k_auto, bool(zone_on), float(zone_m), 11)
+        sig = (key, za.shape, float(np.nanmean(za)), float(np.nanstd(za)), tuple(sorted(Pp.items())), cm, tuple(thr), k_auto, bool(zone_on), float(zone_m), bool(clean_on), float(clean_a), float(clean_s), bool(clean_m), 12)
         ckey = f"bch_res_{key}"
         cached = st.session_state.get(ckey)
         if cached and cached[0] == sig:
@@ -31159,15 +31276,22 @@ def _bench_tab():
                     else:
                         cls0, brk, names, info = _bch_classify(A["H"], A["face"], thresholds=thr, auto=(cm == "auto"), k_auto=k_auto)
                         K = len(names)
-                        cls = _bch_clean(cls0, A["face"], K)
+                        ctyp, cK = _bch_clean_types(A, min_area=float(clean_a), sigma_m=float(clean_s), merge=bool(clean_m))
+                        cm_ = bool(clean_m)
+                        if clean_on:
+                            cls, Hx = _bch_clean_height(A, ctyp, brk, K, sigma_m=float(clean_s), min_area=float(clean_a), slope_classes=((2, 3) if cm_ else (3, 4)))
+                        else:
+                            cls, Hx = _bch_clean(cls0, A["face"], K), A["H"]
                         zone = _bch_zone(cls, A["valid"], A["dx"], A["dy"], float(zone_m)) if zone_on else np.zeros(cls.shape, int)
-                        dom = _bch_domains(cls, xa, ya, A["H"], A["crest"], A["slope"], A["dx"], A["dy"], names)
+                        dom = _bch_domains(cls, xa, ya, Hx, A["crest"], A["slope"], A["dx"], A["dy"], names)
                         hs = _bch_hillshade(xa, ya, za)
-                        R = dict(A=A, empty=False, cls=cls, zone=zone, brk=brk, names=names, info=info, dom=dom, hs=hs, K=K, colors=_bch_class_colors(K))
+                        R = dict(A=A, empty=False, cls=cls, zone=zone, brk=brk, names=names, info=info, dom=dom, hs=hs, K=K, colors=_bch_class_colors(K),
+                                 ctyp=ctyp, cK=cK, cnames=_BCH_CLEAN_NAMES[cm_], ccolors=_BCH_CLEAN_COLORS[cm_])
                         R["html"], R["ntri"] = _bch_scene_html(xa, ya, za, A, cls, zone, hs, names, R["colors"], title=str(title),
                                                                note=_t(f"Muka ≥ {Pp['face_deg']:.0f}° · datar ≤ {Pp['flat_deg']:.0f}°" + (f" (kontur {cint:g} m)" if cint else ""),
                                                                        f"Faces ≥ {Pp['face_deg']:.0f}° · flat ≤ {Pp['flat_deg']:.0f}°" + (f" (contour {cint:g} m)" if cint else "")),
-                                                               three_inline=_wsim_find_local_three(), lines=(seg.get("lines") if key == "exist" else None))
+                                                               three_inline=_wsim_find_local_three(), lines=(seg.get("lines") if key == "exist" else None),
+                                                               ctyp=ctyp, cK=cK, cnames=_BCH_CLEAN_NAMES[cm_], ccolors=_BCH_CLEAN_COLORS[cm_], dips_on=not clean_on)
                 except Exception as e:
                     import traceback as _tb
                     st.error(_t(f"Analisis gagal: {e}", f"Analysis failed: {e}"))
@@ -31208,7 +31332,7 @@ def _bench_tab():
         else:
             import streamlit.components.v1 as _bchc
             _bchc.html(R["html"], height=660, scrolling=False)
-        st.caption(_t(f"Mesh {R['ntri']:,} segitiga (grid yang sama dengan analisis). Tombol 'Jenis' = Bench/Ramp/Slope; 'Tinggi' = domain tinggi single bench; 'Unit' = tiap muka berwarna sendiri. "
+        st.caption(_t(f"Mesh {R['ntri']:,} segitiga (grid yang sama dengan analisis). Tombol 'Bersih' = domain rapi (slope vs bench/ramp); 'Jenis' = hasil mentah per jenis; 📏 Ukur = klik dua titik di permukaan untuk mengukur beda tinggi/jarak/sudut.  'Tinggi' = domain tinggi single bench; 'Unit' = tiap muka berwarna sendiri. "
                       "Centang 'Garis DXF kontur' untuk membandingkan mesh dengan DXF, dan 'crest/toe' untuk melihat titik yang dipakai menghitung tinggi. Putar kiri-klik, geser klik-kanan/Shift, zoom roda; arahkan kursor untuk detail.",
                       f"Mesh {R['ntri']:,} triangles (same grid as the analysis). 'Jenis' = Bench/Ramp/Slope; 'Tinggi' = single-bench height domains; 'Unit' = each face in its own colour. "
                       "Tick 'DXF contour lines' to compare the mesh against the DXF and 'crest/toe' to see the points used for heights. Rotate with left-drag, pan with right-drag/Shift, zoom with wheel; hover for details."))
