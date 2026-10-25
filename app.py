@@ -24471,7 +24471,7 @@ def _dump_inside(boundary, X, Y):
         return np.asarray(_vec.contains(boundary, X, Y))
 
 
-def _dump_own_dxf_seg(need_boundary=False, kp="dsim"):
+def _dump_own_dxf_seg(need_boundary=False, kp="dsim", surf="plain"):
     """Sumber kontur MANDIRI untuk tab Simulasi Dumping: upload DXF/NPZ langsung di tab ini (tak bergantung
     pada Erosion Mapping). Dibangun grid DEM + boundary (selubung titik kontur)."""
     from scipy.interpolate import griddata
@@ -24521,9 +24521,18 @@ def _dump_own_dxf_seg(need_boundary=False, kp="dsim"):
     x0, x1, y0, y1 = pts[:, 0].min(), pts[:, 0].max(), pts[:, 1].min(), pts[:, 1].max()
     area = max((x1 - x0) * (y1 - y0), 1.0)
     res_auto = float(np.clip(np.sqrt(area / 90000.0), 0.5, 50.0))
-    res = st.number_input(_t("Ukuran sel grid (m)", "Grid cell size (m)"), 0.25, 100.0, float(round(res_auto, 2)), 0.25, key=kp + "_own_res",
-                          help=_t("Makin kecil makin detail tapi lebih berat. Maks ~250 ribu sel.", "Smaller = more detail but heavier. Max ~250k cells."))
-    ck = (hash(up.getvalue()) if hasattr(up, "getvalue") else id(up), float(res), hash(ub.getvalue()) if ub is not None else None)
+    if surf == "erosion":
+        from scipy.spatial import cKDTree as _ckt
+        _si = np.random.default_rng(0).choice(len(pts), min(len(pts), 2000), replace=False)
+        _dd, _ = _ckt(pts[_si][:, :2]).query(pts[_si][:, :2], k=2)
+        _msp = float(np.median(_dd[:, 1])) if len(_dd) else 1.0
+        _sug = int(np.clip(float(np.hypot(x1 - x0, y1 - y0)) / max(_msp / 2, 1e-6), 150, 800))
+        res = float(st.slider(_t("Resolusi grid (titik per sisi) -- sama seperti tab Erosion Map", "Grid resolution (points per side) -- same as the Erosion Map tab"), 150, 1200, _sug, 50, key=kp + "_own_gres",
+                              help=_t("Disarankan otomatis dari kerapatan titik kontur. Naikkan untuk detail lebih tinggi (lebih lambat).", "Auto-suggested from the contour point density. Raise for more detail (slower).")))
+    else:
+        res = st.number_input(_t("Ukuran sel grid (m)", "Grid cell size (m)"), 0.25, 100.0, float(round(res_auto, 2)), 0.25, key=kp + "_own_res",
+                              help=_t("Makin kecil makin detail tapi lebih berat. Maks ~250 ribu sel.", "Smaller = more detail but heavier. Max ~250k cells."))
+    ck = (hash(up.getvalue()) if hasattr(up, "getvalue") else id(up), float(res), hash(ub.getvalue()) if ub is not None else None, surf)
     cache = st.session_state.get("_" + kp + "_own_cache")
     if cache and cache[0] == ck:
         return cache[1]
@@ -24547,6 +24556,12 @@ def _dump_own_dxf_seg(need_boundary=False, kp="dsim"):
                     bnd = mp.convex_hull
             except Exception:
                 bnd = mp.convex_hull
+        if surf == "erosion":
+            S_ = _bch_surface(contours, bnd, int(res), bbox=(x0, x1, y0, y1))
+            seg = {"grid_x": S_["grid_x"], "grid_y": S_["grid_y"], "grid_z": S_["grid_z"], "boundary": bnd, "label": getattr(up, "name", "DXF"), "own_dxf": True,
+                   "own_boundary": ub_poly is not None, "qc": S_["qc"], "lines": S_["lines"]}
+            st.session_state["_" + kp + "_own_cache"] = (ck, seg)
+            return seg
         r = float(res)
         while ((x1 - x0) / r + 1) * ((y1 - y0) / r + 1) > 250000:
             r *= 1.25
@@ -30173,12 +30188,467 @@ def _bch_dxf(xs, ys, cls, names):
     return buf.getvalue().encode("utf-8")
 
 
+
+
+# ===================== DOMAIN BENCH v4: permukaan ala Erosion Map + klasifikasi berbasis geometri =====================
+# Acuan nilai bawaan (umum, BUKAN dari Maptek -- halaman Maptek tidak dapat diakses saat penyusunan):
+#   - kemiringan jalan angkut/ramp tambang umumnya 8-12 % (maks ~10-12 %, mis. praktik desain haul road, Kaufman & Ault 1977);
+#   - lantai bench praktis datar (<~3-5 %), lebar bench/catch bench minimal ~6 m dan biasanya 8-15 m (Read & Stacey 2009, Guidelines for Open Pit Slope Design);
+#   - sudut muka bench batuan lunak/menengah ~45-70 deg, batuan keras ~65-80 deg; pada DEM hasil interpolasi kontur sudut tampak lebih landai,
+#     karena itu ambang muka dibuat lebih rendah (35 deg) agar muka tidak terlewat;
+#   - tinggi single bench lazim 5-15 m; > ~20 m hampir selalu berarti dua bench atau lebih yang tergabung (atau bench tanpa berm).
+_BCH_TYPES = {1: ("Bench (bidang datar lebar)", "#22c55e"), 2: ("Ramp (jalan miring memanjang)", "#f59e0b"), 3: ("Slope: muka bench", "#dc2626"),
+              4: ("Slope: antar-ramp / overall (kemungkinan multi-bench)", "#7c3aed"), 5: ("Berm sempit / pemisah", "#06b6d4"),
+              6: ("Bidang landai (belum pasti)", "#9ca3af")}
+_BCH_DEF = dict(flat_deg=8.0, face_deg=35.0, grow_deg=22.0, ir_deg=20.0, grow_m=4.0, bench_min_w=6.0, ramp_w_min=8.0, ramp_w_max=40.0,
+                ramp_g_min=4.0, ramp_g_max=12.0, ramp_min_len=40.0, ramp_elong=3.0, min_area=60.0, min_h=3.0, h_flag=20.0, smooth=0.5, cint=0.0,
+                split=True, split_ratio=0.75, berm_w=12.0)
+_BCH_PRESETS = {
+    "umum": dict(),
+    "keras": dict(face_deg=45.0, grow_deg=30.0, ir_deg=25.0),
+    "lunak": dict(face_deg=28.0, grow_deg=18.0, ir_deg=15.0, flat_deg=7.0),
+}
+
+
+def _bch_surface(contours, boundary, grid_res, gap_len=None, bbox=None):
+    """Bangun permukaan dari kontur DENGAN CARA YANG SAMA seperti tab Erosion Map: jarak titik median -> padatkan polyline (kl_densify legacy) ->
+    bersihkan blunder (snap median/4, median Z per kelompok) -> TIN Delaunay linear -> grid np.mgrid (grid_res titik/sisi) -> mask boundary.
+    Tambahan (QC): segitiga yang menjembatani celah (> gap_len) tidak diisi, dan deviasi grid terhadap titik kontur asli dilaporkan."""
+    from scipy.spatial import cKDTree, Delaunay
+    from scipy import ndimage as ndi
+    xyz0, _off = kl_flatten(contours)
+    xyz0 = np.asarray(xyz0, float)
+    xyz0 = xyz0[np.isfinite(xyz0).all(axis=1)]
+    x_all, y_all, z_all = xyz0[:, 0], xyz0[:, 1], xyz0[:, 2]
+    rng = np.random.default_rng(0)
+    n_s = min(len(xyz0), 2000)
+    sidx = rng.choice(len(xyz0), n_s, replace=False) if len(xyz0) > n_s else np.arange(len(xyz0))
+    dd, _ = cKDTree(xyz0[sidx]).query(xyz0[sidx], k=2)
+    med_sp = float(np.median(dd[:, 1])) if len(dd) else 1.0
+    med_sp = max(med_sp, 1e-3)
+    if bbox is None:
+        bbox = (x_all.min(), x_all.max(), y_all.min(), y_all.max())
+    x0, x1, y0, y1 = [float(v) for v in bbox]
+    grid_x, grid_y = np.mgrid[x0:x1:complex(0, grid_res), y0:y1:complex(0, grid_res)]
+    dx, dy = abs(grid_x[1, 0] - grid_x[0, 0]), abs(grid_y[0, 1] - grid_y[0, 0])
+    # padatkan titik sepanjang kontur (elevasi tidak diubah)
+    tgt = med_sp
+    for _ in range(8):
+        if len(x_all) + kl_densify_count(contours, tgt, legacy=True) <= 900_000:
+            break
+        tgt *= 2.0
+    cd, nadd = kl_densify(contours, tgt, legacy=True)
+    xd, _ = kl_flatten(cd)
+    xd = np.asarray(xd, float)
+    xd = xd[np.isfinite(xd).all(axis=1)]
+    # buang titik yang jauh di luar bbox/boundary agar TIN tidak membengkak
+    pad = max(5 * med_sp, 2 * max(dx, dy))
+    keep = (xd[:, 0] >= x0 - pad) & (xd[:, 0] <= x1 + pad) & (xd[:, 1] >= y0 - pad) & (xd[:, 1] <= y1 + pad)
+    xd = xd[keep]
+    snap = max(med_sp / 4.0, 1e-4)
+    key = np.round(xd[:, :2] / snap).astype(np.int64)
+    df = pd.DataFrame({"kx": key[:, 0], "ky": key[:, 1], "x": xd[:, 0], "y": xd[:, 1], "z": xd[:, 2]})
+    grp = df.groupby(["kx", "ky"], sort=False)
+    n_blunder = int((grp["z"].transform("nunique") > 1).sum())
+    dfc = grp.agg(x=("x", "mean"), y=("y", "mean"), z=("z", "median")).reset_index(drop=True)
+    xi, yi, zi = dfc["x"].to_numpy(), dfc["y"].to_numpy(), dfc["z"].to_numpy()
+    P2 = np.column_stack([xi, yi])
+    tri = Delaunay(P2)
+    ins = _dump_inside(boundary, grid_x, grid_y) if boundary is not None else np.ones(grid_x.shape, bool)
+    gz = np.full(grid_x.shape, np.nan)
+    ii = np.nonzero(ins.ravel())[0]
+    Q = np.column_stack([grid_x.ravel()[ii], grid_y.ravel()[ii]])
+    sid = tri.find_simplex(Q)
+    ok = sid >= 0
+    n_out = int((~ok).sum())
+    sid_ok, Qok, iok = sid[ok], Q[ok], ii[ok]
+    Tm = tri.transform[sid_ok]
+    r = np.einsum("nij,nj->ni", Tm[:, :2, :], Qok - Tm[:, 2, :])
+    bw = np.column_stack([r, 1.0 - r.sum(axis=1)])
+    verts = tri.simplices[sid_ok]
+    zz = (bw * zi[verts]).sum(axis=1)
+    pv = P2[verts]
+    e = np.maximum.reduce([np.hypot(*(pv[:, 0] - pv[:, 1]).T), np.hypot(*(pv[:, 1] - pv[:, 2]).T), np.hypot(*(pv[:, 2] - pv[:, 0]).T)])
+    gap_len = float(gap_len) if gap_len else max(80.0, 40.0 * med_sp)
+    long_m = e > gap_len
+    flat_tri = np.ptp(zi[verts], axis=1) < 1e-6
+    zz = np.where(long_m, np.nan, zz)
+    gz.ravel()[iok] = zz
+    # isi lubang KECIL (<= 2 sel dari data) seperti 'nearest fill' Erosion Map; celah besar dibiarkan kosong
+    hole = ins & ~np.isfinite(gz)
+    n_hole = int(hole.sum())
+    if hole.any() and np.isfinite(gz).any():
+        d, idx = ndi.distance_transform_edt(~np.isfinite(gz), return_indices=True)
+        fill = hole & (d <= 2.0)
+        gz = np.where(fill, gz[tuple(idx)], gz)
+    # QC: deviasi grid vs titik kontur asli
+    sub = xyz0[:: max(1, len(xyz0) // 40000)]
+    fi, fj = (sub[:, 0] - x0) / dx, (sub[:, 1] - y0) / dy
+    inb = (fi >= 0) & (fi <= grid_res - 1) & (fj >= 0) & (fj <= grid_res - 1)
+    gzf = np.where(np.isfinite(gz), gz, np.nan)
+    zs_ = ndi.map_coordinates(np.nan_to_num(gzf, nan=-1e9), [fi[inb], fj[inb]], order=1, mode="nearest")
+    cm = ndi.map_coordinates(np.isfinite(gzf).astype(float), [fi[inb], fj[inb]], order=1, mode="nearest") > 0.999
+    dev = np.abs(zs_[cm] - sub[inb, 2][cm]) if cm.any() else np.array([np.nan])
+    try:
+        lv = np.sort(np.unique(np.round([float(np.median(np.asarray(c, float)[:, 2])) for c in contours if len(c) >= 2], 3)))
+        dl = np.diff(lv)
+        cint = float(np.median(dl[dl > 1e-6])) if (dl > 1e-6).any() else 0.0
+    except Exception:
+        cint = 0.0
+    qc = dict(cint=cint, n_src=int(len(xyz0)), n_dens=int(nadd), n_tin=int(len(xi)), n_blunder=n_blunder, spacing=med_sp, dens_target=float(tgt),
+              cell_x=float(dx), cell_y=float(dy), grid_res=int(grid_res), n_tri=int(len(tri.simplices)),
+              n_long=int(long_m.sum()), gap_len=gap_len, n_outside_hull=n_out, n_hole=n_hole,
+              flat_share=float(flat_tri.mean()) if len(flat_tri) else 0.0, long_share=float(long_m.mean()) if len(long_m) else 0.0,
+              dev_rmse=float(np.sqrt(np.nanmean(dev ** 2))), dev_p95=float(np.nanpercentile(dev, 95)), dev_max=float(np.nanmax(dev)))
+    # garis kontur untuk overlay (maks ~120 ribu segmen)
+    tot = sum(max(len(c) - 1, 0) for c in contours)
+    stp = max(1, int(np.ceil(tot / 120000.0)))
+    lines = []
+    for c in contours:
+        c = np.asarray(c, float)
+        if len(c) >= 2:
+            lines.append(c[::stp] if stp == 1 or len(c[::stp]) >= 2 else c[[0, -1]])
+    return dict(grid_x=grid_x, grid_y=grid_y, grid_z=gz, qc=qc, lines=lines, tin=(xi, yi, zi))
+
+
+def _bch_open_w(mask, dx, dy, width):
+    """Opening morfologi berbasis jarak: pertahankan bagian mask yang lebarnya >= width (m)."""
+    from scipy import ndimage as ndi
+    r = 0.5 * float(width)
+    edt = ndi.distance_transform_edt(mask, sampling=(dx, dy))
+    core = edt >= r - 0.5 * min(dx, dy)
+    if not core.any():
+        return np.zeros(mask.shape, bool)
+    back = ndi.distance_transform_edt(~core, sampling=(dx, dy)) <= r + 0.5 * min(dx, dy)
+    return back & mask
+
+
+def _bch_analyze2(xs, ys, z, P=None):
+    """Klasifikasi berbasis GEOMETRI dengan ambang absolut (bukan Otsu): 1 Bench, 2 Ramp, 3 Muka bench, 4 Lereng antar-ramp/overall,
+    5 Berm sempit, 6 Bidang landai (belum pasti). Tinggi = elevasi crest - toe memakai cincin crest/toe terdekat di luar muka (bukan seluruh lereng)."""
+    from scipy import ndimage as ndi
+    P = {**_BCH_DEF, **(P or {})}
+    xs = np.asarray(xs, float); ys = np.asarray(ys, float); z = np.asarray(z, float)
+    S8 = np.ones((3, 3), bool)
+    valid = np.isfinite(z)
+    zf = _bch_fill_nearest(z)
+    dx, dy = float(abs(xs[1] - xs[0])), float(abs(ys[1] - ys[0]))
+    cell = max(dx, dy)
+    vm = ndi.binary_erosion(valid, structure=S8, iterations=1)
+    zs = ndi.gaussian_filter(zf, P["smooth"]) if P["smooth"] > 0 else zf
+    gx, gy = np.gradient(zs, dx, dy)
+    tn = np.hypot(gx, gy)
+    slope = np.degrees(np.arctan(tn))
+    # ---------------- muka curam (histeresis dengan ambang ABSOLUT) ----------------
+    seeds = vm & (slope >= P["face_deg"])
+    low = vm & (slope >= P["grow_deg"])
+    lab_l, nl = ndi.label(low, structure=S8)
+    ok_l = np.isin(lab_l, np.unique(lab_l[seeds])) if nl else low
+    it_g = max(1, int(round(P["grow_m"] / cell)))
+    face = seeds | (ndi.binary_dilation(seeds, structure=S8, iterations=it_g) & low & ok_l)
+    face = ndi.binary_closing(face, structure=S8, iterations=1) & vm
+    # ---------------- pemisah: berm/ramp sempit di antara dua zona curam ----------------
+    dips = np.zeros(face.shape, bool)
+    if P["split"]:
+        zl = ndi.gaussian_filter(zf, 0.5)
+        gxl, gyl = np.gradient(zl, dx, dy)
+        sl_d = np.degrees(np.arctan(np.hypot(gxl, gyl)))
+        kmax = int(max(1, round(float(P["berm_w"]) / (2.0 * cell))))
+        for kk in range(1, kmax + 1):
+            for di, dj in ((1, 0), (0, 1), (1, 1), (1, -1)):
+                sp = _bch_shift(sl_d, kk * di, kk * dj, 0.0)
+                sm_ = _bch_shift(sl_d, -kk * di, -kk * dj, 0.0)
+                dips |= (sp >= P["face_deg"]) & (sm_ >= P["face_deg"]) & (sl_d < P["split_ratio"] * np.minimum(sp, sm_))
+        dips &= vm
+        dips = (ndi.binary_closing(dips, structure=S8, iterations=1) | dips) & vm
+        face &= ~dips
+    holes = ndi.binary_fill_holes(face) & ~face
+    if holes.any():
+        hl, hn = ndi.label(holes)
+        hsz = ndi.sum(holes, hl, index=np.arange(1, hn + 1))
+        face |= np.isin(hl, np.nonzero(hsz <= 12)[0] + 1)
+    face &= vm & ~dips
+    face = ndi.binary_opening(face, structure=S8, iterations=1) | (face & ndi.binary_dilation(seeds, iterations=1))
+    face &= ~dips
+    lab, n = ndi.label(face, structure=S8)
+    if n:
+        ar = ndi.sum(face, lab, index=np.arange(1, n + 1)) * dx * dy
+        face &= ~np.isin(lab, np.nonzero(ar < P["min_area"])[0] + 1)
+    # ---------------- lereng sedang yang lebar (antar-ramp/overall) ----------------
+    mod = vm & ~face & ~dips & (slope >= P["ir_deg"])
+    mod = _bch_open_w(mod, dx, dy, max(P["bench_min_w"], 3 * cell))
+    ml, mn = ndi.label(mod, structure=S8)
+    if mn:
+        ar = ndi.sum(mod, ml, index=np.arange(1, mn + 1)) * dx * dy
+        mod &= ~np.isin(ml, np.nonzero(ar < 2 * P["min_area"])[0] + 1)
+    sl = face | mod
+    # ---------------- platform (bidang datar) ----------------
+    # Pada DEM dari kontur, lantai bench datar yang elevasinya di antara dua level kontur tampak miring (<= interval/lebar) -> ambang 'datar' efektif
+    # dinaikkan sesuai interval kontur (hanya utk bidang yang menempel pada muka). Ramp dibedakan dari bench lewat ARAH kemiringan terhadap sumbu panjang bidang.
+    flat_eff = float(P["flat_deg"])
+    if P.get("cint", 0) and P["cint"] > 0:
+        flat_eff = min(max(flat_eff, float(np.degrees(np.arctan(P["cint"] / max(P["bench_min_w"], 1e-6))))), P["grow_deg"] - 1.0)
+    fl = vm & ~sl & ~dips & (slope <= flat_eff)
+    tru = fl & (slope <= P["flat_deg"])
+    lf, nf = ndi.label(fl, structure=S8)
+    P0 = fl.copy()
+    notP = np.zeros(z.shape, bool)
+    app_flat = np.zeros(z.shape, bool)
+    if nf and flat_eff > P["flat_deg"]:
+        ix_ = np.arange(1, nf + 1)
+        touch = ndi.binary_dilation(sl | dips, structure=S8, iterations=2)
+        share = np.asarray(ndi.mean(tru.astype(float), lf, index=ix_))
+        touches = np.asarray(ndi.maximum((touch & fl).astype(float), lf, index=ix_)) > 0.5
+        keepc = (share >= 0.5) | touches
+        P0 = np.isin(lf, ix_[keepc])
+        notP = fl & ~P0
+        app_flat = P0 & np.isin(lf, ix_[share < 0.5])
+    P1 = _bch_open_w(P0, dx, dy, P["bench_min_w"])
+    near1 = ndi.distance_transform_edt(~P1, sampling=(dx, dy)) <= 2.0 * cell if P1.any() else np.zeros(P0.shape, bool)
+    P1 = P1 | (P0 & near1)
+    narrow = P0 & ~P1
+    edt1 = ndi.distance_transform_edt(P1, sampling=(dx, dy))
+    ridge = P1 & (edt1 > 0) & (edt1 >= ndi.maximum_filter(edt1, size=3))
+    if ridge.any():
+        _, ixr = ndi.distance_transform_edt(~ridge, return_indices=True)
+        w_loc = 2.0 * edt1[tuple(ixr)]
+    else:
+        w_loc = np.zeros(z.shape)
+    sg = max(1.0, 8.0 / cell)
+    es = ndi.gaussian_filter(edt1, 1.0)
+    ex, ey = np.gradient(es, dx, dy)
+    sj = max(1.0, 10.0 / cell)
+    Jxx, Jyy, Jxy = (ndi.gaussian_filter(np.where(P1, a_, 0.0), sj) for a_ in (ex * ex, ey * ey, ex * ey))
+    th = 0.5 * np.arctan2(2 * Jxy, Jxx - Jyy)
+    coh = np.sqrt((Jxx - Jyy) ** 2 + 4 * Jxy ** 2) / np.maximum(Jxx + Jyy, 1e-9)
+    glong = 100.0 * np.abs(gx * (-np.sin(th)) + gy * np.cos(th))
+    gcross = 100.0 * np.abs(gx * np.cos(th) + gy * np.sin(th))
+    den = ndi.gaussian_filter(P1.astype(float), sg)
+    sm_ = lambda a_: np.where(den > 1e-3, ndi.gaussian_filter(np.where(P1, a_, 0.0), sg) / np.maximum(den, 1e-3), 0.0)
+    g_loc, gx_loc, coh_s = sm_(glong), sm_(gcross), sm_(coh)
+    elong_ok = coh_s >= 0.30
+    ramp_like = P1 & elong_ok & (g_loc >= P["ramp_g_min"]) & (g_loc <= P["ramp_g_max"]) & (w_loc >= P["ramp_w_min"]) & (w_loc <= P["ramp_w_max"])
+    bench_like = P1 & ~ramp_like & ((g_loc < P["ramp_g_min"]) | (w_loc > P["ramp_w_max"]) | (~elong_ok & (g_loc <= P["ramp_g_max"])))
+    gentle = (P1 & ~ramp_like & ~bench_like) | notP
+    typ = np.zeros(z.shape, np.uint8)
+    # ramp: butuh bukti geometri (memanjang + cukup panjang)
+    rl, rn = ndi.label(ramp_like, structure=S8)
+    ramp_ok = np.zeros(z.shape, bool)
+    if rn:
+        rid_ = np.arange(1, rn + 1)
+        area_r = np.asarray(ndi.sum(ramp_like, rl, rid_)) * dx * dy
+        rdg = ridge & ramp_like
+        wm = np.asarray(ndi.mean(np.where(rdg, 2.0 * edt1, np.nan), rl, rid_)) if rdg.any() else np.zeros(rn)
+        wm = np.where(np.isfinite(wm) & (wm > 0), wm, np.maximum(P["ramp_w_min"], 1.0))
+        L = area_r / wm
+        good = rid_[(L >= P["ramp_min_len"]) & (L / wm >= P["ramp_elong"])]
+        ramp_ok = np.isin(rl, good)
+    gentle |= ramp_like & ~ramp_ok
+    bl, bn = ndi.label(bench_like, structure=S8)
+    if bn:
+        ar = np.asarray(ndi.sum(bench_like, bl, np.arange(1, bn + 1))) * dx * dy
+        small = np.isin(bl, np.nonzero(ar < P["min_area"])[0] + 1)
+        gentle |= small
+        bench_like = bench_like & ~small
+    typ[bench_like] = 1
+    typ[ramp_ok] = 2
+    # narrow berm: pemisah (dips) + bidang datar sempit yang cukup luas
+    nl2, nn2 = ndi.label(narrow, structure=S8)
+    nar_ok = np.zeros(z.shape, bool)
+    if nn2:
+        ar = np.asarray(ndi.sum(narrow, nl2, np.arange(1, nn2 + 1))) * dx * dy
+        nar_ok = np.isin(nl2, np.nonzero(ar >= P["min_area"])[0] + 1)
+    typ[(dips | nar_ok) & vm & (typ == 0)] = 5
+    # ---------------- tinggi: cincin crest (lebih tinggi) / toe (lebih rendah) di luar muka ----------------
+    ring = ndi.binary_dilation(sl, structure=S8, iterations=2) & ~sl & vm
+    d_f, idx_f = ndi.distance_transform_edt(~sl, return_indices=True)
+    ci, cj = np.indices(z.shape)
+    vi = (ci - idx_f[0]) * dx
+    vj = (cj - idx_f[1]) * dy
+    dot = vi * gx[tuple(idx_f)] + vj * gy[tuple(idx_f)]       # cincin di sisi menanjak muka (crest) -> dot > 0
+    up_r = ring & (dot > 0)
+    lo_r = ring & ~up_r
+    # elevasi platform datar = median bidang (bukan nilai tepi yang terdistorsi interpolasi antar-kontur)
+    zfix = zf.copy()
+    bm = (typ == 1) | (typ == 5)
+    if bm.any():
+        lb, nb = ndi.label(bm, structure=S8)
+        ixb = np.arange(1, nb + 1)
+        zmed = np.asarray(ndi.median(zf, lb, index=ixb))
+        zr = np.asarray(ndi.labeled_comprehension(zf, lb, ixb, lambda v: np.percentile(v, 95) - np.percentile(v, 5), float, 0.0))
+        okb = zr <= max(1.5 * float(P.get("cint", 0) or 0), 1.0) + 0.5
+        zfix = np.where((lb > 0) & np.isin(lb, ixb[okb]), zmed[np.maximum(lb - 1, 0)], zf)
+    def _near(m):
+        if not m.any():
+            return np.full(z.shape, np.nan), np.full(z.shape, np.inf)
+        d, ix = ndi.distance_transform_edt(~m, sampling=(dx, dy), return_indices=True)
+        return zfix[tuple(ix)], d
+    zc_, dc_ = _near(up_r)
+    zt_, dt_ = _near(lo_r)
+    dmax = 150.0
+    Hraw = np.where(sl & (dc_ <= dmax) & (dt_ <= dmax), zc_ - zt_, np.nan)
+    crest = np.where(np.isfinite(Hraw), zc_, np.nan)
+    toe = np.where(np.isfinite(Hraw), zt_, np.nan)
+    sl &= np.isfinite(Hraw) & (Hraw > 0)
+    Hn = _bch_fill_nearest(np.where(sl, Hraw, np.nan))
+    Hm = ndi.median_filter(Hn, size=5)
+    H = np.where(sl, Hm, np.nan)
+    lab_s, ns = ndi.label(sl, structure=S8)
+    ids = np.arange(1, ns + 1)
+    if ns:
+        hmed = np.asarray(ndi.median(np.nan_to_num(H, nan=0.0), lab_s, index=ids))
+        drop = ids[hmed < P["min_h"]]
+        if len(drop):
+            sl &= ~np.isin(lab_s, drop)
+            lab_s, ns = ndi.label(sl, structure=S8)
+            ids = np.arange(1, ns + 1)
+    H = np.where(sl, H, np.nan); crest = np.where(sl, crest, np.nan); toe = np.where(sl, toe, np.nan)
+    # bidang landai belum pasti: platform tak lolos + lereng landai lebar (flat_deg..ir_deg) yang bukan muka
+    gm = vm & ~sl & (typ == 0) & (slope > flat_eff) & (slope < P["ir_deg"])
+    gm = _bch_open_w(gm, dx, dy, max(P["bench_min_w"], 3 * cell))
+    gl, gn = ndi.label(gm | gentle, structure=S8)
+    if gn:
+        ar = np.asarray(ndi.sum(gm | gentle, gl, np.arange(1, gn + 1))) * dx * dy
+        keep6 = np.isin(gl, np.nonzero(ar >= P["min_area"])[0] + 1)
+        typ[keep6 & (typ == 0) & ~sl] = 6
+    # muka -> tipe 3 / 4 menurut tinggi komponen
+    conf = np.zeros(z.shape, np.uint8)
+    sup = {}
+    if ns:
+        hmed = np.asarray(ndi.median(np.nan_to_num(H, nan=0.0), lab_s, index=ids))
+        cid = lab_s[tuple(idx_f)]
+        plat = (P0 | dips | (typ >= 1) & (typ <= 5))
+        rr = ring & (cid > 0)
+        cu = cid[rr & up_r]; cl = cid[rr & lo_r]
+        pu = cid[rr & up_r & plat]; pl = cid[rr & lo_r & plat]
+        nu = np.bincount(cu, minlength=ns + 1)[1:]; nl_ = np.bincount(cl, minlength=ns + 1)[1:]
+        su = np.bincount(pu, minlength=ns + 1)[1:] / np.maximum(nu, 1)
+        sd = np.bincount(pl, minlength=ns + 1)[1:] / np.maximum(nl_, 1)
+        sup_min = np.minimum(np.where(nu > 0, su, 0.0), np.where(nl_ > 0, sd, 0.0))
+        is_mod = np.asarray(ndi.mean(mod.astype(float), lab_s, index=ids)) > 0.5
+        c_c = np.where(sup_min >= 0.5, 1, np.where(sup_min >= 0.25, 2, 3))
+        c_c = np.where((hmed > P["h_flag"]) | (nu == 0) | (nl_ == 0), 3, c_c)
+        c_c = np.where((c_c == 1) & ((is_mod) | (cell > hmed / 4.0)), 2, c_c)
+        t_c = np.where((hmed > P["h_flag"]) | is_mod, 4, 3).astype(np.uint8)
+        lut_t = np.concatenate([[0], t_c]).astype(np.uint8)
+        lut_c = np.concatenate([[0], c_c]).astype(np.uint8)
+        typ[sl] = lut_t[lab_s[sl]]
+        conf[sl] = lut_c[lab_s[sl]]
+        sup = dict(up=su, dn=sd, hmed=hmed)
+    # ---------------- region (id unik per tipe) + statistik ----------------
+    rid = np.zeros(z.shape, np.int32)
+    rtype = []
+    off = 0
+    for t in range(1, 7):
+        lt, nt = ndi.label(typ == t, structure=S8)
+        if nt:
+            rid[lt > 0] = lt[lt > 0] + off
+            rtype += [t] * nt
+            off += nt
+    rtype = np.asarray(rtype, int)
+    N = off
+    reg = dict(type=rtype)
+    if N:
+        ix = np.arange(1, N + 1)
+        gm_ = lambda a: np.asarray(ndi.mean(a, rid, index=ix))
+        reg["area"] = np.asarray(ndi.sum(np.ones(z.shape), rid, index=ix)) * dx * dy
+        reg["z"] = np.asarray(ndi.median(zf, rid, index=ix))
+        reg["slope"] = gm_(slope)
+        reg["grade"] = gm_(g_loc); reg["xfall"] = gm_(gx_loc)
+        reg["width"] = gm_(np.where(typ >= 1, w_loc, 0.0))
+        for nm, arr in (("h", H), ("crest", crest), ("toe", toe)):
+            reg[nm] = np.asarray(ndi.mean(np.nan_to_num(arr, nan=0.0), rid, index=ix))
+        reg["hmax"] = np.asarray(ndi.maximum(np.nan_to_num(H, nan=0.0), rid, index=ix))
+        reg["hp10"] = np.asarray(ndi.labeled_comprehension(np.nan_to_num(H, nan=0.0), rid, ix, lambda v: np.percentile(v, 10), float, 0.0)) if N <= 6000 else reg["h"]
+        reg["hp90"] = np.asarray(ndi.labeled_comprehension(np.nan_to_num(H, nan=0.0), rid, ix, lambda v: np.percentile(v, 90), float, 0.0)) if N <= 6000 else reg["h"]
+        cf = np.asarray(ndi.maximum(conf.astype(float), rid, index=ix)).astype(int)
+        wmean = reg["width"]
+        plat_cf = np.where(wmean >= 3.0 * cell, 1, 2)
+        af = np.asarray(ndi.mean(app_flat.astype(float), rid, index=ix)) > 0.5
+        plat_cf = np.where(af, 2, plat_cf)
+        cf = np.where(cf > 0, cf, np.where(np.isin(rtype, (1, 2)), plat_cf, 3))
+        reg["conf"] = cf
+        reg["length"] = np.where(np.isin(rtype, (1, 2)), reg["area"] / np.maximum(wmean, 1e-6), 0.0)
+        conf = cf[np.maximum(rid - 1, 0)].astype(np.uint8) * (rid > 0)
+    typ_face = (typ == 3) | (typ == 4)
+    # titik crest/toe untuk overlay (hanya muka valid)
+    cr_pts = up_r & ndi.binary_dilation(typ_face, structure=S8, iterations=2)
+    to_pts = lo_r & ndi.binary_dilation(typ_face, structure=S8, iterations=2)
+    return dict(face=typ_face, H=np.where(typ_face, H, np.nan), crest=np.where(typ_face, crest, np.nan), toe=np.where(typ_face, toe, np.nan),
+                slope=slope, valid=valid, dx=dx, dy=dy, labels=np.where(typ_face, lab_s, 0), n_comp=int(len(np.unique(lab_s[typ_face]))),
+                zs=zs, face_deg=float(P["face_deg"]), dips=(typ == 5) & vm, typ=typ, conf=conf, rid=rid, reg=reg, params=P, refined=0,
+                cr_pts=cr_pts, to_pts=to_pts, g_loc=g_loc, w_loc=w_loc, zf=zf)
+
+
+def _bch_type_texture(typ, conf, valid, hs, max_px=1792):
+    """Tekstur jenis (Bench/Ramp/Slope/...) -- batas mulus lewat peta probabilitas; keyakinan rendah dibuat pucat."""
+    from scipy import ndimage as ndi
+    import io as _io
+    nx, ny = typ.shape
+    f = max(1.0, min(4.0, max_px / float(max(nx, ny))))
+    up = lambda a, o=1: ndi.zoom(a.astype(float), f, order=o, mode="nearest")
+    hsu = np.clip(up(hs), 0, 1)
+    vu = up(valid.astype(float)) > 0.5
+    base = (0.42 + 0.58 * hsu)[..., None] * np.array([0.78, 0.8, 0.82])
+    shade = (0.55 + 0.6 * hsu)[..., None]
+    pr = np.stack([up(typ == t) for t in range(1, 7)], axis=0)
+    am = np.argmax(pr, axis=0)
+    inside = pr.max(axis=0) > 0.5
+    cols = np.array([[int(_BCH_TYPES[t][1][i:i + 2], 16) for i in (1, 3, 5)] for t in range(1, 7)], float) / 255.0
+    cu = cols[am]
+    low = up((conf == 3) & (typ > 0)) > 0.5
+    cu = np.where(low[..., None], 0.55 * cu + 0.45, cu)
+    rgb = np.where(inside[..., None], np.clip(cu * shade, 0, 1), base)
+    im = np.clip(np.where(vu[..., None], rgb, 0.08) * 255, 0, 255).astype(np.uint8)
+    im = np.transpose(im, (1, 0, 2))[::-1]
+    b = _io.BytesIO(); PILImage.fromarray(im).save(b, format="PNG", optimize=False)
+    return b.getvalue()
+
+
+def _bch_section(xs, ys, zf, typ, x1, y1, x2, y2, step=None):
+    """Profil penampang dari grid permukaan (sama dengan mesh) + jenis tiap titik. Return (d, z, t)."""
+    from scipy import ndimage as ndi
+    dx, dy = float(abs(xs[1] - xs[0])), float(abs(ys[1] - ys[0]))
+    L = float(np.hypot(x2 - x1, y2 - y1))
+    step = step or min(dx, dy)
+    n = max(2, int(L / step) + 1)
+    t = np.linspace(0.0, 1.0, n)
+    px, py = x1 + (x2 - x1) * t, y1 + (y2 - y1) * t
+    fi, fj = (px - xs[0]) / dx, (py - ys[0]) / dy
+    ins = (fi >= 0) & (fi <= len(xs) - 1) & (fj >= 0) & (fj <= len(ys) - 1)
+    zz = ndi.map_coordinates(zf, [np.clip(fi, 0, len(xs) - 1), np.clip(fj, 0, len(ys) - 1)], order=1, mode="nearest")
+    tt = ndi.map_coordinates(typ.astype(float), [np.clip(fi, 0, len(xs) - 1), np.clip(fj, 0, len(ys) - 1)], order=0, mode="nearest").astype(int)
+    zz = np.where(ins, zz, np.nan)
+    tt = np.where(ins, tt, 0)
+    return t * L, zz, tt, px, py
+
+
+def _bch_section_runs(d, z, t):
+    """Run berurutan per jenis di sepanjang penampang -> tabel (jenis, jarak mulai-akhir, elevasi atas/bawah, tinggi, sudut)."""
+    rows = []
+    i = 0
+    n = len(d)
+    while i < n:
+        j = i
+        while j + 1 < n and t[j + 1] == t[i]:
+            j += 1
+        if t[i] in (3, 4) and np.isfinite(z[i:j + 1]).all():
+            seg_z = z[i:j + 1]
+            run = float(d[j] - d[i])
+            hh = float(abs(seg_z[0] - seg_z[-1]))
+            rows.append(dict(Jenis=_BCH_TYPES[int(t[i])][0], Dari_m=round(float(d[i]), 1), Sampai_m=round(float(d[j]), 1),
+                             Elev_atas_m=round(float(seg_z.max()), 2), Elev_bawah_m=round(float(seg_z.min()), 2), Tinggi_m=round(hh, 2),
+                             Sudut_deg=round(float(np.degrees(np.arctan2(hh, max(run, 1e-6)))), 1)))
+        i = j + 1
+    return pd.DataFrame(rows)
+
+
 _BCH_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 html,body{margin:0;height:100%;background:#0b1220;color:#e5e7eb;font:12px/1.35 system-ui,Segoe UI,Roboto,sans-serif;overflow:hidden}
 #c{position:absolute;inset:0}canvas{display:block;width:100%;height:100%;touch-action:none}
-.p{position:absolute;background:rgba(15,23,42,.82);border:1px solid rgba(148,163,184,.25);border-radius:8px;padding:8px 10px}
-#leg{left:10px;top:10px;max-width:290px}#ctl{right:10px;top:10px;min-width:170px}#hov{left:10px;bottom:10px;min-width:200px}
+.p{position:absolute;background:rgba(15,23,42,.84);border:1px solid rgba(148,163,184,.25);border-radius:8px;padding:8px 10px}
+#leg{left:10px;top:10px;max-width:300px}#ctl{right:10px;top:10px;min-width:180px}#hov{left:10px;bottom:10px;min-width:220px;max-width:380px}
 .sw{display:inline-block;width:11px;height:11px;border-radius:2px;margin-right:6px;vertical-align:-1px}
 button{background:#1e293b;color:#e5e7eb;border:1px solid #334155;border-radius:6px;padding:3px 8px;margin:2px 2px 2px 0;cursor:pointer;font-size:11px}
 button:hover{background:#334155}button.on{background:#2563eb;border-color:#3b82f6}label{display:block;margin:3px 0}input[type=range]{width:100%}
@@ -30189,8 +30659,10 @@ b.t{font-size:13px}.m{color:#94a3b8}
 <div class="p" id="leg"></div>
 <div class="p" id="ctl">
 <button id="bReset">Reset</button><button id="bTop">Atas</button><button id="bSide">Samping</button>
-<div style="margin:4px 0"><button id="vDom" class="on">Domain</button><button id="vDet">Deteksi bench</button><button id="vPlain">Polos</button></div>
+<div style="margin:4px 0"><button id="vTyp" class="on">Jenis</button><button id="vDom">Tinggi</button><button id="vDet">Unit</button><button id="vPlain">Polos</button></div>
 <label><input type="checkbox" id="kWire"> Mesh (wireframe)</label>
+<label><input type="checkbox" id="kLn"> Garis DXF kontur</label>
+<label><input type="checkbox" id="kCT"> Titik crest (merah) / toe (biru)</label>
 <label>Eksagerasi vertikal: <span id="veV">1.0</span>×<input type="range" id="ve" min="0.5" max="4" step="0.1" value="1"></label>
 <div class="m">Kiri: putar · Kanan/Shift: geser · Roda: zoom</div>
 </div>
@@ -30225,44 +30697,42 @@ var nv=pos.length/3, uv=new Float32Array(nv*2);
 var X0=P.ext[0],X1=P.ext[1],Y0=P.ext[2],Y1=P.ext[3];
 for(var i=0;i<nv;i++){uv[2*i]=(pos[3*i]-X0)/(X1-X0);uv[2*i+1]=(-pos[3*i+2]-Y0)/(Y1-Y0);}
 g.setAttribute('uv',new T.BufferAttribute(uv,2));g.setIndex(new T.BufferAttribute(idx,1));
-var loader=new T.TextureLoader(),texD,texP;
+var loader=new T.TextureLoader();
 function mk(u){var t=loader.load(u,function(){draw();});t.anisotropy=8;t.minFilter=T.LinearMipmapLinearFilter;t.magFilter=T.LinearFilter;return t;}
-texD=mk(P.texD);texP=mk(P.texP);var texU=mk(P.texU);
-var mat=new T.MeshBasicMaterial({map:texD,side:T.DoubleSide});
-var mesh=new T.Mesh(g,mat);scene.add(mesh);
-var wire=new T.Mesh(g,new T.MeshBasicMaterial({color:0x0f172a,wireframe:true,transparent:true,opacity:0.35}));wire.visible=false;scene.add(wire);
+var texT=mk(P.texT),texD=mk(P.texD),texU=mk(P.texU),texP=mk(P.texP);
+var mat=new T.MeshBasicMaterial({map:texT,side:T.DoubleSide});
+var grp=new T.Group();scene.add(grp);
+var mesh=new T.Mesh(g,mat);grp.add(mesh);
+var wire=new T.Mesh(g,new T.MeshBasicMaterial({color:0x0f172a,wireframe:true,transparent:true,opacity:0.35}));wire.visible=false;grp.add(wire);
+function lineObj(b,col){ if(!b) return null; var a=new Float32Array(b64(b).buffer); var gg=new T.BufferGeometry(); gg.setAttribute('position',new T.BufferAttribute(a,3));
+  var o=new T.LineSegments(gg,new T.LineBasicMaterial({color:col,transparent:true,opacity:0.9})); o.visible=false; grp.add(o); return o;}
+function ptsObj(b,col){ if(!b) return null; var a=new Float32Array(b64(b).buffer); var gg=new T.BufferGeometry(); gg.setAttribute('position',new T.BufferAttribute(a,3));
+  var o=new T.Points(gg,new T.PointsMaterial({color:col,size:3,sizeAttenuation:false})); o.visible=false; grp.add(o); return o;}
+var oLn=lineObj(P.lines,0xffffff), oC=ptsObj(P.cpts,0xff3b3b), oT=ptsObj(P.tpts,0x3b9bff);
 var cz=(P.zr[0]+P.zr[1])/2, size=Math.max(X1-X0,Y1-Y0);
 var th=0.9,ph=1.0,R=size*1.15,tg=new T.Vector3(0,0,0),ve=1;
-function setVE(v){ve=v;mesh.scale.y=v;wire.scale.y=v;$('veV').textContent=v.toFixed(1);}
-function place(){
-  var sp=Math.sin(ph),cp=Math.cos(ph);
-  cam.position.set(tg.x+R*sp*Math.sin(th),tg.y+R*cp,tg.z+R*sp*Math.cos(th));cam.lookAt(tg);
-}
+function setVE(v){ve=v;grp.scale.y=v;$('veV').textContent=v.toFixed(1);}
+function place(){var sp=Math.sin(ph),cp=Math.cos(ph);cam.position.set(tg.x+R*sp*Math.sin(th),tg.y+R*cp,tg.z+R*sp*Math.cos(th));cam.lookAt(tg);}
 function draw(){renderer.render(scene,cam);}
 function resize(){var w=W.clientWidth||window.innerWidth,h=W.clientHeight||window.innerHeight;renderer.setSize(w,h,false);cam.aspect=w/h;cam.updateProjectionMatrix();place();draw();}
 function reset(){th=0.7;ph=1.0;R=size*1.15;tg.set(0,0,0);setVE(parseFloat($('ve').value)||1);place();draw();}
-// kontrol orbit sendiri (putar / geser / zoom)
-var dn=false,btn=0,lx=0,ly=0;
-var el=renderer.domElement;
+var dn=false,btn=0,lx=0,ly=0,el=renderer.domElement;
 el.addEventListener('contextmenu',function(e){e.preventDefault();});
 el.addEventListener('pointerdown',function(e){dn=true;btn=e.button;if(e.shiftKey)btn=2;lx=e.clientX;ly=e.clientY;el.setPointerCapture(e.pointerId);});
 el.addEventListener('pointerup',function(e){dn=false;});
 el.addEventListener('pointermove',function(e){
   if(dn){var dx=e.clientX-lx,dy=e.clientY-ly;lx=e.clientX;ly=e.clientY;
-    if(btn===2||btn===1){var k=R*0.0016;var rx=new T.Vector3().setFromMatrixColumn(cam.matrix,0),ry=new T.Vector3().setFromMatrixColumn(cam.matrix,1);
-      tg.addScaledVector(rx,-dx*k);tg.addScaledVector(ry,dy*k);}
+    if(btn===2||btn===1){var k=R*0.0016;var rx=new T.Vector3().setFromMatrixColumn(cam.matrix,0),ry=new T.Vector3().setFromMatrixColumn(cam.matrix,1);tg.addScaledVector(rx,-dx*k);tg.addScaledVector(ry,dy*k);}
     else{th-=dx*0.006;ph=Math.min(Math.max(ph-dy*0.006,0.02),Math.PI-0.02);}
     place();draw();}
   else hover(e);
 });
 el.addEventListener('wheel',function(e){e.preventDefault();R*=Math.exp(e.deltaY*0.0012);R=Math.min(Math.max(R,size*0.03),size*8);place();draw();},{passive:false});
-// sentuh: 1 jari putar, 2 jari zoom
 var tp=null;
 el.addEventListener('touchstart',function(e){tp=e.touches.length===2?[e.touches[0],e.touches[1]]:null;},{passive:true});
 el.addEventListener('touchmove',function(e){if(e.touches.length===2&&tp){var d0=Math.hypot(tp[0].clientX-tp[1].clientX,tp[0].clientY-tp[1].clientY),d1=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY);if(d0>0){R*=d0/d1;place();draw();}tp=[e.touches[0],e.touches[1]];}},{passive:true});
-// hover info
 var ray=new T.Raycaster(),mv=new T.Vector2();
-var cg=P.cg, cls=b64(cg.cls), Hh=new Uint16Array(b64(cg.H).buffer), UD=new Uint16Array(b64(cg.uid).buffer), CR=new Uint16Array(b64(cg.crest).buffer), TO=new Uint16Array(b64(cg.toe).buffer);
+var cg=P.cg, RID=new Uint16Array(b64(cg.rid).buffer);
 function hover(e){
   var r=el.getBoundingClientRect();mv.set(((e.clientX-r.left)/r.width)*2-1,-((e.clientY-r.top)/r.height)*2+1);
   ray.setFromCamera(mv,cam);var h=ray.intersectObject(mesh,false);
@@ -30270,27 +30740,31 @@ function hover(e){
   var p=h[0].point;var x=p.x,y=-p.z,z=p.y/ve;
   var i=Math.round((x-X0)/(X1-X0)*(cg.nx-1)),j=Math.round((y-Y0)/(Y1-Y0)*(cg.ny-1));
   i=Math.min(Math.max(i,0),cg.nx-1);j=Math.min(Math.max(j,0),cg.ny-1);
-  var k=j*cg.nx+i,c=cls[k],hv=Hh[k]/100;
-  var nm=c>0?P.names[c-1]:'bukan muka bench';
-  var ex=(c>0)?'<br>Bench #'+UD[k]+' · crest '+(CR[k]/10+cg.zmn).toFixed(1)+' m · toe '+(TO[k]/10+cg.zmn).toFixed(1)+' m':'';
-  $('hov').innerHTML='<b class="t">'+nm+'</b>'+(c>0?'<br>Tinggi single bench ≈ '+hv.toFixed(1)+' m'+ex:'')+'<br><span class="m">X '+(x+P.org[0]).toFixed(1)+' · Y '+(y+P.org[1]).toFixed(1)+' · Z '+z.toFixed(1)+' m</span>';
+  var k=j*cg.nx+i,rid=RID[k];
+  var tx=rid>0?P.regs[rid-1]:'<b class="t">Tidak terklasifikasi</b>';
+  $('hov').innerHTML=tx+'<br><span class="m">X '+(x+P.org[0]).toFixed(1)+' · Y '+(y+P.org[1]).toFixed(1)+' · Z '+z.toFixed(1)+' m</span>';
 }
 $('bReset').onclick=reset;
 $('bTop').onclick=function(){ph=0.02;place();draw();};
 $('bSide').onclick=function(){ph=1.35;place();draw();};
-function setView(t,id){mat.map=t;mat.needsUpdate=true;['vDom','vDet','vPlain'].forEach(function(k){$(k).className=(k===id)?'on':'';});
-  $('legDom').style.display=(id==='vDom')?'block':'none';$('legDet').style.display=(id==='vDet')?'block':'none';draw();}
-$('vDom').onclick=function(){setView(texD,'vDom');};$('vDet').onclick=function(){setView(texU,'vDet');};$('vPlain').onclick=function(){setView(texP,'vPlain');};
+var VW={vTyp:[texT,'legTyp'],vDom:[texD,'legDom'],vDet:[texU,'legDet'],vPlain:[texP,'legPl']};
+function setView(id){mat.map=VW[id][0];mat.needsUpdate=true;for(var k in VW){$(k).className=(k===id)?'on':'';$(VW[k][1]).style.display=(k===id)?'block':'none';}draw();}
+Object.keys(VW).forEach(function(k){$(k).onclick=function(){setView(k);};});
 $('kWire').onchange=function(){wire.visible=this.checked;draw();};
+$('kLn').onchange=function(){if(oLn)oLn.visible=this.checked;draw();};
+$('kCT').onchange=function(){if(oC)oC.visible=this.checked;if(oT)oT.visible=this.checked;draw();};
 $('ve').oninput=function(){setVE(parseFloat(this.value));place();draw();};
 var lg='<b class="t">'+P.title+'</b><br>';
-for(var q=0;q<P.names.length;q++){lg+='<div><span class="sw" style="background:'+P.colors[q]+'"></span>'+P.names[q]+' <span class="m">· '+P.areas[q]+' m²</span></div>';}
-lg='<div id="legDom">'+lg+'<div><span class="sw" style="background:#73f2ff"></span>Berm/ramp sempit (pemisah bench)</div></div>';
-lg+='<div id="legDet" style="display:none"><b class="t">Hasil deteksi</b><br>Tiap muka single bench = warna berbeda<br><span class="sw" style="background:#73f2ff"></span>Berm/ramp sempit = pemisah bench</div>';
+var lt='<div id="legTyp">',q;
+for(q=0;q<P.tnames.length;q++){lt+='<div><span class="sw" style="background:'+P.tcolors[q]+'"></span>'+P.tnames[q]+' <span class="m">· '+P.tareas[q]+' m²</span></div>';}
+lt+='<div class="m">Warna pucat = keyakinan rendah</div></div>';
+var ld='<div id="legDom" style="display:none"><b class="t">Domain tinggi muka</b>';
+for(q=0;q<P.names.length;q++){ld+='<div><span class="sw" style="background:'+P.colors[q]+'"></span>'+P.names[q]+' <span class="m">· '+P.areas[q]+' m²</span></div>';}
+ld+='</div>';
+lg+=lt+ld+'<div id="legDet" style="display:none">Tiap unit muka = warna berbeda<br><span class="sw" style="background:#73f2ff"></span>Berm sempit = pemisah</div><div id="legPl" style="display:none">Hillshade polos</div>';
 lg+='<div class="m" style="margin-top:4px">'+P.note+'</div>';
 $('leg').innerHTML=lg;
 window.addEventListener('resize',resize);
-// geometri sudah dipusatkan; posisi y(three)=elevasi relatif
 resize();reset();setTimeout(draw,300);
 }catch(e){showErr('Viewer gagal: '+e.message);}
 }
@@ -30299,11 +30773,34 @@ loadThree(start);
 </script></body></html>"""
 
 
-def _bch_scene_html(xa, ya, za, valid, cls, zone, hs, names, colors, H, title, note, three_inline=None, dips=None, lab=None, crest=None, toe=None):
-    """Viewer 3D three.js (putar/geser/zoom bebas). Mesh = grid DEM (<=~280 simpul per sisi, tanpa lubang di luar boundary) + tekstur domain halus."""
+def _bch_reg_html(A):
+    reg = A["reg"]
+    cfn = {1: "tinggi", 2: "sedang", 3: "rendah"}
+    out = []
+    for i, t in enumerate(reg["type"]):
+        t = int(t)
+        nm = _BCH_TYPES[t][0]
+        cf = cfn.get(int(reg["conf"][i]), "-")
+        if t in (3, 4):
+            s = (f"<b class='t'>{nm}</b><br>Tinggi ≈ {reg['h'][i]:.1f} m (P10–P90: {reg['hp10'][i]:.1f}–{reg['hp90'][i]:.1f}) · crest {reg['crest'][i]:.1f} · toe {reg['toe'][i]:.1f} m"
+                 f"<br>Sudut ≈ {reg['slope'][i]:.0f}° · luas {reg['area'][i]:,.0f} m² · keyakinan {cf}")
+            if t == 4:
+                s += "<br><span class='m'>Tinggi melewati batas wajar single bench: kemungkinan beberapa bench tergabung (berm tak terbaca di kontur).</span>"
+        elif t in (1, 2):
+            s = (f"<b class='t'>{nm}</b><br>Elevasi ≈ {reg['z'][i]:.1f} m · lebar ≈ {reg['width'][i]:.0f} m · panjang ≈ {reg['length'][i]:.0f} m"
+                 f"<br>Kemiringan memanjang ≈ {reg['grade'][i]:.1f} % · melintang (tampak) ≈ {reg['xfall'][i]:.1f} % · keyakinan {cf}")
+        else:
+            s = f"<b class='t'>{nm}</b><br>Elevasi ≈ {reg['z'][i]:.1f} m · sudut ≈ {reg['slope'][i]:.0f}° · luas {reg['area'][i]:,.0f} m² · keyakinan {cf}"
+        out.append(s)
+    return out
+
+
+def _bch_scene_html(xa, ya, za, A, cls, zone, hs, names, colors, title, note, three_inline=None, lines=None):
+    """Viewer 3D three.js (putar/geser/zoom bebas). Mesh = grid DEM yang sama dgn analisis (<=~360 simpul/sisi) + tekstur jenis/domain/unit + overlay DXF & crest/toe."""
     import base64 as _b64, json as _json
+    valid = A["valid"]
     nx, ny = len(xa), len(ya)
-    sm = max(1, int(np.ceil(max(nx, ny) / 280.0)))
+    sm = max(1, int(np.ceil(max(nx, ny) / 360.0)))
     ii, jj = np.arange(0, nx, sm), np.arange(0, ny, sm)
     if ii[-1] != nx - 1:
         ii = np.append(ii, nx - 1)
@@ -30320,40 +30817,189 @@ def _bch_scene_html(xa, ya, za, valid, cls, zone, hs, names, colors, H, title, n
     a0, b0, c0, d0 = gid[:-1, :-1][q], gid[1:, :-1][q], gid[:-1, 1:][q], gid[1:, 1:][q]
     tri = np.concatenate([np.stack([a0, b0, d0], 1), np.stack([a0, d0, c0], 1)], axis=0).astype(np.uint32)
     pos = np.nan_to_num(pos, nan=0.0)
-    pD, pU, pP = _bch_textures(cls, zone, valid, hs, colors, dips=dips, lab=lab)
+    pD, pU, pP = _bch_textures(cls, zone, valid, hs, colors, dips=A.get("dips"), lab=A["labels"])
+    pT = _bch_type_texture(A["typ"], A["conf"], valid, hs)
     du = lambda b: "data:image/png;base64," + _b64.b64encode(b).decode("ascii")
     cs = max(1, int(np.ceil(max(nx, ny) / 400.0)))
-    cc = cls[::cs, ::cs]
-    Hc = np.nan_to_num(H[::cs, ::cs], nan=0.0)
-    zmn = float(np.nanmin(za))
-    enc = lambda a_: _b64.b64encode(np.ascontiguousarray(np.round(np.nan_to_num(a_[::cs, ::cs] - zmn, nan=0.0) * 10).clip(0, 65535).T).astype(np.uint16).tobytes()).decode("ascii")
-    lb = np.zeros(cls.shape, np.uint16) if lab is None else np.asarray(lab).astype(np.uint16)
-    cg = dict(nx=int(cc.shape[0]), ny=int(cc.shape[1]), zmn=zmn,
-              uid=_b64.b64encode(np.ascontiguousarray(lb[::cs, ::cs].T).tobytes()).decode("ascii"),
-              crest=enc(crest if crest is not None else np.full(cls.shape, np.nan)), toe=enc(toe if toe is not None else np.full(cls.shape, np.nan)),
-              cls=_b64.b64encode(np.ascontiguousarray(cc.T).astype(np.uint8).tobytes()).decode("ascii"),
-              H=_b64.b64encode(np.ascontiguousarray(np.round(Hc.T * 100)).astype(np.uint16).tobytes()).decode("ascii"))
-    areas = [int(round(float((cls == c).sum()) * abs(xa[1] - xa[0]) * abs(ya[1] - ya[0]))) for c in range(1, len(names) + 1)]
+    rid = np.minimum(A["rid"], 65535)[::cs, ::cs]
+    cg = dict(nx=int(rid.shape[0]), ny=int(rid.shape[1]), rid=_b64.b64encode(np.ascontiguousarray(rid.T).astype(np.uint16).tobytes()).decode("ascii"))
+    dxm, dym = abs(xa[1] - xa[0]), abs(ya[1] - ya[0])
+    areas = [int(round(float((cls == c).sum()) * dxm * dym)) for c in range(1, len(names) + 1)]
+    tareas = [int(round(float((A["typ"] == t).sum()) * dxm * dym)) for t in range(1, 7)]
+
+    def _lin(arrs):
+        segs = []
+        for c in arrs:
+            c = np.asarray(c, float)
+            if len(c) < 2:
+                continue
+            p = np.column_stack([c[:, 0] - cx, c[:, 2] - zc + 0.15, -(c[:, 1] - cy)]).astype(np.float32)
+            segs.append(np.concatenate([p[:-1], p[1:]], axis=1).reshape(-1, 3))
+        return _b64.b64encode(np.concatenate(segs).tobytes()).decode("ascii") if segs else None
+
+    def _pts(m):
+        iy, jx = np.nonzero(m)
+        if len(iy) > 60000:
+            s_ = rng_.choice(len(iy), 60000, replace=False)
+            iy, jx = iy[s_], jx[s_]
+        if not len(iy):
+            return None
+        p = np.column_stack([xa[iy] - cx, A["zf"][iy, jx] - zc + 0.2, -(ya[jx] - cy)]).astype(np.float32)
+        return _b64.b64encode(p.tobytes()).decode("ascii")
+
+    rng_ = np.random.default_rng(1)
     payload = dict(pos=_b64.b64encode(pos.tobytes()).decode("ascii"), idx=_b64.b64encode(tri.tobytes()).decode("ascii"),
                    ext=[float(xa[0] - cx), float(xa[-1] - cx), float(ya[0] - cy), float(ya[-1] - cy)],
-                   zr=[float(np.nanmin(Zs) - zc), float(np.nanmax(Zs) - zc)], org=[cx, cy], texD=du(pD), texU=du(pU), texP=du(pP), cg=cg,
-                   names=list(names), colors=list(colors), areas=areas, title=title, note=note, three_cdn=list(_WSIM_THREE_CDN))
+                   zr=[float(np.nanmin(Zs) - zc), float(np.nanmax(Zs) - zc)], org=[cx, cy], texT=du(pT), texD=du(pD), texU=du(pU), texP=du(pP), cg=cg,
+                   regs=_bch_reg_html(A), names=list(names), colors=list(colors), areas=areas,
+                   tnames=[_BCH_TYPES[t][0] for t in range(1, 7)], tcolors=[_BCH_TYPES[t][1] for t in range(1, 7)], tareas=tareas,
+                   lines=_lin(lines) if lines else None, cpts=_pts(A["cr_pts"]), tpts=_pts(A["to_pts"]),
+                   title=title, note=note, three_cdn=list(_WSIM_THREE_CDN))
     html = _BCH_HTML.replace("/*__PAYLOAD__*/null", _json.dumps(payload)).replace("/*__THREE_INLINE__*/", three_inline or "")
     return html, int(tri.shape[0])
 
 
+def _bch_qc_table(R, seg, P, cell):
+    """Panel QC: kualitas permukaan (vs kontur sumber) + kualitas klasifikasi."""
+    rows = []
+    qc = seg.get("qc")
+    if qc:
+        rows += [("Permukaan", "Titik kontur sumber / ditambahkan (densify) / dipakai TIN", f"{qc['n_src']:,} / {qc['n_dens']:,} / {qc['n_tin']:,}", ""),
+                 ("Permukaan", "Jarak titik median (m) · sel grid X×Y (m)", f"{qc['spacing']:.2f} · {qc['cell_x']:.2f}×{qc['cell_y']:.2f}", ""),
+                 ("Permukaan", "Titik blunder dibersihkan (median Z)", f"{qc['n_blunder']:,}", "wajar jika kecil" if qc["n_blunder"] < 0.05 * qc["n_tin"] else "banyak titik ganda -- cek DXF"),
+                 ("Permukaan", "Deviasi grid vs titik kontur asli: RMSE / P95 / maks (m)", f"{qc['dev_rmse']:.2f} / {qc['dev_p95']:.2f} / {qc['dev_max']:.2f}",
+                  "baik" if qc["dev_p95"] < max(0.5 * cell, 0.3) else "naikkan resolusi grid"),
+                 ("Permukaan", "Segitiga datar (3 titik satu kontur) / segitiga menjembatani celah", f"{100 * qc['flat_share']:.1f}% / {100 * qc['long_share']:.1f}%",
+                  "celah > %.0f m dikosongkan, tidak dijembatani" % qc["gap_len"]),
+                 ("Permukaan", "Sel dalam boundary tetapi di luar TIN (dibiarkan kosong)", f"{qc['n_outside_hull']:,}", "")]
+    else:
+        rows.append(("Permukaan", "Sumber", "grid segmen Erosion Map (meshing identik)", "statistik TIN tidak tersimpan di segmen"))
+    A = R["A"]; reg = A["reg"]; t = reg["type"]
+    fm = np.isin(t, (3, 4))
+    cfn = {1: "tinggi", 2: "sedang", 3: "rendah"}
+    for k in range(1, 7):
+        n = int((t == k).sum())
+        rows.append(("Klasifikasi", _BCH_TYPES[k][0], f"{n} unit · {100.0 * float((A['typ'] == k).sum()) / max(int((A['typ'] > 0).sum()), 1):.0f}% luas", ""))
+    if fm.any():
+        hh = reg["h"][fm]
+        cf = reg["conf"][fm]
+        rows.append(("Klasifikasi", "Tinggi muka: P10 / median / P90 / maks (m)", f"{np.percentile(hh, 10):.1f} / {np.median(hh):.1f} / {np.percentile(hh, 90):.1f} / {hh.max():.1f}", ""))
+        rows.append(("Klasifikasi", f"Muka tinggi > {P['h_flag']:g} m (kemungkinan multi-bench)", f"{int((hh > P['h_flag']).sum())} dari {len(hh)}", "periksa penampang"))
+        rows.append(("Klasifikasi", "Muka dengan keyakinan rendah / sedang / tinggi", f"{int((cf == 3).sum())} / {int((cf == 2).sum())} / {int((cf == 1).sum())}", "rendah = tidak ada bidang datar di salah satu sisi"))
+        if float(np.median(hh)) > 0 and cell > float(np.median(hh)) / 3.0:
+            rows.append(("Peringatan", "Sel grid > 1/3 tinggi median muka", f"{cell:.1f} m", "resolusi terlalu kasar untuk tinggi bench"))
+    cint = float(P.get("cint") or 0)
+    if cint > 0 and fm.any():
+        rows.append(("Peringatan" if cint > 0.25 * float(np.median(reg["h"][fm])) else "Permukaan", "Interval kontur (m) -> galat tinggi tiap muka ± interval/2",
+                     f"{cint:g} -> ±{cint / 2:.2f} m", "interval besar menurunkan akurasi" if cint > 0.25 * float(np.median(reg["h"][fm])) else "wajar"))
+    return pd.DataFrame(rows, columns=["Kelompok", "Pemeriksaan", "Hasil", "Catatan"])
+
+
+def _bch_regions_df(A):
+    reg = A["reg"]
+    cfn = {1: "tinggi", 2: "sedang", 3: "rendah"}
+    rows = []
+    for i, t in enumerate(reg["type"]):
+        t = int(t)
+        rows.append(dict(ID=i + 1, Jenis=_BCH_TYPES[t][0], Elevasi_m=round(float(reg["z"][i]), 1), Tinggi_m=round(float(reg["h"][i]), 1) if t in (3, 4) else None,
+                         Tinggi_P10_m=round(float(reg["hp10"][i]), 1) if t in (3, 4) else None, Tinggi_P90_m=round(float(reg["hp90"][i]), 1) if t in (3, 4) else None,
+                         Crest_m=round(float(reg["crest"][i]), 1) if t in (3, 4) else None, Toe_m=round(float(reg["toe"][i]), 1) if t in (3, 4) else None,
+                         Sudut_deg=round(float(reg["slope"][i]), 1), Lebar_m=round(float(reg["width"][i]), 1) if t in (1, 2) else None,
+                         Panjang_m=round(float(reg["length"][i]), 0) if t in (1, 2) else None,
+                         Grade_memanjang_pct=round(float(reg["grade"][i]), 1) if t in (1, 2) else None,
+                         Luas_m2=round(float(reg["area"][i]), 0), Keyakinan=cfn.get(int(reg["conf"][i]), "-")))
+    return pd.DataFrame(rows)
+
+
+def _bch_section_ui(A, xa, ya, key):
+    """Penampang validasi: otomatis tegak lurus muka terpilih (+4 penampang sejajar utk uji konsistensi) atau manual."""
+    reg = A["reg"]
+    fidx = [i for i, t in enumerate(reg["type"]) if int(t) in (3, 4)]
+    zf, typ = A["zf"], A["typ"]
+    mode = st.radio(_t("Penampang", "Section"), ["auto", "manual"], horizontal=True, key=f"bch_sx_mode_{key}",
+                    format_func=lambda c: _t("Otomatis: tegak lurus muka terpilih", "Automatic: perpendicular to a chosen face") if c == "auto" else _t("Manual: koordinat sendiri", "Manual: own coordinates"))
+    x1 = y1 = x2 = y2 = None
+    offs = [0.0]
+    if mode == "auto":
+        if not fidx:
+            st.info(_t("Belum ada muka terdeteksi.", "No face detected yet."))
+            return
+        order = sorted(fidx, key=lambda i: -reg["h"][i])
+        pick = st.selectbox(_t("Muka (urut dari tertinggi)", "Face (tallest first)"), order, key=f"bch_sx_pick_{key}",
+                            format_func=lambda i: f"#{i + 1} · {_BCH_TYPES[int(reg['type'][i])][0].split(':')[-1].strip()} · H≈{reg['h'][i]:.1f} m · z≈{reg['z'][i]:.0f}")
+        half = st.number_input(_t("Setengah panjang penampang (m)", "Half section length (m)"), 20.0, 1000.0, 80.0, 10.0, key=f"bch_sx_half_{key}")
+        m = A["rid"] == pick + 1
+        X, Y = np.meshgrid(xa, ya, indexing="ij")
+        cxm, cym = float(X[m].mean()), float(Y[m].mean())
+        gxm, gym = np.gradient(A["zs"], abs(xa[1] - xa[0]), abs(ya[1] - ya[0]))
+        ux, uy = float(gxm[m].mean()), float(gym[m].mean())
+        nn = float(np.hypot(ux, uy)) or 1.0
+        ux, uy = ux / nn, uy / nn
+        x1, y1, x2, y2 = cxm - ux * half, cym - uy * half, cxm + ux * half, cym + uy * half
+        offs = [-20.0, -10.0, 0.0, 10.0, 20.0]
+        sx_, sy_ = -uy, ux
+    else:
+        c1, c2, c3, c4 = st.columns(4)
+        x1 = c1.number_input("X1", value=float(xa[0]), format="%.2f", key=f"bch_sx_x1_{key}")
+        y1 = c2.number_input("Y1", value=float(0.5 * (ya[0] + ya[-1])), format="%.2f", key=f"bch_sx_y1_{key}")
+        x2 = c3.number_input("X2", value=float(xa[-1]), format="%.2f", key=f"bch_sx_x2_{key}")
+        y2 = c4.number_input("Y2", value=float(0.5 * (ya[0] + ya[-1])), format="%.2f", key=f"bch_sx_y2_{key}")
+    d, zz, tt, px, py = _bch_section(xa, ya, zf, typ, x1, y1, x2, y2)
+    fig = go.Figure()
+    prev = 0
+    for k in range(1, len(d) + 1):
+        if k == len(d) or tt[k] != tt[prev]:
+            sl_ = slice(max(prev - 1, 0), k)
+            t0 = int(tt[prev])
+            col = _BCH_TYPES[t0][1] if t0 > 0 else "#64748b"
+            fig.add_trace(go.Scatter(x=d[sl_], y=zz[sl_], mode="lines", line=dict(color=col, width=3), name=_BCH_TYPES[t0][0] if t0 > 0 else _t("Tidak terklasifikasi", "Unclassified"),
+                                     showlegend=False, hovertemplate="%{x:.1f} m · %{y:.2f} m<extra></extra>"))
+            prev = k
+    runs = _bch_section_runs(d, zz, tt)
+    for _, r_ in runs.iterrows():
+        fig.add_annotation(x=0.5 * (r_["Dari_m"] + r_["Sampai_m"]), y=0.5 * (r_["Elev_atas_m"] + r_["Elev_bawah_m"]), text=f"H {r_['Tinggi_m']:.1f} m",
+                           showarrow=False, font=dict(size=10), xshift=18)
+    fig.update_layout(height=330, margin=dict(l=10, r=10, t=10, b=10), xaxis_title=_t("Jarak (m)", "Distance (m)"), yaxis_title=_t("Elevasi (m)", "Elevation (m)"))
+    fig.update_yaxes(scaleanchor=None)
+    st.plotly_chart(fig, width="stretch")
+    st.caption(_t("Warna garis = jenis (hijau Bench, oranye Ramp, merah muka bench, ungu antar-ramp/overall, cyan berm sempit, abu landai). Profil diambil dari grid yang sama dengan mesh.",
+                  "Line colour = type (green Bench, orange Ramp, red bench face, purple inter-ramp/overall, cyan narrow berm, grey gentle). Profile from the same grid as the mesh."))
+    if len(runs):
+        st.dataframe(runs, hide_index=True, width="stretch")
+    if mode == "auto" and len(offs) > 1:
+        hs_ = []
+        for o in offs:
+            dd, z2, t2, _a, _b = _bch_section(xa, ya, zf, typ, x1 + sx_ * o, y1 + sy_ * o, x2 + sx_ * o, y2 + sy_ * o)
+            rr = _bch_section_runs(dd, z2, t2)
+            if len(rr):
+                mid = 0.5 * dd[-1]
+                j = int(np.argmin(np.abs(0.5 * (rr["Dari_m"] + rr["Sampai_m"]) - mid)))
+                hs_.append(float(rr["Tinggi_m"].iloc[j]))
+            else:
+                hs_.append(np.nan)
+        hv = np.asarray(hs_)
+        if np.isfinite(hv).sum() >= 2:
+            sd = float(np.nanstd(hv))
+            st.caption(_t(f"Konsistensi 5 penampang sejajar (jarak −20…+20 m): tinggi = " + ", ".join("-" if not np.isfinite(h) else f"{h:.1f}" for h in hv) +
+                          f" m · simpangan baku {sd:.2f} m" + (" -- konsisten." if sd < 1.0 else " -- tidak konsisten, muka kemungkinan campuran/berm tak terbaca."),
+                          f"Consistency of 5 parallel sections (−20…+20 m): heights = " + ", ".join("-" if not np.isfinite(h) else f"{h:.1f}" for h in hv) +
+                          f" m · std {sd:.2f} m" + (" -- consistent." if sd < 1.0 else " -- inconsistent, face may be mixed / berm unresolved.")))
+
+
 def _bench_tab():
-    _sub_header(_t("Domain Bench: Klasifikasi Tinggi Single Bench", "Bench Domains: Single-Bench Height Classification"))
+    _sub_header(_t("Domain Bench: Bench, Ramp & Slope", "Bench Domains: Bench, Ramp & Slope"))
     st.caption(_t(
-        "Unggah kontur (atau kontur + desain). Aplikasi mendeteksi muka bench secara adaptif, mengukur tinggi tiap muka (crest − toe sepanjang jalur kemiringan), "
-        "lalu memetakan domain: mana yang melebihi batas tinggi single bench (mis. 16 m) -- atau klasifikasi OTOMATIS ke kelompok tinggi alami tanpa input angka.",
-        "Upload the contour (or contour + design). The app detects bench faces adaptively, measures each face height (crest − toe along the slope path), then maps domains: "
-        "which exceed a single-bench height limit (e.g. 16 m) -- or classifies AUTOMATICALLY into natural height groups with no input number."))
+        "Unggah kontur (atau kontur + desain). Permukaan dibangun dengan cara yang SAMA seperti tab Erosion Map (densify kontur → TIN → grid) sehingga mengikuti DXF. "
+        "Tiap area lalu diklasifikasikan dari geometrinya: Bench (bidang datar lebar), Ramp (bidang miring memanjang), Slope (muka bench / antar-ramp / overall), lalu tinggi tiap single bench = crest − toe.",
+        "Upload the contour (or contour + design). The surface is built the SAME way as the Erosion Map tab (densify contour → TIN → grid) so it follows the DXF. "
+        "Each area is then classified from its geometry: Bench (wide flat plane), Ramp (elongated inclined plane), Slope (bench face / inter-ramp / overall), and each single-bench height = crest − toe."))
     _ui_warning(_t(
-        "Hasil bergantung pada resolusi & kualitas kontur: kontur yang diinterpolasi membuat muka tampak lebih landai dan tinggi bisa meleset beberapa desimeter hingga meter. "
-        "Bench ganda/tanpa berm tampak sebagai muka tinggi (> batas) -- itulah yang ditandai. Bukan pengganti survei point-cloud (mis. Maptek PointStudio) atau audit desain resmi.",
-        "Results depend on contour resolution/quality: interpolated contours make faces look gentler and heights can be off by decimetres to metres. "
-        "Double benches / benches without a berm appear as tall faces (> limit) -- that is what is flagged. Not a substitute for a point-cloud survey (e.g. Maptek PointStudio) or an official design audit."))
+        "Nilai bawaan adalah nilai UMUM literatur/praktik (Read & Stacey 2009; praktik desain jalan angkut), bukan angka Maptek (halamannya tidak bisa diakses saat penyusunan) dan bukan pengganti standar tambang Anda -- sesuaikan di 'Ambang jenis'. "
+        "Data kontur saja tidak bisa membuktikan posisi bench: lantai bench yang elevasinya di antara dua level kontur tampak miring, sehingga tinggi tiap muka bisa meleset sekitar ± setengah interval kontur. "
+        "Muka/area berkeyakinan rendah ditandai pucat. Bukan pengganti survei point-cloud atau audit desain resmi.",
+        "Defaults are GENERAL literature/practice values (Read & Stacey 2009; haul-road design practice), not Maptek figures (that page could not be accessed) and not a substitute for your mine standard -- adjust under 'Type thresholds'. "
+        "Contours alone cannot prove bench positions: a bench floor lying between two contour levels looks inclined, so each face height can be off by about ± half the contour interval. "
+        "Low-confidence areas are shown pale. Not a substitute for a point-cloud survey or an official design audit."))
 
     # ---------------- 1. sumber permukaan
     _sub_header(_t("1. Data permukaan", "1. Surface data"))
@@ -30361,7 +31007,7 @@ def _bench_tab():
                    format_func=lambda c: {"dxf": _t("Upload DXF kontur", "Upload contour DXF"), "dxfb": _t("Upload DXF kontur + boundary", "Upload contour DXF + boundary"),
                                           "seg": _t("Segmen Erosion Mapping", "Erosion Mapping segment")}[c])
     if src in ("dxf", "dxfb"):
-        seg = _dump_own_dxf_seg(need_boundary=(src == "dxfb"), kp="bch")
+        seg = _dump_own_dxf_seg(need_boundary=(src == "dxfb"), kp="bch", surf="erosion")
         if seg is None:
             return
     else:
@@ -30380,7 +31026,7 @@ def _bench_tab():
     if not np.isfinite(z0).any():
         st.error(_t("Grid elevasi kosong.", "Empty elevation grid."))
         return
-    use_design = st.checkbox(_t("Tambahkan data desain (DXF/CSV)", "Add design data (DXF/CSV)"), value=False, key="bch_use_design")
+    use_design = st.checkbox(_t("Tambahkan data desain (DXF/CSV) -- dianalisis TERPISAH dari kondisi aktual", "Add design data (DXF/CSV) -- analysed SEPARATELY from the actual surface"), value=False, key="bch_use_design")
     surf_mode = "exist"
     zd_grid = None
     if use_design:
@@ -30408,9 +31054,9 @@ def _bench_tab():
                 st.error(_t(f"Berkas desain gagal dibaca: {e}", f"Could not read the design file: {e}"))
         if zd_grid is not None:
             surf_mode = st.radio(_t("Permukaan yang dianalisis", "Surface to analyse"), ["exist", "merge", "both"], horizontal=True, key="bch_surf",
-                                 format_func=lambda c: {"exist": _t("Kontur eksisting saja", "Existing contour only"),
-                                                        "merge": _t("Gabungan (desain menimpa kontur di area desain)", "Merged (design overrides contour in the design area)"),
-                                                        "both": _t("Bandingkan eksisting vs gabungan", "Compare existing vs merged")}[c])
+                                 format_func=lambda c: {"exist": _t("Kontur aktual saja", "Actual contour only"),
+                                                        "merge": _t("Desain (menimpa kontur di area desain)", "Design (overrides contour in the design area)"),
+                                                        "both": _t("Dua-duanya (hasil terpisah)", "Both (separate results)")}[c])
     surfaces = {"exist": z0}
     if zd_grid is not None and surf_mode in ("merge", "both"):
         surfaces["merge"] = np.where(np.isfinite(zd_grid), zd_grid, z0)
@@ -30419,7 +31065,7 @@ def _bench_tab():
 
     # ---------------- 2. parameter
     _sub_header(_t("2. Klasifikasi tinggi bench", "2. Bench height classification"))
-    cm = st.radio(_t("Cara klasifikasi", "Classification method"), ["manual", "auto"], horizontal=True, key="bch_mode",
+    cm = st.radio(_t("Cara klasifikasi tinggi", "Height classification"), ["manual", "auto"], horizontal=True, key="bch_mode",
                   format_func=lambda c: _t("Manual: batas tinggi single bench saya", "Manual: my single-bench height limit") if c == "manual"
                   else _t("Otomatis: kelompok tinggi alami (tanpa input angka)", "Automatic: natural height groups (no number needed)"))
     thr, k_auto = [], None
@@ -30438,46 +31084,76 @@ def _bench_tab():
         kk = st.selectbox(_t("Jumlah kelompok", "Number of groups"), ["auto", 2, 3, 4, 5, 6], key="bch_k",
                           format_func=lambda v: _t("Otomatis dari puncak sebaran (disarankan)", "Automatic from distribution peaks (recommended)") if v == "auto" else str(v))
         k_auto = None if kk == "auto" else int(kk)
-    with st.expander(_t("Pengaturan deteksi & tampilan", "Detection & display settings")):
-        d1, d2, d3, d4 = st.columns(4)
-        auto_deg = d1.checkbox(_t("Sudut muka otomatis (Otsu)", "Auto face angle (Otsu)"), value=True, key="bch_auto_deg",
-                               help=_t("Ambang sudut dipilih dari sebaran kemiringan permukaan (memisahkan bench datar dari muka curam) -- cocok untuk kontur terinterpolasi.",
-                                       "The angle threshold is picked from the slope distribution (separating flat benches from steep faces) -- suits interpolated contours."))
-        face_deg = d1.number_input(_t("Sudut minimum muka (°)", "Minimum face angle (°)"), 15.0, 85.0, 40.0, 1.0, key="bch_face_deg", disabled=auto_deg)
-        min_h = d2.number_input(_t("Tinggi muka minimum (m)", "Minimum face height (m)"), 0.5, 20.0, 3.0, 0.5, key="bch_min_h")
-        min_a = d3.number_input(_t("Luas muka minimum (m²)", "Minimum face area (m²)"), 5.0, 5000.0, 40.0, 5.0, key="bch_min_a")
-        smo = d4.number_input(_t("Haluskan DEM (sel)", "Smooth DEM (cells)"), 0.0, 5.0, 1.0, 0.5, key="bch_smooth")
-        st.markdown(_t("**Deteksi pemisah bench (berm/ramp sempit)**", "**Bench separator detection (narrow berms/ramps)**"))
-        sp1, sp2, sp3, sp4 = st.columns(4)
-        split_on = sp1.checkbox(_t("Pisahkan multi-bench", "Split multi-bench"), value=True, key="bch_split_on",
-                                help=_t("Deteksi berm/ramp sempit di DALAM lereng curam (garis hitam/glowing di data Anda) dan jadikan batas antar single bench, sehingga tinggi yang dihitung = tinggi tiap single bench, bukan tinggi gabungan.",
-                                        "Detect narrow berms/ramps INSIDE steep slopes and use them as boundaries between single benches, so the height computed = each single bench's height, not the combined height."))
-        split_r = sp2.slider(_t("Sensitivitas pemisah", "Separator sensitivity"), 0.40, 0.95, 0.75, 0.05, key="bch_split_r", disabled=not split_on,
-                             help=_t("Makin tinggi = makin banyak berm/ramp (yang kemiringannya hanya sedikit lebih landai dari muka) dianggap pemisah.", "Higher = more berms/ramps (only slightly gentler than the faces) count as separators."))
-        berm_w = sp3.number_input(_t("Lebar berm/ramp sempit maks (m)", "Max narrow berm/ramp width (m)"), 2.0, 40.0, 12.0, 1.0, key="bch_berm_w", disabled=not split_on)
-        refine_on = sp4.checkbox(_t("Perhalus otomatis muka yang terlalu tinggi", "Auto-refine overly tall faces"), value=True, key="bch_refine", disabled=not split_on,
-                                 help=_t("Muka ≥ 1,7× tinggi median dideteksi ulang dengan sensitivitas lebih tinggi, hanya di area itu.", "Faces ≥ 1.7× the median height are re-detected with higher sensitivity, only in that area."))
+    with st.expander(_t("Ambang jenis (Bench / Ramp / Slope) -- nilai bawaan referensi, bisa diubah", "Type thresholds (Bench / Ramp / Slope) -- reference defaults, editable")):
+        preset = st.selectbox(_t("Profil material (menentukan sudut muka)", "Material profile (sets face angle)"), list(_BCH_PRESETS.keys()), key="bch_preset",
+                              format_func=lambda k: {"umum": _t("Umum (disarankan; batuan lunak-menengah)", "General (recommended; soft-medium rock)"),
+                                                     "keras": _t("Batuan keras (muka lebih tegak)", "Hard rock (steeper faces)"),
+                                                     "lunak": _t("Tanah / batuan sangat lunak (muka landai)", "Soil / very soft rock (gentler faces)")}[k])
+        D = {**_BCH_DEF, **_BCH_PRESETS[preset]}
+        pk = preset
+        st.markdown(_t("**Slope (muka)**", "**Slope (faces)**"))
+        a1, a2, a3, a4 = st.columns(4)
+        face_deg = a1.number_input(_t("Muka bench ≥ (°)", "Bench face ≥ (°)"), 15.0, 85.0, float(D["face_deg"]), 1.0, key=f"bch_fd_{pk}",
+                                   help=_t("Sudut tegak. Muka bench nyata 45–80°, tetapi pada DEM hasil interpolasi kontur tampak lebih landai, sehingga ambang 35° dipakai agar tidak terlewat.",
+                                           "Steep angle. Real bench faces are 45–80°, but on a DEM interpolated from contours they look gentler, so 35° avoids missing them."))
+        grow_deg = a2.number_input(_t("Tepi muka tumbuh hingga (°)", "Face edge grows to (°)"), 10.0, 60.0, float(D["grow_deg"]), 1.0, key=f"bch_gd_{pk}")
+        ir_deg = a3.number_input(_t("Lereng antar-ramp/overall ≥ (°)", "Inter-ramp/overall slope ≥ (°)"), 10.0, 60.0, float(D["ir_deg"]), 1.0, key=f"bch_ir_{pk}",
+                                 help=_t("Lereng sedang yang lebar tanpa muka curam.", "Wide moderate slopes without a steep face."))
+        h_flag = a4.number_input(_t("Tinggi single bench wajar maks (m)", "Max plausible single-bench height (m)"), 5.0, 100.0, float(D["h_flag"]), 1.0, key=f"bch_hf_{pk}",
+                                 help=_t("Muka lebih tinggi dari ini ditandai 'kemungkinan multi-bench' (keyakinan rendah). Single bench lazim 5–15 m.", "Faces taller than this are flagged 'possible multi-bench' (low confidence). Single benches are typically 5–15 m."))
+        st.markdown(_t("**Bench & Ramp (bidang datar)**", "**Bench & Ramp (flat planes)**"))
+        b1, b2, b3, b4 = st.columns(4)
+        flat_deg = b1.number_input(_t("Bidang datar ≤ (°)", "Flat plane ≤ (°)"), 1.0, 20.0, float(D["flat_deg"]), 0.5, key=f"bch_fl_{pk}")
+        bench_w = b2.number_input(_t("Lebar bench minimum (m)", "Minimum bench width (m)"), 2.0, 40.0, float(D["bench_min_w"]), 1.0, key=f"bch_bw_{pk}",
+                                  help=_t("Bidang datar lebih sempit dari ini = 'berm sempit'. Catch bench praktis ≥ ~6 m, umumnya 8–15 m.", "Flat planes narrower than this = 'narrow berm'. Practical catch bench ≥ ~6 m, typically 8–15 m."))
+        rw1 = b3.number_input(_t("Lebar ramp minimum (m)", "Minimum ramp width (m)"), 3.0, 60.0, float(D["ramp_w_min"]), 1.0, key=f"bch_rw1_{pk}")
+        rw2 = b4.number_input(_t("Lebar ramp maksimum (m)", "Maximum ramp width (m)"), 10.0, 150.0, float(D["ramp_w_max"]), 5.0, key=f"bch_rw2_{pk}",
+                              help=_t("Bidang datar lebih lebar dari ini dianggap bench.", "Flat planes wider than this are treated as bench."))
+        c1, c2, c3, c4 = st.columns(4)
+        rg1 = c1.number_input(_t("Grade ramp minimum (%)", "Min ramp grade (%)"), 0.5, 20.0, float(D["ramp_g_min"]), 0.5, key=f"bch_rg1_{pk}",
+                              help=_t("Kemiringan MEMANJANG (searah sumbu bidang). Di bawah ini = bench.", "LONGITUDINAL grade (along the plane's axis). Below this = bench."))
+        rg2 = c2.number_input(_t("Grade ramp maksimum (%)", "Max ramp grade (%)"), 3.0, 30.0, float(D["ramp_g_max"]), 0.5, key=f"bch_rg2_{pk}",
+                              help=_t("Jalan angkut tambang umumnya 8–12 %.", "Mine haul roads are generally 8–12 %."))
+        rlen = c3.number_input(_t("Panjang ramp minimum (m)", "Min ramp length (m)"), 10.0, 500.0, float(D["ramp_min_len"]), 5.0, key=f"bch_rl_{pk}")
+        rel = c4.number_input(_t("Rasio memanjang minimum", "Min elongation ratio"), 1.0, 20.0, float(D["ramp_elong"]), 0.5, key=f"bch_re_{pk}")
+        st.markdown(_t("**Umum**", "**General**"))
+        g1, g2, g3, g4 = st.columns(4)
+        min_h = g1.number_input(_t("Tinggi muka minimum (m)", "Minimum face height (m)"), 0.5, 20.0, float(D["min_h"]), 0.5, key=f"bch_mh_{pk}")
+        min_a = g2.number_input(_t("Luas minimum area (m²)", "Minimum area (m²)"), 5.0, 5000.0, float(D["min_area"]), 5.0, key=f"bch_ma_{pk}")
+        smo = g3.number_input(_t("Haluskan DEM utk sudut (sel)", "Smooth DEM for angles (cells)"), 0.0, 5.0, float(D["smooth"]), 0.5, key=f"bch_sm_{pk}")
+        cint_in = g4.number_input(_t("Interval kontur (m; 0 = otomatis)", "Contour interval (m; 0 = auto)"), 0.0, 50.0, 0.0, 0.5, key=f"bch_ci_{pk}",
+                                  help=_t("Dipakai untuk memaklumi kemiringan semu lantai bench pada DEM dari kontur. DXF: terdeteksi otomatis. Segmen Erosion Map: isi manual.",
+                                          "Used to allow for the apparent tilt of bench floors on a contour-derived DEM. DXF: auto-detected. Erosion Map segment: enter manually."))
+        sp1, sp2, sp3 = st.columns(3)
+        split_on = sp1.checkbox(_t("Pisahkan multi-bench di berm sempit", "Split multi-bench at narrow berms"), value=bool(D["split"]), key=f"bch_so_{pk}",
+                                help=_t("Berm/ramp sempit DI DALAM lereng curam dijadikan batas antar single bench.", "Narrow berms/ramps INSIDE steep slopes become boundaries between single benches."))
+        split_r = sp2.slider(_t("Sensitivitas pemisah", "Separator sensitivity"), 0.40, 0.95, float(D["split_ratio"]), 0.05, key=f"bch_sr_{pk}", disabled=not split_on)
+        berm_w = sp3.number_input(_t("Lebar berm sempit maks (m)", "Max narrow berm width (m)"), 2.0, 40.0, float(D["berm_w"]), 1.0, key=f"bch_bm_{pk}", disabled=not split_on)
         zc1, zc2 = st.columns(2)
-        zone_on = zc1.checkbox(_t("Warnai juga berm/lantai terdekat (zona bench)", "Also colour the nearest berm/floor (bench zone)"), value=True, key="bch_zone_on")
-        zone_m = zc2.number_input(_t("Jangkauan zona berm (m)", "Berm zone reach (m)"), 0.0, 200.0, 25.0, 5.0, key="bch_zone_m", disabled=not zone_on)
+        zone_on = zc1.checkbox(_t("Warnai berm/lantai terdekat pada tampilan tinggi", "Colour the nearest berm/floor in the height view"), value=True, key="bch_zone_on")
+        zone_m = zc2.number_input(_t("Jangkauan zona (m)", "Zone reach (m)"), 0.0, 200.0, 25.0, 5.0, key="bch_zone_m", disabled=not zone_on)
+    cint_auto = float((seg.get("qc") or {}).get("cint") or 0.0)
+    cint = float(cint_in) if cint_in > 0 else cint_auto
+    Pp = dict(face_deg=float(face_deg), grow_deg=min(float(grow_deg), float(face_deg) - 1.0), ir_deg=float(ir_deg), h_flag=float(h_flag), flat_deg=float(flat_deg), bench_min_w=float(bench_w),
+              ramp_w_min=float(rw1), ramp_w_max=float(rw2), ramp_g_min=float(rg1), ramp_g_max=float(rg2), ramp_min_len=float(rlen), ramp_elong=float(rel), min_h=float(min_h),
+              min_area=float(min_a), smooth=float(smo), cint=cint, split=bool(split_on), split_ratio=float(split_r), berm_w=float(berm_w))
 
     # ---------------- 3. analisis
     for key, zz in surfaces.items():
-        title = {"exist": _t("Kontur eksisting", "Existing contour"), "merge": _t("Gabungan kontur + desain", "Merged contour + design")}[key]
+        title = {"exist": _t("Kondisi aktual (kontur)", "Actual (contour)"), "merge": _t("Desain", "Design")}[key]
         if len(surfaces) > 1 or zd_grid is not None:
             _sub_header(title)
-        sx_ = max(1, int(np.ceil(np.sqrt(np.isfinite(zz).sum() / 300000.0))))
+        sx_ = max(1, int(np.ceil(np.sqrt(np.isfinite(zz).sum() / 700000.0))))
         xa, ya, za = xs[::sx_], ys[::sx_], zz[::sx_, ::sx_]
-        sig = (key, za.shape, float(np.nanmean(za)), None if auto_deg else float(face_deg), float(min_h), float(min_a), float(smo), cm, tuple(thr), k_auto, bool(zone_on), float(zone_m), bool(split_on), float(split_r), float(berm_w), bool(refine_on), 8)
+        sig = (key, za.shape, float(np.nanmean(za)), float(np.nanstd(za)), tuple(sorted(Pp.items())), cm, tuple(thr), k_auto, bool(zone_on), float(zone_m), 11)
         ckey = f"bch_res_{key}"
         cached = st.session_state.get(ckey)
         if cached and cached[0] == sig:
             R = cached[1]
         else:
-            with st.spinner(_t("Menganalisis muka bench…", "Analysing bench faces…")):
+            with st.spinner(_t("Menganalisis bench, ramp & slope…", "Analysing bench, ramp & slope…")):
                 try:
-                    A = _bch_analyze(xa, ya, za, face_deg=(None if auto_deg else float(face_deg)), smooth_cells=float(smo), min_area_m2=float(min_a), min_h=float(min_h),
-                                     split_berm=bool(split_on), split_ratio=float(split_r), berm_w=float(berm_w), refine=bool(refine_on))
+                    A = _bch_analyze2(xa, ya, za, Pp)
                     if not A["face"].any():
                         R = dict(A=A, empty=True)
                     else:
@@ -30488,51 +31164,56 @@ def _bench_tab():
                         dom = _bch_domains(cls, xa, ya, A["H"], A["crest"], A["slope"], A["dx"], A["dy"], names)
                         hs = _bch_hillshade(xa, ya, za)
                         R = dict(A=A, empty=False, cls=cls, zone=zone, brk=brk, names=names, info=info, dom=dom, hs=hs, K=K, colors=_bch_class_colors(K))
-                        R["html"], R["ntri"] = _bch_scene_html(xa, ya, za, A["valid"], cls, zone, hs, names, R["colors"], A["H"], title=str(title),
-                                                               note=_t(f"Muka terdeteksi: sudut ≥ {A['face_deg']:.0f}°", f"Faces detected: angle ≥ {A['face_deg']:.0f}°"),
-                                                               three_inline=_wsim_find_local_three(), dips=A.get('dips'), lab=A['labels'], crest=A['crest'], toe=A['toe'])
+                        R["html"], R["ntri"] = _bch_scene_html(xa, ya, za, A, cls, zone, hs, names, R["colors"], title=str(title),
+                                                               note=_t(f"Muka ≥ {Pp['face_deg']:.0f}° · datar ≤ {Pp['flat_deg']:.0f}°" + (f" (kontur {cint:g} m)" if cint else ""),
+                                                                       f"Faces ≥ {Pp['face_deg']:.0f}° · flat ≤ {Pp['flat_deg']:.0f}°" + (f" (contour {cint:g} m)" if cint else "")),
+                                                               three_inline=_wsim_find_local_three(), lines=(seg.get("lines") if key == "exist" else None))
                 except Exception as e:
+                    import traceback as _tb
                     st.error(_t(f"Analisis gagal: {e}", f"Analysis failed: {e}"))
+                    st.code(_tb.format_exc()[-1500:])
                     continue
             st.session_state[ckey] = (sig, R)
         A = R["A"]
         if R.get("empty"):
-            st.warning(_t("Tidak ada muka bench terdeteksi. Matikan 'Sudut muka otomatis' lalu turunkan sudutnya, atau turunkan 'Tinggi muka minimum'.",
-                          "No bench face detected. Turn off 'Auto face angle' and lower the angle, or lower 'Minimum face height'."))
+            st.warning(_t("Tidak ada muka terdeteksi. Turunkan 'Muka bench ≥ (°)' atau 'Tinggi muka minimum' di Ambang jenis.",
+                          "No face detected. Lower 'Bench face ≥ (°)' or 'Minimum face height' under Type thresholds."))
             continue
-        cls, names, brk, info, dom, K, colors = R["cls"], R["names"], R["brk"], R["info"], R["dom"], R["K"], R["colors"]
+        cls, names, brk, info, dom, K = R["cls"], R["names"], R["brk"], R["info"], R["dom"], R["K"]
+        reg = A["reg"]
+        tt = reg["type"]
+        fm = np.isin(tt, (3, 4))
         Hf = A["H"][A["face"]]
         cell_a = A["dx"] * A["dy"]
         tot_face = float(A["face"].sum() * cell_a)
         m1, m2, m3, m4 = st.columns(4)
-        from scipy import ndimage as _ndi_b
-        _nd = int(_ndi_b.label(A["dips"], structure=np.ones((3, 3)))[1]) if A.get("dips") is not None and A["dips"].any() else 0
-        _metric_card(_t("Single bench terdeteksi", "Single benches detected"), f"{A['n_comp']:,}", container=m1,
-                     help_text=_t(f"Ambang sudut {A['face_deg']:.0f}° · {_nd} garis berm/ramp sempit sebagai pemisah" + (f" · perhalusan {A['refined']}×" if A.get("refined") else ""),
-                                  f"Angle threshold {A['face_deg']:.0f}° · {_nd} narrow berm/ramp separator lines" + (f" · refined {A['refined']}×" if A.get("refined") else "")))
-        _metric_card(_t("Tinggi muka (median / maks)", "Face height (median / max)"), f"{np.median(Hf):.1f} / {Hf.max():.1f} m", container=m2)
+        _metric_card(_t("Bench / Ramp", "Bench / Ramp"), f"{int((tt == 1).sum())} / {int((tt == 2).sum())}", container=m1,
+                     help_text=_t("Jumlah bidang datar lebar (bench) dan jalan miring memanjang (ramp).", "Number of wide flat planes (bench) and elongated inclined roads (ramp)."))
+        _metric_card(_t("Muka bench (slope)", "Bench faces (slope)"), f"{int((tt == 3).sum())}", container=m2,
+                     help_text=_t(f"{int((tt == 4).sum())} lereng antar-ramp/overall (kemungkinan multi-bench)", f"{int((tt == 4).sum())} inter-ramp/overall slopes (possible multi-bench)"))
+        _metric_card(_t("Tinggi muka (median / maks)", "Face height (median / max)"), f"{np.median(Hf):.1f} / {Hf.max():.1f} m", container=m3)
         if cm == "manual":
             over = float(((Hf > thr[0]).sum()) * cell_a)
-            _metric_card(_t(f"Luas muka > {thr[0]:g} m", f"Face area > {thr[0]:g} m"), f"{over:,.0f} m² ({100 * over / max(tot_face, 1):.0f}%)", container=m3)
-            nd = int((dom["Kelas"] == names[-1]).sum()) if len(dom) else 0
-            _metric_card(_t("Domain kelas tertinggi", "Domains of top class"), f"{nd}", container=m4)
+            _metric_card(_t(f"Luas muka > {thr[0]:g} m", f"Face area > {thr[0]:g} m"), f"{over:,.0f} m² ({100 * over / max(tot_face, 1):.0f}%)", container=m4)
         else:
-            _metric_card(_t("Kelompok alami", "Natural groups"), f"{K}", container=m3)
-            _metric_card(_t("Kualitas pemisahan (GVF)", "Separation quality (GVF)"), f"{info['gvf']:.2f}" if info.get("gvf") is not None else "-", container=m4,
-                         help_text=_t("Mendekati 1 = kelompok sangat terpisah.", "Close to 1 = well separated groups."))
+            _metric_card(_t("Kelompok tinggi alami", "Natural height groups"), f"{K}" + (f" · GVF {info['gvf']:.2f}" if info.get("gvf") is not None else ""), container=m4)
         if info.get("note"):
             st.info(info["note"])
+        nlow = int((reg["conf"][fm] == 3).sum()) if fm.any() else 0
+        if nlow:
+            st.caption(_t(f"{nlow} muka berkeyakinan rendah (tinggi > batas wajar, atau tidak ada bidang datar di salah satu sisi) -- verifikasi dengan penampang di bawah.",
+                          f"{nlow} low-confidence faces (taller than plausible, or no flat plane on one side) -- verify with the sections below."))
         if hasattr(st, "iframe"):
-            st.iframe(R["html"], width="stretch", height=640)
+            st.iframe(R["html"], width="stretch", height=660)
         else:
             import streamlit.components.v1 as _bchc
-            _bchc.html(R["html"], height=640, scrolling=False)
-        st.caption(_t("Tombol 'Deteksi bench' di viewer menampilkan tiap single bench dengan warna berbeda dan garis berm/ramp sempit (cyan) yang dipakai sebagai pemisah. "
-                      "Kalau muka tinggi masih tergabung, naikkan 'Sensitivitas pemisah'; pada kontur kasar (interval besar / sel > 3 m) berm sempit bisa tidak terlihat dan tinggi tetap tergabung.",
-                      "The 'Deteksi bench' button in the viewer shows each single bench in a different colour and the narrow berm/ramp lines (cyan) used as separators. "
-                      "If tall faces still merge, raise 'Separator sensitivity'; on coarse contours (large interval / cells > 3 m) narrow berms may be invisible and heights stay merged."))
-        st.caption(_t(f"Mesh {R['ntri']:,} segitiga. Putar dengan klik-kiri, geser dengan klik-kanan/Shift, zoom dengan roda; arahkan kursor untuk melihat tinggi muka.",
-                      f"Mesh {R['ntri']:,} triangles. Rotate with left-drag, pan with right-drag/Shift, zoom with the wheel; hover to read the face height."))
+            _bchc.html(R["html"], height=660, scrolling=False)
+        st.caption(_t(f"Mesh {R['ntri']:,} segitiga (grid yang sama dengan analisis). Tombol 'Jenis' = Bench/Ramp/Slope; 'Tinggi' = domain tinggi single bench; 'Unit' = tiap muka berwarna sendiri. "
+                      "Centang 'Garis DXF kontur' untuk membandingkan mesh dengan DXF, dan 'crest/toe' untuk melihat titik yang dipakai menghitung tinggi. Putar kiri-klik, geser klik-kanan/Shift, zoom roda; arahkan kursor untuk detail.",
+                      f"Mesh {R['ntri']:,} triangles (same grid as the analysis). 'Jenis' = Bench/Ramp/Slope; 'Tinggi' = single-bench height domains; 'Unit' = each face in its own colour. "
+                      "Tick 'DXF contour lines' to compare the mesh against the DXF and 'crest/toe' to see the points used for heights. Rotate with left-drag, pan with right-drag/Shift, zoom with wheel; hover for details."))
+        with st.expander(_t("QC kualitas permukaan & klasifikasi", "Surface & classification QC"), expanded=False):
+            st.dataframe(_bch_qc_table(R, seg, Pp, max(A["dx"], A["dy"])), hide_index=True, width="stretch")
         # histogram
         hh = go.Figure()
         hh.add_trace(go.Histogram(x=Hf, nbinsx=50, marker_color="#3b82f6", name=_t("Sel muka", "Face cells")))
@@ -30540,25 +31221,32 @@ def _bench_tab():
             hh.add_vline(x=b, line=dict(color="#ef4444", dash="dash"))
         for p in info.get("peaks", []):
             hh.add_vline(x=p, line=dict(color="#22c55e", dash="dot"))
-        hh.update_layout(height=240, margin=dict(l=10, r=10, t=10, b=10), xaxis_title=_t("Tinggi muka bench (m)", "Bench face height (m)"), yaxis_title=_t("Jumlah sel", "Cells"), showlegend=False)
+        hh.update_layout(height=230, margin=dict(l=10, r=10, t=10, b=10), xaxis_title=_t("Tinggi muka bench (m)", "Bench face height (m)"), yaxis_title=_t("Jumlah sel", "Cells"), showlegend=False)
         st.plotly_chart(hh, width="stretch")
-        if cm == "auto":
-            st.caption(_t("Garis hijau putus-putus = mode tinggi (populasi bench); garis merah = batas kelompok di lembah antar-mode. Kelompok terpisah = populasi tinggi berbeda (mis. single vs double bench).",
-                          "Dotted green = height modes (bench populations); red = group limits at the valleys between modes. Separate groups = different height populations (e.g. single vs double bench)."))
+        with st.expander(_t("Penampang validasi (cek tinggi & jenis)", "Validation section (check heights & types)"), expanded=False):
+            try:
+                _bch_section_ui(A, xa, ya, key)
+            except Exception as e:
+                st.warning(_t(f"Penampang gagal: {e}", f"Section failed: {e}"))
+        rdf = _bch_regions_df(A)
+        with st.expander(_t("Tabel semua unit (Bench, Ramp, Slope, Berm)", "Table of all units (Bench, Ramp, Slope, Berm)"), expanded=False):
+            st.dataframe(rdf, hide_index=True, width="stretch")
         if len(dom):
             st.dataframe(dom.sort_values(["Tinggi_maks_m"], ascending=False), hide_index=True, width="stretch")
-            e1, e2 = st.columns(2)
-            e1.download_button(_t("Unduh tabel domain (CSV)", "Download domain table (CSV)"), data=dom.to_csv(index=False).encode("utf-8"),
-                               file_name=f"domain_bench_{key}.csv", mime="text/csv", key=f"bch_csv_{key}")
-            try:
-                e2.download_button(_t("Unduh batas domain (DXF)", "Download domain outlines (DXF)"), data=_bch_dxf(xa, ya, cls, names),
-                                   file_name=f"domain_bench_{key}.dxf", mime="application/dxf", key=f"bch_dxf_{key}")
-            except Exception as e:
-                e2.caption(_t(f"DXF tidak tersedia: {e}", f"DXF unavailable: {e}"))
-    st.caption(_t("Tinggi tiap sel muka = elevasi puncak lokal − elevasi kaki lokal sepanjang jalur kemiringan yang sama (bukan selisih seluruh area). "
-                  "Kelas tertinggi pada mode manual = muka yang melampaui batas single bench; biasanya double bench, bench tanpa berm, atau muka yang perlu direvisi.",
-                  "Each face cell's height = local crest elevation − local toe elevation along the same slope path (not the whole area's range). "
-                  "The top class in manual mode = faces exceeding the single-bench limit; typically double benches, benches without a berm, or faces to revise."))
+        e1, e2, e3 = st.columns(3)
+        e1.download_button(_t("Unduh tabel unit (CSV)", "Download unit table (CSV)"), data=rdf.to_csv(index=False).encode("utf-8"),
+                           file_name=f"bench_ramp_slope_{key}.csv", mime="text/csv", key=f"bch_csv_{key}")
+        try:
+            e2.download_button(_t("Unduh batas domain tinggi (DXF)", "Download height-domain outlines (DXF)"), data=_bch_dxf(xa, ya, cls, names),
+                               file_name=f"domain_tinggi_{key}.dxf", mime="application/dxf", key=f"bch_dxf_{key}")
+            e3.download_button(_t("Unduh batas jenis (DXF)", "Download type outlines (DXF)"), data=_bch_dxf(xa, ya, A["typ"], [_BCH_TYPES[t][0] for t in range(1, 7)]),
+                               file_name=f"jenis_bench_ramp_slope_{key}.dxf", mime="application/dxf", key=f"bch_dxft_{key}")
+        except Exception as e:
+            e2.caption(_t(f"DXF tidak tersedia: {e}", f"DXF unavailable: {e}"))
+    st.caption(_t("Tinggi tiap muka = elevasi crest − toe, diambil dari bidang datar di atas dan di bawah muka itu (elevasi bidang = median bidang, bukan nilai tepi yang terdistorsi interpolasi kontur). "
+                  "Muka yang dipisahkan berm sempit dihitung sebagai single bench sendiri-sendiri; berm yang lebih sempit dari resolusi kontur tidak bisa dipisah dan muncul sebagai muka tinggi berkeyakinan rendah.",
+                  "Each face height = crest − toe elevation, taken from the flat planes above and below that face (plane elevation = plane median, not the edge values distorted by contour interpolation). "
+                  "Faces separated by a narrow berm count as separate single benches; a berm narrower than the contour resolution cannot be separated and appears as a tall low-confidence face."))
 
 
 with tabH:
