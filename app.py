@@ -30602,7 +30602,7 @@ def _bch_analyze2(xs, ys, z, P=None):
     return dict(face=typ_face, H=np.where(typ_face, Hu, np.nan), crest=np.where(typ_face, crest, np.nan), toe=np.where(typ_face, toe, np.nan),
                 slope=slope, valid=valid, dx=dx, dy=dy, labels=np.where(typ_face, lab_s, 0), n_comp=int(len(np.unique(lab_s[typ_face]))),
                 zs=zs, face_deg=float(P["face_deg"]), dips=(typ == 5) & vm, typ=typ, conf=conf, rid=rid, reg=reg, params=P, refined=0,
-                cr_pts=cr_pts, to_pts=to_pts, g_loc=g_loc, w_loc=w_loc, zf=zf)
+                cr_pts=cr_pts, to_pts=to_pts, g_loc=g_loc, w_loc=w_loc, zf=zf, flat_eff=flat_eff)
 
 
 def _bch_type_texture(typ, conf, valid, hs, max_px=1792, ncls=6, colors=None):
@@ -30939,6 +30939,131 @@ def _bch_ct_dxf(ct):
     return buf.getvalue().encode("utf-8")
 
 
+def _bch_compliance(A, xa, ya, ct, seg_len=20.0, reach=120.0):
+    """Analisis per-segmen sepanjang strike ala audit bench: tiap seg_len m di sepanjang garis crest dibuat penampang tegak lurus ke arah menurun;
+    dari penampang dihitung tinggi muka, sudut muka (crest-toe), lebar catch bench (toe -> awal muka berikutnya) dan lebar efektif
+    (hanya bagian datar). Tiap segmen punya blok sel (muka + catch bench di bawahnya) utk pewarnaan domain. Return dict(df, sid, zc)."""
+    from scipy import ndimage as ndi
+    dx, dy = float(abs(xa[1] - xa[0])), float(abs(ya[1] - ya[0]))
+    cell = max(dx, dy)
+    nx, ny = A["typ"].shape
+    zs, typ, slope = A["zs"], A["typ"], A["slope"]
+    flat_lim = max(float(A["params"]["flat_deg"]), float(A.get("flat_eff", 0)))
+    pts, tans, lid, zl = [], [], [], []
+    k_seg = {}
+    for li, L in enumerate(ct["crest"]):
+        L = np.asarray(L, float)
+        d = np.concatenate([[0.0], np.cumsum(np.hypot(np.diff(L[:, 0]), np.diff(L[:, 1])))])
+        tot = float(d[-1])
+        if tot < 10.0:
+            continue
+        n_s = max(1, int(round(tot / seg_len)))
+        sc = (np.arange(n_s) + 0.5) * tot / n_s
+        for q, s_ in enumerate(sc):
+            e = 0.5 * min(seg_len, tot) * 0.5
+            p0, p1 = [np.array([np.interp(v, d, L[:, k]) for k in range(3)]) for v in (max(s_ - e, 0.0), min(s_ + e, tot))]
+            pc = np.array([np.interp(s_, d, L[:, k]) for k in range(3)])
+            t = (p1 - p0)[:2]
+            nt = float(np.hypot(*t))
+            if nt < 1e-6:
+                continue
+            pts.append(pc); tans.append(t / nt); lid.append(li + 1); zl.append(pc[2])
+            k_seg[len(pts) - 1] = (li + 1, q + 1, tot / n_s)
+    if not pts:
+        return dict(df=pd.DataFrame(), sid=np.zeros(typ.shape, np.int32), zc=np.zeros(1))
+    P = np.array(pts); T = np.array(tans)
+    N = np.column_stack([-T[:, 1], T[:, 0]])
+    smp = lambda a, X, Y, o=1: ndi.map_coordinates(a, [np.clip((X - xa[0]) / dx, 0, nx - 1), np.clip((Y - ya[0]) / dy, 0, ny - 1)], order=o, mode="nearest")
+    d0 = max(5.0, 2 * cell)
+    zp_ = smp(zs, P[:, 0] + N[:, 0] * d0, P[:, 1] + N[:, 1] * d0)
+    zm_ = smp(zs, P[:, 0] - N[:, 0] * d0, P[:, 1] - N[:, 1] * d0)
+    N = np.where((zp_ <= zm_)[:, None], N, -N)                       # arah menurun
+    step = cell
+    dd = np.arange(-3, int(reach / step) + 1) * step
+    X = P[:, 0][:, None] + N[:, 0][:, None] * dd[None, :]
+    Y = P[:, 1][:, None] + N[:, 1][:, None] * dd[None, :]
+    TP = smp(typ.astype(float), X, Y, 0).astype(int)
+    ZP = smp(zs, X, Y)
+    SP = smp(slope, X, Y)
+    FI = np.clip(np.round((X - xa[0]) / dx).astype(int), 0, nx - 1)
+    FJ = np.clip(np.round((Y - ya[0]) / dy).astype(int), 0, ny - 1)
+    isface = (TP == 3) | (TP == 4)
+    sid = np.zeros(typ.shape, np.int32)
+    rows = []
+    geo = []
+    gap = max(2, int(round(3.0 / step)))
+    k0 = 3
+    for si in range(len(P)):
+        f = isface[si]
+        idx = np.nonzero(f)[0]
+        idx = idx[(idx >= 0) & (dd[idx] <= 10.0)]
+        if not len(idx):
+            continue
+        i0 = int(idx[0])
+        i1 = i0
+        miss = 0
+        for k in range(i0 + 1, len(dd)):
+            if f[k]:
+                i1, miss = k, 0
+            else:
+                miss += 1
+                if miss > gap:
+                    break
+        i2 = None
+        cnt = 0
+        for k in range(i1 + 1, len(dd)):
+            if f[k]:
+                cnt += 1
+                if cnt >= 2:
+                    k4 = min(k + 4, len(dd) - 1)
+                    if ZP[si, k4] < ZP[si, k - 1] - 0.8:          # muka menurun = bench berikutnya
+                        i2 = k - 1
+                    break                                         # muka menanjak = sisi seberang / lantai tertutup: tak ada bench berikut
+            else:
+                cnt = 0
+        zc = float(P[si, 2])
+        a_ = i1 + 1
+        b_ = min(a_ + 3, len(dd))
+        zt = float(np.median(ZP[si, a_:b_])) if b_ > a_ else float(ZP[si, i1])
+        H = zc - zt
+        if H < 0.5:
+            continue
+        run = max(float(dd[i1] - dd[i0]), step)
+        ang = float(np.degrees(np.arctan2(H, run)))
+        if i2 is not None:
+            wid = float(dd[i2] - dd[i1])
+            seg_ = slice(i1 + 1, i2)
+            eff = float((SP[si, seg_] <= flat_lim).sum() * step) + step
+            eff = max(min(eff, max(wid, 0.0)), 0.0)
+            wid = max(wid, 0.0)
+        else:
+            wid = eff = np.nan
+        end = i2 if i2 is not None else min(i1 + int(30.0 / step), len(dd) - 1)
+        sid_ = len(rows) + 1
+        sel = slice(i0, end + 1)
+        sid[FI[si, sel], FJ[si, sel]] = sid_
+        li, q, spc = k_seg[si]
+        geo.append((si, float(dd[i0]) - step, float(dd[end]) + 0.5 * step, spc))
+        rows.append(dict(sid=sid_, Bench=li, Segmen=q, X=float(P[si, 0]), Y=float(P[si, 1]), Crest_m=zc, Toe_m=zt, Tinggi_m=H, Sudut_deg=ang,
+                         Lebar_catch_m=wid, Lebar_efektif_m=eff))
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return dict(df=df, sid=sid, zc=np.zeros(1))
+    zc_arr = np.concatenate([[1e9], df["Crest_m"].to_numpy()])
+    zc_arr = np.concatenate([[1e9], df["Crest_m"].to_numpy()])
+    # blok persegi (strike x dip) per segmen, searah dinding: dirasterisasi sebagai poligon
+    from PIL import Image as _PI, ImageDraw as _PD
+    im = _PI.new("I", (nx, ny), 0)
+    dr = _PD.Draw(im)
+    for k, (si, d0_, d1_, spc) in enumerate(geo, start=1):
+        c = P[si, :2]; t = T[si]; n_ = N[si]; h = 0.5 * spc * 1.04
+        q4 = [c + t * sg_ * h + n_ * dv for sg_, dv in ((-1, d0_), (1, d0_), (1, d1_), (-1, d1_))]
+        dr.polygon([(float((p[0] - xa[0]) / dx), float((p[1] - ya[0]) / dy)) for p in q4], fill=k)
+    sid = np.array(im, dtype=np.int32).T
+    sid = np.where(A["valid"], sid, 0)
+    return dict(df=df, sid=sid, zc=zc_arr)
+
+
 _BCH_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 html,body{margin:0;height:100%;background:#0b1220;color:#e5e7eb;font:12px/1.35 system-ui,Segoe UI,Roboto,sans-serif;overflow:hidden}
@@ -30957,12 +31082,13 @@ b.t{font-size:13px}.m{color:#94a3b8}
 <div class="p" id="leg"></div>
 <div class="p" id="ctl">
 <button id="bReset">Reset</button><button id="bTop">Atas</button><button id="bSide">Samping</button>
-<div style="margin:4px 0"><button id="vCln" class="on">Bersih</button><button id="vTyp">Jenis</button><button id="vDom">Tinggi</button><button id="vDet">Unit</button><button id="vPlain">Polos</button></div>
+<div style="margin:4px 0"><button id="vCln" class="on">Bersih</button><button id="vCmp">Kepatuhan</button><button id="vTyp">Jenis</button><button id="vDom">Tinggi</button><button id="vDet">Unit</button><button id="vPlain">Polos</button></div>
+<div id="cmw" style="display:none;margin:4px 0"><select id="cmet" style="width:100%;background:#1e293b;color:#e5e7eb;border:1px solid #334155;border-radius:6px;padding:3px"></select></div>
 <div style="margin:4px 0"><button id="bRul">📏 Ukur</button><button id="bClr">Hapus ukur</button></div>
 <label><input type="checkbox" id="kWire"> Mesh (wireframe)</label>
 <label><input type="checkbox" id="kLn"> Garis DXF kontur</label>
-<label><input type="checkbox" id="kCL" checked> Garis crest (putih) / toe (biru muda)</label>
-<label><input type="checkbox" id="kCT"> Titik crest / toe (setelah buang outlier)</label>
+<label><input type="checkbox" id="kCL" checked> Garis crest (magenta) / toe (oranye)</label>
+<label><input type="checkbox" id="kCT"> Titik crest (magenta) / toe (oranye), setelah buang outlier</label>
 <label>Eksagerasi vertikal: <span id="veV">1.0</span>×<input type="range" id="ve" min="0.5" max="4" step="0.1" value="1"></label>
 <div class="m">Kiri: putar · Kanan/Shift: geser · Roda: zoom</div>
 </div>
@@ -31009,8 +31135,11 @@ function lineObj(b,col){ if(!b) return null; var a=new Float32Array(b64(b).buffe
   var o=new T.LineSegments(gg,new T.LineBasicMaterial({color:col,transparent:true,opacity:0.9})); o.visible=false; grp.add(o); return o;}
 function ptsObj(b,col){ if(!b) return null; var a=new Float32Array(b64(b).buffer); var gg=new T.BufferGeometry(); gg.setAttribute('position',new T.BufferAttribute(a,3));
   var o=new T.Points(gg,new T.PointsMaterial({color:col,size:3,sizeAttenuation:false})); o.visible=false; grp.add(o); return o;}
-var oLn=lineObj(P.lines,0xffffff), oC=ptsObj(P.cpts,0xfff3b0), oT=ptsObj(P.tpts,0x7dd3fc);
-var oCL=lineObj(P.cl,0xffffff), oTL=lineObj(P.tl,0x38bdf8); if(oCL)oCL.visible=true; if(oTL)oTL.visible=true;
+var oLn=lineObj(P.lines,0xffffff), oC=ptsObj(P.cpts,0xff00ff), oT=ptsObj(P.tpts,0xff8c00);
+function thick(b,col){ if(!b) return null; var g=new T.Group(); var a=new Float32Array(b64(b).buffer); var sz=Math.max(X1-X0,Y1-Y0)*0.0016;
+  [[0,0],[sz,0],[-sz,0],[0,sz],[0,-sz]].forEach(function(o){var gg=new T.BufferGeometry(); gg.setAttribute('position',new T.BufferAttribute(a,3)); var m=new T.LineSegments(gg,new T.LineBasicMaterial({color:col})); m.position.x=o[0]; m.position.z=o[1]; g.add(m);});
+  g.visible=false; grp.add(g); return g;}
+var oCL=thick(P.cl,0xff00ff), oTL=thick(P.tl,0xff8c00); if(oCL)oCL.visible=true; if(oTL)oTL.visible=true;
 var cz=(P.zr[0]+P.zr[1])/2, size=Math.max(X1-X0,Y1-Y0);
 var th=0.9,ph=1.0,R=size*1.15,tg=new T.Vector3(0,0,0),ve=1;
 function setVE(v){ve=v;grp.scale.y=v;$('veV').textContent=v.toFixed(1);}
@@ -31034,7 +31163,7 @@ var tp=null;
 el.addEventListener('touchstart',function(e){tp=e.touches.length===2?[e.touches[0],e.touches[1]]:null;},{passive:true});
 el.addEventListener('touchmove',function(e){if(e.touches.length===2&&tp){var d0=Math.hypot(tp[0].clientX-tp[1].clientX,tp[0].clientY-tp[1].clientY),d1=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY);if(d0>0){R*=d0/d1;place();draw();}tp=[e.touches[0],e.touches[1]];}},{passive:true});
 var ray=new T.Raycaster(),mv=new T.Vector2();
-var cg=P.cg, RID=new Uint16Array(b64(cg.rid).buffer), CC=b64(cg.cc);
+var cg=P.cg, RID=new Uint16Array(b64(cg.rid).buffer), CC=b64(cg.cc), SID=cg.sid?new Uint16Array(b64(cg.sid).buffer):null;
 function hover(e){
   var r=el.getBoundingClientRect();mv.set(((e.clientX-r.left)/r.width)*2-1,-((e.clientY-r.top)/r.height)*2+1);
   ray.setFromCamera(mv,cam);var h=ray.intersectObject(mesh,false);
@@ -31045,6 +31174,8 @@ function hover(e){
   var k=j*cg.nx+i,rid=RID[k];
   var cc=CC[k],cl=cc>0?'<span class="sw" style="background:'+P.ccolors[cc-1]+'"></span><b>Domain: '+P.cnames[cc-1]+'</b><br>':'';
   var tx=cl+(rid>0?P.regs[rid-1]:'<span class="m">Sel transisi (tidak terklasifikasi mentah)</span>');
+  var sg=(SID&&SID[k]>0&&P.segs)?'<hr style="border:0;border-top:1px solid #334155;margin:4px 0">'+P.segs[SID[k]-1]:'';
+  tx+=sg;
   $('hov').innerHTML=tx+'<br><span class="m">X '+(x+P.org[0]).toFixed(1)+' · Y '+(y+P.org[1]).toFixed(1)+' · Z '+z.toFixed(1)+' m</span>';
 }
 // ---- penggaris / ukur manual (overlay SVG: penanda ring, segitiga tinggi, label) ----
@@ -31084,8 +31215,10 @@ $('bClr').onclick=function(){meas=[];pA=null;hp=null;showMeas();draw();};
 $('bReset').onclick=reset;
 $('bTop').onclick=function(){ph=0.02;place();draw();};
 $('bSide').onclick=function(){ph=1.35;place();draw();};
-var VW={vCln:[texC,'legCln'],vTyp:[texT,'legTyp'],vDom:[texD,'legDom'],vDet:[texU,'legDet'],vPlain:[texP,'legPl']};
-function setView(id){mat.map=VW[id][0];mat.needsUpdate=true;for(var k in VW){$(k).className=(k===id)?'on':'';$(VW[k][1]).style.display=(k===id)?'block':'none';}draw();}
+var texK=(P.ctex||[]).map(function(o){return mk(o);});
+var VW={vCmp:[texK[0]||texC,'legCmp'],vCln:[texC,'legCln'],vTyp:[texT,'legTyp'],vDom:[texD,'legDom'],vDet:[texU,'legDet'],vPlain:[texP,'legPl']};
+var curV='vCln';
+function setView(id){curV=id;$('cmw').style.display=(id==='vCmp')?'block':'none';mat.map=VW[id][0];mat.needsUpdate=true;for(var k in VW){$(k).className=(k===id)?'on':'';$(VW[k][1]).style.display=(k===id)?'block':'none';}draw();}
 Object.keys(VW).forEach(function(k){$(k).onclick=function(){setView(k);};});
 $('kWire').onchange=function(){wire.visible=this.checked;draw();};
 $('kLn').onchange=function(){if(oLn)oLn.visible=this.checked;draw();};
@@ -31102,9 +31235,14 @@ lt+='<div class="m">Warna pucat = keyakinan rendah</div></div>';
 var ld='<div id="legDom" style="display:none"><b class="t">Domain tinggi muka</b>';
 for(q=0;q<P.names.length;q++){ld+='<div><span class="sw" style="background:'+P.colors[q]+'"></span>'+P.names[q]+' <span class="m">· '+P.areas[q]+' m²</span></div>';}
 ld+='</div>';
-lg+=lc+lt+ld+'<div id="legDet" style="display:none">Tiap unit muka = warna berbeda<br><span class="sw" style="background:#73f2ff"></span>Berm sempit = pemisah</div><div id="legPl" style="display:none">Hillshade polos</div>';
+var lk='<div id="legCmp" style="display:none"></div>';
+lg+=lc+lk+lt+ld+'<div id="legDet" style="display:none">Tiap unit muka = warna berbeda<br><span class="sw" style="background:#73f2ff"></span>Berm sempit = pemisah</div><div id="legPl" style="display:none">Hillshade polos</div>';
 lg+='<div class="m" style="margin-top:4px">'+P.note+'</div>';
 $('leg').innerHTML=lg;
+(function(){var sel=$('cmet');(P.cnamesK||[]).forEach(function(n,i){var o=document.createElement('option');o.value=i;o.text=n;sel.appendChild(o);});
+ function lgd(i){$('legCmp').innerHTML='<b class="t">'+(P.cnamesK[i]||'')+'</b><br>'+(P.clegs[i]||'');}
+ if(P.cnamesK&&P.cnamesK.length){lgd(0);sel.onchange=function(){var i=parseInt(this.value);VW.vCmp[0]=texK[i]||texC;lgd(i);if(curV==='vCmp'){mat.map=VW.vCmp[0];mat.needsUpdate=true;draw();}};}
+ else{$('vCmp').style.display='none';}})();
 window.addEventListener('resize',resize);
 resize();reset();setTimeout(draw,300);
 }catch(e){showErr('Viewer gagal: '+e.message);}
@@ -31136,7 +31274,7 @@ def _bch_reg_html(A):
     return out
 
 
-def _bch_scene_html(xa, ya, za, A, cls, zone, hs, names, colors, title, note, three_inline=None, lines=None, ctyp=None, cK=0, cnames=None, ccolors=None, dips_on=True, ct=None):
+def _bch_scene_html(xa, ya, za, A, cls, zone, hs, names, colors, title, note, three_inline=None, lines=None, ctyp=None, cK=0, cnames=None, ccolors=None, dips_on=True, ct=None, comp=None):
     """Viewer 3D three.js (putar/geser/zoom bebas). Mesh = grid DEM yang sama dgn analisis (<=~360 simpul/sisi) + tekstur jenis/domain/unit + overlay DXF & crest/toe."""
     import base64 as _b64, json as _json
     valid = A["valid"]
@@ -31169,6 +31307,8 @@ def _bch_scene_html(xa, ya, za, A, cls, zone, hs, names, colors, title, note, th
               cc=_b64.b64encode(np.ascontiguousarray(ccm.T).astype(np.uint8).tobytes()).decode("ascii"))
     dxm, dym = abs(xa[1] - xa[0]), abs(ya[1] - ya[0])
     areas = [int(round(float((cls == c).sum()) * dxm * dym)) for c in range(1, len(names) + 1)]
+    if comp is not None:
+        cg["sid"] = _b64.b64encode(np.ascontiguousarray(np.minimum(comp["sid"], 65535)[::cs, ::cs].T).astype(np.uint16).tobytes()).decode("ascii")
     careas = [int(round(float((ctyp == c).sum()) * dxm * dym)) for c in range(1, cK + 1)]
     tareas = [int(round(float((A["typ"] == t).sum()) * dxm * dym)) for t in range(1, 7)]
 
@@ -31204,7 +31344,7 @@ def _bch_scene_html(xa, ya, za, A, cls, zone, hs, names, colors, title, note, th
     rng_ = np.random.default_rng(1)
     payload = dict(pos=_b64.b64encode(pos.tobytes()).decode("ascii"), idx=_b64.b64encode(tri.tobytes()).decode("ascii"),
                    ext=[float(xa[0] - cx), float(xa[-1] - cx), float(ya[0] - cy), float(ya[-1] - cy)],
-                   zr=[float(np.nanmin(Zs) - zc), float(np.nanmax(Zs) - zc)], org=[cx, cy], zc=zc, texC=du(pC), texT=du(pT), texD=du(pD), texU=du(pU), texP=du(pP), cg=cg,
+                   zr=[float(np.nanmin(Zs) - zc), float(np.nanmax(Zs) - zc)], org=[cx, cy], zc=zc, ctex=([du(b) for b in comp["png"]] if comp else []), cnamesK=(comp["names"] if comp else []), clegs=(comp["legs"] if comp else []), segs=(comp["segs"] if comp else []), texC=du(pC), texT=du(pT), texD=du(pD), texU=du(pU), texP=du(pP), cg=cg,
                    regs=_bch_reg_html(A), cnames=list(cnames), ccolors=list(ccolors), careas=careas, names=list(names), colors=list(colors), areas=areas,
                    tnames=[_BCH_TYPES[t][0] for t in range(1, 7)], tcolors=[_BCH_TYPES[t][1] for t in range(1, 7)], tareas=tareas,
                    lines=_lin(lines) if lines else None, cl=_lin(ct["crest"]) if ct["crest"] else None, tl=_lin(ct["toe"]) if ct["toe"] else None,
@@ -31344,6 +31484,83 @@ def _bch_section_ui(A, xa, ya, key):
                           f" m · simpangan baku {sd:.2f} m" + (" -- konsisten." if sd < 1.0 else " -- tidak konsisten, muka kemungkinan campuran/berm tak terbaca."),
                           f"Consistency of 5 parallel sections (−20…+20 m): heights = " + ", ".join("-" if not np.isfinite(h) else f"{h:.1f}" for h in hv) +
                           f" m · std {sd:.2f} m" + (" -- consistent." if sd < 1.0 else " -- inconsistent, face may be mixed / berm unresolved.")))
+
+
+def _bch_cstat(v, lo, hi):
+    if v is None or not np.isfinite(v):
+        return 4
+    if lo is not None and v < lo:
+        return 2
+    if hi is not None and v > hi:
+        return 3
+    return 1
+
+
+def _bch_comp_pack(C, crit, A, hs):
+    """Status kepatuhan per segmen (gabungan + per metrik) -> tekstur PNG, legenda, teks hover."""
+    df = C["df"]
+    sid = C["sid"]
+    mets = [("Tinggi_m", _t("Tinggi muka", "Face height"), (None, crit["h_max"]), "m"),
+            ("Sudut_deg", _t("Sudut muka", "Face angle"), (crit["a_min"], crit["a_max"]), "°"),
+            ("Lebar_catch_m", _t("Lebar catch bench", "Catch bench width"), (crit["w_min"], None), "m"),
+            ("Lebar_efektif_m", _t("Lebar catch efektif", "Effective catch width"), (crit["e_min"], None), "m")]
+    st_ = np.zeros((len(df), len(mets)), int)
+    for j, (c, _n, (lo, hi), _u) in enumerate(mets):
+        st_[:, j] = [_bch_cstat(v, lo, hi) for v in df[c].to_numpy(float)]
+    fails = ((st_ == 2) | (st_ == 3)).sum(axis=1)
+    has = (st_ != 4).any(axis=1)
+    comb = np.where(~has, 4, np.where(fails == 0, 1, np.where(fails == 1, 2, 3)))
+    names = [_t("Gabungan (semua kriteria)", "Combined (all criteria)")] + [m[1] for m in mets]
+    colc = ["#22c55e", "#f59e0b", "#dc2626", "#9ca3af"]
+    colm = ["#22c55e", "#f59e0b", "#eab308", "#9ca3af"]
+    sq = lambda c, t: f'<span style="display:inline-block;width:10px;height:10px;background:{c};margin-right:5px;vertical-align:middle"></span>{t}<br>'
+    legs = [sq(colc[0], _t("Semua sesuai", "All pass")) + sq(colc[1], _t("1 kriteria gagal", "1 criterion fails")) + sq(colc[2], _t("≥ 2 kriteria gagal", "≥ 2 criteria fail")) + sq(colc[3], _t("Tidak ada data", "No data"))]
+    for (c, n, (lo, hi), u) in mets:
+        rng = (f"≥ {lo:g}" if lo is not None else "") + (f" ≤ {hi:g}" if hi is not None else "")
+        legs.append(sq(colm[0], _t(f"Sesuai ({rng.strip()} {u})", f"Pass ({rng.strip()} {u})")) + (sq(colm[1], _t("Di bawah minimum", "Below minimum")) if lo is not None else "") +
+                    (sq(colm[2], _t("Di atas maksimum", "Above maximum")) if hi is not None else "") + sq(colm[3], _t("Tidak ada data", "No data")))
+    nmap = {1: "OK", 2: "▼", 3: "▲", 4: "–"}
+    segs = []
+    for i, r in df.reset_index(drop=True).iterrows():
+        f = lambda v, d=1: ("–" if not np.isfinite(v) else f"{v:.{d}f}")
+        segs.append(f"<b>{_t('Bench', 'Bench')} {int(r['Bench'])} · {_t('Segmen', 'Segment')} {int(r['Segmen'])}</b><br>"
+                    f"{_t('Tinggi', 'Height')} {f(r['Tinggi_m'])} m {nmap[st_[i, 0]]} · {_t('Sudut', 'Angle')} {f(r['Sudut_deg'], 0)}° {nmap[st_[i, 1]]}<br>"
+                    f"{_t('Catch', 'Catch')} {f(r['Lebar_catch_m'])} m {nmap[st_[i, 2]]} · {_t('Efektif', 'Effective')} {f(r['Lebar_efektif_m'])} m {nmap[st_[i, 3]]}")
+    pngs = []
+    for j in range(len(mets) + 1):
+        stv = comb if j == 0 else st_[:, j - 1]
+        lut = np.concatenate([[0], stv])
+        pngs.append(_bch_type_texture(lut[sid], None, A["valid"], hs, max_px=1280, ncls=4, colors=(colc if j == 0 else colm)))
+    return dict(png=pngs, names=names, legs=legs, segs=segs, sid=sid, comb=comb, st=st_, mets=mets)
+
+
+def _bch_comp_hist(vals, title, lo, hi, unit):
+    from plotly.subplots import make_subplots
+    v = np.asarray(vals, float)
+    v = v[np.isfinite(v)]
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    if len(v) < 2:
+        return fig
+    nb = int(np.clip(np.ceil(np.sqrt(len(v))) + 3, 8, 30))
+    cnt, ed = np.histogram(v, bins=nb)
+    ctr = 0.5 * (ed[:-1] + ed[1:])
+    cols = ["#22c55e" if _bch_cstat(c, lo, hi) == 1 else ("#f59e0b" if _bch_cstat(c, lo, hi) == 2 else "#eab308") for c in ctr]
+    fig.add_trace(go.Bar(x=ctr, y=cnt, marker_color=cols, name=_t("Segmen", "Segments"), width=(ed[1] - ed[0]) * 0.95), secondary_y=False)
+    xs_ = np.sort(v)
+    fig.add_trace(go.Scatter(x=xs_, y=100.0 * np.arange(1, len(xs_) + 1) / len(xs_), mode="lines", line=dict(color="#475569", width=2), name=_t("Kumulatif %", "Cumulative %")), secondary_y=True)
+    x0, x1 = float(ed[0]), float(ed[-1])
+    if lo is not None:
+        fig.add_vrect(x0=min(x0, lo), x1=lo, fillcolor="#f59e0b", opacity=0.12, line_width=0)
+        fig.add_vline(x=lo, line=dict(color="#f59e0b", dash="dash"))
+    if hi is not None:
+        fig.add_vrect(x0=hi, x1=max(x1, hi), fillcolor="#eab308", opacity=0.12, line_width=0)
+        fig.add_vline(x=hi, line=dict(color="#eab308", dash="dash"))
+    ok = float(np.mean([_bch_cstat(c, lo, hi) == 1 for c in v]) * 100.0)
+    fig.update_layout(height=230, margin=dict(l=10, r=10, t=34, b=10), showlegend=False, bargap=0.02,
+                      title=dict(text=f"{title} — {ok:.0f}% {_t('sesuai', 'pass')}", font=dict(size=13)), xaxis_title=unit)
+    fig.update_yaxes(title_text=_t("Jumlah", "Count"), secondary_y=False)
+    fig.update_yaxes(title_text="%", range=[0, 100], secondary_y=True)
+    return fig
 
 
 def _bench_tab():
@@ -31501,6 +31718,19 @@ def _bench_tab():
         ct_tol = o1.number_input(_t("Toleransi outlier crest/toe (m)", "Crest/toe outlier tolerance (m)"), 0.2, 10.0, 1.0, 0.1, key="bch_ct_tol",
                                  help=_t("Titik crest/toe yang elevasinya menyimpang lebih dari ini dari median berjalan di sepanjang garis dibuang dan garis diputus di situ.", "Crest/toe vertices whose elevation deviates more than this from the running median along the line are dropped and the line is broken there."))
         ct_len = o2.number_input(_t("Panjang minimum garis crest/toe (m)", "Minimum crest/toe line length (m)"), 3.0, 500.0, 15.0, 1.0, key="bch_ct_len")
+    with st.expander(_t("Kriteria kepatuhan bench (per segmen)", "Bench compliance criteria (per segment)"), expanded=False):
+        q1, q2, q3, q4, q5 = st.columns(5)
+        c_hmax = q1.number_input(_t("Tinggi muka maks (m)", "Max face height (m)"), 2.0, 100.0, 16.0, 1.0, key="bch_c_hmax")
+        c_amin = q2.number_input(_t("Sudut muka min (°)", "Min face angle (°)"), 10.0, 85.0, 45.0, 1.0, key="bch_c_amin")
+        c_amax = q3.number_input(_t("Sudut muka maks (°)", "Max face angle (°)"), 20.0, 89.0, 70.0, 1.0, key="bch_c_amax")
+        c_wmin = q4.number_input(_t("Lebar catch min (m)", "Min catch width (m)"), 0.0, 60.0, 8.0, 0.5, key="bch_c_wmin")
+        c_emin = q5.number_input(_t("Lebar efektif min (m)", "Min effective width (m)"), 0.0, 60.0, 6.0, 0.5, key="bch_c_emin")
+        q6, q7 = st.columns(2)
+        c_seg = q6.number_input(_t("Panjang segmen (m)", "Segment length (m)"), 5.0, 100.0, 20.0, 5.0, key="bch_c_seg")
+        c_reach = q7.number_input(_t("Jangkauan penampang (m)", "Section reach (m)"), 30.0, 400.0, 120.0, 10.0, key="bch_c_reach")
+        st.caption(_t("Kriteria bawaan hanya contoh umum -- samakan dengan desain/regulasi tambang Anda. Lebar catch = jarak toe → awal muka berikutnya; lebar efektif = bagian yang benar-benar datar. Sudut muka dihitung dari crest-toe pada DEM hasil kontur sehingga cenderung sedikit lebih landai dari sudut desain.",
+                      "Default criteria are generic examples -- match your own design/regulation. Catch width = toe → start of next face; effective width = the truly flat part. Face angle comes from crest-toe on a contour-derived DEM, so it tends to read slightly flatter than the design angle."))
+    crit = dict(h_max=float(c_hmax), a_min=float(c_amin), a_max=float(c_amax), w_min=float(c_wmin), e_min=float(c_emin))
     cint_auto = float((seg.get("qc") or {}).get("cint") or 0.0)
     cint = float(cint_in) if cint_in > 0 else cint_auto
     Pp = dict(face_deg=float(face_deg), grow_deg=min(float(grow_deg), float(face_deg) - 1.0), ir_deg=float(ir_deg), h_flag=float(h_flag), flat_deg=float(flat_deg), bench_min_w=float(bench_w),
@@ -31514,7 +31744,7 @@ def _bench_tab():
             _sub_header(title)
         sx_ = max(1, int(np.ceil(np.sqrt(np.isfinite(zz).sum() / 700000.0))))
         xa, ya, za = xs[::sx_], ys[::sx_], zz[::sx_, ::sx_]
-        sig = (key, za.shape, float(np.nanmean(za)), float(np.nanstd(za)), tuple(sorted(Pp.items())), cm, tuple(thr), k_auto, bool(zone_on), float(zone_m), bool(clean_on), float(clean_a), float(clean_s), bool(clean_m), float(ct_tol), float(ct_len), 13)
+        sig = (key, za.shape, float(np.nanmean(za)), float(np.nanstd(za)), tuple(sorted(Pp.items())), cm, tuple(thr), k_auto, bool(zone_on), float(zone_m), bool(clean_on), float(clean_a), float(clean_s), bool(clean_m), float(ct_tol), float(ct_len), tuple(sorted(crit.items())), float(c_seg), float(c_reach), 14)
         ckey = f"bch_res_{key}"
         cached = st.session_state.get(ckey)
         if cached and cached[0] == sig:
@@ -31546,13 +31776,21 @@ def _bench_tab():
                         dom = _bch_domains(cls, xa, ya, Hx, A["crest"], A["slope"], A["dx"], A["dy"], names)
                         hs = _bch_hillshade(xa, ya, za)
                         ct = _bch_ct_lines(A, xa, ya, tol=float(ct_tol), min_len=float(ct_len))
-                        R = dict(ct=ct, A=A, empty=False, cls=cls, zone=zone, brk=brk, names=names, info=info, dom=dom, hs=hs, K=K, colors=_bch_class_colors(K),
+                        comp = None
+                        try:
+                            C_ = _bch_compliance(A, xa, ya, ct, seg_len=float(c_seg), reach=float(c_reach))
+                            if len(C_["df"]):
+                                comp = _bch_comp_pack(C_, crit, A, hs)
+                                comp["C"] = C_
+                        except Exception as e_:
+                            st.warning(_t(f"Kepatuhan bench gagal: {e_}", f"Bench compliance failed: {e_}"))
+                        R = dict(ct=ct, comp=comp, A=A, empty=False, cls=cls, zone=zone, brk=brk, names=names, info=info, dom=dom, hs=hs, K=K, colors=_bch_class_colors(K),
                                  ctyp=ctyp, cK=cK, cnames=_BCH_CLEAN_NAMES[cm_], ccolors=_BCH_CLEAN_COLORS[cm_])
                         R["html"], R["ntri"] = _bch_scene_html(xa, ya, za, A, cls, zone, hs, names, R["colors"], title=str(title),
                                                                note=_t(f"Muka ≥ {Pp['face_deg']:.0f}° · datar ≤ {Pp['flat_deg']:.0f}°" + (f" (kontur {cint:g} m)" if cint else ""),
                                                                        f"Faces ≥ {Pp['face_deg']:.0f}° · flat ≤ {Pp['flat_deg']:.0f}°" + (f" (contour {cint:g} m)" if cint else "")),
                                                                three_inline=_wsim_find_local_three(), lines=(seg.get("lines") if key == "exist" else None),
-                                                               ctyp=ctyp, cK=cK, cnames=_BCH_CLEAN_NAMES[cm_], ccolors=_BCH_CLEAN_COLORS[cm_], dips_on=not clean_on, ct=ct)
+                                                               ctyp=ctyp, cK=cK, cnames=_BCH_CLEAN_NAMES[cm_], ccolors=_BCH_CLEAN_COLORS[cm_], dips_on=not clean_on, ct=ct, comp=comp)
                 except Exception as e:
                     import traceback as _tb
                     st.error(_t(f"Analisis gagal: {e}", f"Analysis failed: {e}"))
@@ -31597,6 +31835,27 @@ def _bench_tab():
                       "Centang 'Garis DXF kontur' untuk membandingkan mesh dengan DXF, dan 'crest/toe' untuk melihat titik yang dipakai menghitung tinggi. Putar kiri-klik, geser klik-kanan/Shift, zoom roda; arahkan kursor untuk detail.",
                       f"Mesh {R['ntri']:,} triangles (same grid as the analysis). 'Jenis' = Bench/Ramp/Slope; 'Tinggi' = single-bench height domains; 'Unit' = each face in its own colour. "
                       "Tick 'DXF contour lines' to compare the mesh against the DXF and 'crest/toe' to see the points used for heights. Rotate with left-drag, pan with right-drag/Shift, zoom with wheel; hover for details."))
+        comp = R.get("comp")
+        if comp is not None:
+            dfc = comp["C"]["df"].reset_index(drop=True)
+            st.markdown("**" + _t("Kepatuhan bench per segmen", "Bench compliance per segment") + "**")
+            pc = [float((comp["comb"] == 1).mean() * 100), float((comp["comb"] == 2).mean() * 100), float((comp["comb"] == 3).mean() * 100)]
+            k1_, k2_, k3_, k4_ = st.columns(4)
+            _metric_card(_t("Segmen dianalisis", "Segments analysed"), f"{len(dfc)}", container=k1_)
+            _metric_card(_t("Semua sesuai", "All pass"), f"{pc[0]:.0f}%", container=k2_)
+            _metric_card(_t("1 kriteria gagal", "1 fails"), f"{pc[1]:.0f}%", container=k3_)
+            _metric_card(_t("≥ 2 gagal", "≥ 2 fail"), f"{pc[2]:.0f}%", container=k4_)
+            hc = st.columns(2)
+            for j, (c_, n_, (lo_, hi_), u_) in enumerate(comp["mets"]):
+                hc[j % 2].plotly_chart(_bch_comp_hist(dfc[c_], n_, lo_, hi_, u_), width="stretch", key=f"bch_ch_{key}_{j}")
+            with st.expander(_t("Tabel segmen kepatuhan", "Compliance segment table"), expanded=False):
+                st.dataframe(dfc.round(2), hide_index=True, width="stretch")
+                st.download_button(_t("Unduh kepatuhan segmen (CSV)", "Download segment compliance (CSV)"), data=dfc.round(3).to_csv(index=False).encode("utf-8"),
+                                   file_name=f"kepatuhan_bench_{key}.csv", mime="text/csv", key=f"bch_cc_{key}")
+            st.caption(_t("Definisi lebar catch/efektif dan pembagian segmen adalah definisi kami sendiri (bukan salinan perangkat lunak tertentu); segmen tanpa bench di bawahnya (lantai pit / tak ada muka berikut) bernilai kosong. Verifikasi sampel dengan penampang/ruler.",
+                          "Catch/effective width and segmentation are our own definitions (not a copy of any specific software); segments with no bench below (pit floor / no next face) are left blank. Spot-check with sections/ruler."))
+        else:
+            st.caption(_t("Kepatuhan per segmen tidak tersedia (garis crest tidak terbentuk).", "Per-segment compliance unavailable (no crest lines formed)."))
         with st.expander(_t("QC kualitas permukaan & klasifikasi", "Surface & classification QC"), expanded=False):
             st.dataframe(_bch_qc_table(R, seg, Pp, max(A["dx"], A["dy"])), hide_index=True, width="stretch")
         # histogram
