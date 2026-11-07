@@ -29797,48 +29797,6 @@ def _bch_shift(a, di, dj, fill):
     return out
 
 
-def _bch_propagate(z, mask, up, gx, gy, dx, dy, recv, max_iter=500):
-    """Elevasi puncak (up=True) / kaki (up=False) lokal tiap sel muka: rambatkan nilai dari tetangga yang lebih tinggi (rendah) SEARAH
-    kemiringan (sudut < ~60° thd garis lereng) di dalam mask, sampai konvergen."""
-    cur = np.where(mask, z, np.nan)
-    nb = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
-    gn = np.hypot(gx, gy)
-    for _ in range(max_iter):
-        new = cur.copy()
-        for di, dj in nb:
-            nv = _bch_shift(cur, di, dj, np.nan)
-            nz = _bch_shift(z, di, dj, np.nan)
-            stp = np.hypot(di * dx, dj * dy)
-            dot = (di * dx * gx + dj * dy * gy) / (gn * stp + 1e-12)
-            okdir = (dot >= 0.5) if up else (dot <= -0.5)
-            ok = np.isfinite(nv) & mask & okdir & ((nz >= z - 1e-6) if up else (nz <= z + 1e-6))
-            cand = np.where(ok & recv, nv, np.nan)      # hanya sel muka yang MENERIMA; sel terminal (berm/lantai) menahan nilainya sendiri
-            with np.errstate(all="ignore"):
-                new = np.fmax(new, cand) if up else np.fmin(new, cand)
-        if np.array_equal(np.nan_to_num(new, nan=-9e9), np.nan_to_num(cur, nan=-9e9)):
-            break
-        cur = new
-    return cur
-
-
-def _bch_otsu(vals, lo=18.0, hi=55.0, nb=72):
-    """Ambang Otsu pada sebaran kemiringan (bimodal: bench datar vs muka curam), dijepit ke [lo, hi] derajat."""
-    v = np.asarray(vals, float)
-    v = v[np.isfinite(v)]
-    if v.size < 50:
-        return 40.0
-    h, e = np.histogram(v, bins=nb, range=(0, 90))
-    p = h / max(h.sum(), 1)
-    c = 0.5 * (e[1:] + e[:-1])
-    w0, m0 = np.cumsum(p), np.cumsum(p * c)
-    mt = m0[-1]
-    with np.errstate(all="ignore"):
-        sb = (mt * w0 - m0) ** 2 / (w0 * (1 - w0))
-    sb = np.nan_to_num(sb)
-    t = float(c[int(np.argmax(sb))])
-    return float(np.clip(t, lo, hi))
-
-
 def _bch_peaks_valleys(vals, bin_m=0.5, sigma_m=1.0, min_share=0.04, min_sep_m=3.0):
     """Puncak (mode) sebaran tinggi muka + lembah di antaranya. Return (peaks[list], valleys[list])."""
     from scipy import ndimage as ndi
@@ -29918,103 +29876,6 @@ def _bch_jenks(vals, k, nbin=160):
     return sorted(brk), float(1.0 - D[k, n - 1] / max(ssd(0, n - 1), 1e-12))
 
 
-def _bch_analyze_core(xs, ys, z, face_deg=None, smooth_cells=1.0, min_area_m2=40.0, min_h=3.0, split_berm=True, split_ratio=0.75, berm_w=12.0):
-    """Deteksi muka bench (adaptif) + tinggi lokal. face_deg=None -> ambang Otsu otomatis. Histeresis: biji >= ambang, tumbuh ke sel >= 0.55*ambang
-    (maks 3 sel) agar kaki/puncak muka & celah tidak 'kosong'. Return dict."""
-    from scipy import ndimage as ndi
-    xs = np.asarray(xs, float); ys = np.asarray(ys, float); z = np.asarray(z, float)
-    valid = np.isfinite(z)
-    zf = _bch_fill_nearest(z)
-    dx, dy = float(abs(xs[1] - xs[0])), float(abs(ys[1] - ys[0]))
-    zs = ndi.gaussian_filter(zf, smooth_cells) if smooth_cells > 0 else zf
-    gx, gy = np.gradient(zs, dx, dy)
-    slope = np.degrees(np.arctan(np.hypot(gx, gy)))
-    thr = float(face_deg) if face_deg else _bch_otsu(slope[valid])
-    seeds = valid & (slope >= thr)
-    low = valid & (slope >= max(12.0, 0.55 * thr))
-    lab_l, nl = ndi.label(low, structure=np.ones((3, 3)))
-    ok_l = np.isin(lab_l, np.unique(lab_l[seeds])) if nl else low
-    grow = ndi.binary_dilation(seeds, structure=np.ones((3, 3)), iterations=2) & low & ok_l
-    face = seeds | grow
-    face = ndi.binary_closing(face, structure=np.ones((3, 3)), iterations=1) & valid
-    # --- DETEKSI PEMISAH BENCH: berm/ramp sempit DI DALAM lereng curam (kemiringan turun tajam di antara dua zona curam) ---
-    dips = np.zeros(face.shape, bool)
-    if split_berm:
-        zl = ndi.gaussian_filter(zf, 0.5)
-        gxl, gyl = np.gradient(zl, dx, dy)
-        sl_d = np.degrees(np.arctan(np.hypot(gxl, gyl)))
-        kmax = int(max(1, round(float(berm_w) / (2.0 * max(dx, dy)))))
-        for kk in range(1, kmax + 1):
-            for di, dj in ((1, 0), (0, 1), (1, 1), (1, -1)):
-                sp = _bch_shift(sl_d, kk * di, kk * dj, 0.0)
-                sm_ = _bch_shift(sl_d, -kk * di, -kk * dj, 0.0)
-                dips |= (sp >= thr) & (sm_ >= thr) & (sl_d < np.asarray(split_ratio) * np.minimum(sp, sm_))
-        dips &= valid
-        dips = ndi.binary_closing(dips, structure=np.ones((3, 3)), iterations=1) | dips
-        dips &= valid
-        face &= ~dips
-    holes = ndi.binary_fill_holes(face) & ~face        # isi hanya lubang KECIL (bukan cincin berm di antara muka)
-    if holes.any():
-        hl, hn = ndi.label(holes)
-        hsz = ndi.sum(holes, hl, index=np.arange(1, hn + 1))
-        face = face | np.isin(hl, np.nonzero(hsz <= 12)[0] + 1)
-    face &= valid
-    face = ndi.binary_opening(face, structure=np.ones((3, 3)), iterations=1) | (face & ndi.binary_dilation(seeds, iterations=1))
-    face &= ~dips
-    lab, n = ndi.label(face, structure=np.ones((3, 3)))
-    if n:
-        areas = ndi.sum(face, lab, index=np.arange(1, n + 1)) * dx * dy
-        face &= ~np.isin(lab, np.nonzero(areas < min_area_m2)[0] + 1)
-    md = ndi.binary_dilation(face, structure=np.ones((3, 3)), iterations=1) & valid
-    crest = _bch_propagate(zf, md, True, gx, gy, dx, dy, face)
-    toe = _bch_propagate(zf, md, False, gx, gy, dx, dy, face)
-    H = np.where(face, crest - toe, np.nan)
-    face &= np.isfinite(H) & (H >= min_h)
-    # haluskan tinggi (median 5x5 hanya di muka) -> kurangi bintik
-    Hf = np.where(face, H, np.nan)
-    Hn = _bch_fill_nearest(Hf)
-    Hm = ndi.median_filter(Hn, size=5)
-    H = np.where(face, Hm, np.nan)
-    lab, n = ndi.label(face, structure=np.ones((3, 3)))
-    return dict(face=face, H=H, crest=np.where(face, crest, np.nan), toe=np.where(face, toe, np.nan), slope=slope, valid=valid, dx=dx, dy=dy,
-                labels=lab, n_comp=int(n), zs=zs, face_deg=thr, dips=dips & valid)
-
-
-def _bch_analyze(xs, ys, z, face_deg=None, smooth_cells=1.0, min_area_m2=40.0, min_h=3.0, split_berm=True, split_ratio=0.75, berm_w=12.0, refine=True, tall_factor=1.7):
-    """Analisis muka bench + PEMISAH bench (berm/ramp sempit). Refinement adaptif: muka yang tingginya >= tall_factor x median (kemungkinan beberapa single bench
-    yang tergabung) dideteksi ulang dengan sensitivitas lebih tinggi HANYA di area itu (sampai 2 putaran, rasio maks 0.95)."""
-    from scipy import ndimage as ndi
-    A = _bch_analyze_core(xs, ys, z, face_deg, smooth_cells, min_area_m2, min_h, split_berm, split_ratio, berm_w)
-    A["refined"] = 0
-    if not (split_berm and refine) or not A["face"].any():
-        return A
-    ratio_map = np.full(A["face"].shape, float(split_ratio))
-    for it in range(2):
-        H = A["H"]
-        ref = float(np.nanmedian(H[A["face"]]))
-        lab, n = ndi.label(A["face"], structure=np.ones((3, 3)))
-        if n == 0:
-            break
-        # tinggi per komponen muka (median)
-        meds = ndi.median(np.nan_to_num(H, nan=0.0), lab, index=np.arange(1, n + 1))
-        tall_ids = [i + 1 for i, m in enumerate(meds) if m >= tall_factor * ref]
-        if not tall_ids:
-            break
-        tall = ndi.binary_dilation(np.isin(lab, tall_ids), structure=np.ones((3, 3)), iterations=3)
-        new_r = np.where(tall, np.minimum(ratio_map + 0.1, 0.95), ratio_map)
-        if np.allclose(new_r, ratio_map):
-            break
-        ratio_map = new_r
-        B = _bch_analyze_core(xs, ys, z, face_deg, smooth_cells, min_area_m2, min_h, split_berm, ratio_map, berm_w)
-        # terima hasil hanya kalau memang memecah (jumlah piksel muka tinggi berkurang)
-        if np.nanpercentile(B["H"][B["face"]], 95) < np.nanpercentile(A["H"][A["face"]], 95) if B["face"].any() else False:
-            B["refined"] = it + 1
-            A = B
-        else:
-            break
-    return A
-
-
 def _bch_classify(H, face, thresholds=None, auto=False, k_auto=None, max_k=6):
     """Kelas tiap sel: 0 = bukan muka; 1..K = kelas tinggi. Return (cls, breaks, names, info). Auto: jumlah kelompok dari mode sebaran tinggi
     (puncak KDE) + batas di lembah; k bisa dipaksa."""
@@ -30073,14 +29934,19 @@ def _bch_clean(cls, face, K, sigma=1.6, min_cells=12):
     return out
 
 
-def _bch_zone(cls, valid, dx, dy, max_m):
-    """Perluas kelas ke sel non-muka (berm/lantai) terdekat dalam max_m meter -> zona bench berwarna (tanpa 'ruang kosong')."""
+def _bch_zone(cls, valid, dx, dy, max_m, zf=None, toe=None, tol=1.5):
+    """Catch bench: perluas kelas muka ke LANTAI di sisi bawahnya (sel non-muka terdekat dalam max_m m yang elevasinya <= toe + tol).
+    Lantai di sisi atas muka (elevasi ~ crest) bukan milik muka itu -- ia catch bench muka di atasnya."""
     from scipy import ndimage as ndi
     if not (cls > 0).any() or max_m <= 0:
         return np.zeros(cls.shape, int)
     d, idx = ndi.distance_transform_edt(cls == 0, sampling=(dx, dy), return_indices=True)
-    z = cls[tuple(idx)]
-    return np.where((cls == 0) & valid & (d <= max_m), z, 0)
+    zc = cls[tuple(idx)]
+    ok = (cls == 0) & valid & (d <= max_m)
+    if zf is not None and toe is not None:
+        tn = toe[tuple(idx)]
+        ok &= np.isfinite(tn) & (zf <= tn + tol)
+    return np.where(ok, zc, 0)
 
 
 def _bch_domains(cls, xs, ys, H, crest, slope, dx, dy, names, min_cells=6):
@@ -30200,10 +30066,10 @@ def _bch_dxf(xs, ys, cls, names):
 #   - tinggi single bench lazim 5-15 m; > ~20 m hampir selalu berarti dua bench atau lebih yang tergabung (atau bench tanpa berm).
 _BCH_TYPES = {1: ("Bench (bidang datar lebar)", "#22c55e"), 2: ("Ramp (jalan miring memanjang)", "#f59e0b"), 3: ("Slope: muka bench", "#dc2626"),
               4: ("Slope: antar-ramp / overall (kemungkinan multi-bench)", "#7c3aed"), 5: ("Berm sempit / pemisah", "#06b6d4"),
-              6: ("Bidang landai (belum pasti)", "#9ca3af")}
+              6: ("Tidak pasti (landai / tepi data / terlalu kecil)", "#9ca3af")}
 _BCH_DEF = dict(flat_deg=8.0, face_deg=35.0, grow_deg=22.0, ir_deg=20.0, grow_m=4.0, bench_min_w=6.0, ramp_w_min=8.0, ramp_w_max=40.0,
                 ramp_g_min=4.0, ramp_g_max=12.0, ramp_min_len=40.0, ramp_elong=3.0, min_area=60.0, min_h=3.0, h_flag=20.0, smooth=0.5, cint=0.0,
-                split=True, split_ratio=0.75, berm_w=12.0)
+                split=True, split_ratio=0.75, berm_w=3.0, h_smooth_m=5.0, cint_corr="auto", max_len=250.0)
 _BCH_PRESETS = {
     "umum": dict(),
     "keras": dict(face_deg=45.0, grow_deg=30.0, ir_deg=25.0),
@@ -30324,84 +30190,224 @@ def _bch_open_w(mask, dx, dy, width):
     return back & mask
 
 
+# ===================== DOMAIN BENCH v5: penelusuran garis kemiringan (fall-line) =====================
+# Konsep (definisi geometri, bukan tebakan piksel):
+#   MUKA (face)  = bagian lereng yang curam & menerus.
+#   CREST        = titik tempat muka BERAKHIR di sisi ATAS (kemiringan patah dari curam -> datar, bahu atas).
+#   TOE          = titik tempat muka berakhir di sisi BAWAH (patah dari curam -> datar, kaki muka).
+#   Tinggi muka  = elevasi crest - elevasi toe, diukur SEPANJANG GARIS KEMIRINGAN dari tiap sel muka (bukan dari tepi mask).
+#   Sudut muka   = atan(tinggi / jarak horizontal crest-toe).
+#   Berm/catch bench = bidang datar di antara dua muka. Berm yang lebih sempit dari 'celah' tidak bisa memisahkan dua muka -> muka tinggi (multi-bench).
+from scipy import ndimage as ndi  # noqa: E402 (dipakai fungsi Domain Bench v5)
+
+
+def _bch5_trace(zf, gx, gy, slope, vm, seeds_ij, dx, dy, thr_deg, gap_m, max_len, up=True):
+    """Dari tiap sel muka, jalan MENANJAK (up) / MENURUN (down) mengikuti arah gradien selama lereng >= thr_deg.
+    Celah datar <= gap_m (segitiga datar pada DEM kontur) dilompati; celah lebih lebar = berm/lantai -> berhenti.
+    Titik terakhir yang masih curam = CREST (up) / TOE (down). status: 1 normal, 2 menabrak tepi data, 3 melebihi max_len."""
+    n = len(seeds_ij[0])
+    cell = min(dx, dy)
+    step = 0.5 * cell
+    nx, ny = zf.shape
+    pi = seeds_ij[0].astype(float).copy(); pj = seeds_ij[1].astype(float).copy()
+    li, lj = pi.copy(), pj.copy()
+    gap = np.zeros(n)
+    status = np.zeros(n, np.int8)
+    sgn = 1.0 if up else -1.0
+    smp = lambda a, i, j: ndi.map_coordinates(a, [i, j], order=1, mode="nearest")
+    vmf = vm.astype(np.float32)
+    gxv, gyv = smp(gx, pi, pj), smp(gy, pi, pj)
+    gn = np.hypot(gxv, gyv) + 1e-12
+    ux, uy = sgn * gxv / gn, sgn * gyv / gn
+    act = np.arange(n)
+    for _ in range(int(np.ceil(max_len / step))):
+        if not act.size:
+            break
+        ci, cj = pi[act], pj[act]
+        inb = (ci >= 0) & (ci <= nx - 1) & (cj >= 0) & (cj <= ny - 1)
+        cic, cjc = np.clip(ci, 0, nx - 1), np.clip(cj, 0, ny - 1)
+        okv = inb & (smp(vmf, cic, cjc) > 0.99)
+        sv = np.where(okv, smp(slope, cic, cjc), 0.0)
+        steep = okv & (sv >= thr_deg)
+        gxv, gyv = smp(gx, cic, cjc), smp(gy, cic, cjc)
+        gn = np.hypot(gxv, gyv) + 1e-12
+        upd = steep & (gn > 0.15)
+        ax = np.where(upd, 0.6 * ux[act] + 0.4 * sgn * gxv / gn, ux[act])
+        ay = np.where(upd, 0.6 * uy[act] + 0.4 * sgn * gyv / gn, uy[act])
+        an = np.hypot(ax, ay) + 1e-12
+        ux[act], uy[act] = ax / an, ay / an
+        li[act] = np.where(steep, ci, li[act]); lj[act] = np.where(steep, cj, lj[act])
+        gap[act] = np.where(steep, 0.0, gap[act] + step)
+        d_edge = ~okv
+        # menabrak tepi data SETELAH meninggalkan lereng curam >= 1.5 sel: anggap muka sudah berakhir (datar di sisi itu); kalau belum, status 2 (tak terukur)
+        edge_acc = d_edge & (gap[act] >= 1.5 * cell) & (np.isfinite(gap[act]))
+        d_gap = ((gap[act] > gap_m) & okv) | edge_acc
+        status[act[d_edge]] = 2
+        status[act[d_gap]] = 1
+        pi[act] = ci + ux[act] * step / dx
+        pj[act] = cj + uy[act] * step / dy
+        act = act[~(d_edge | d_gap)]
+    status[act] = 3
+    zl = smp(zf, np.clip(li, 0, nx - 1), np.clip(lj, 0, ny - 1))
+    return dict(i=li, j=lj, z=zl, status=status)
+
+
+def _bch5_units(face, zc, zt, H, tol_abs=1.2, tol_rel=0.12):
+    """Satukan sel muka bertetangga dengan elevasi crest DAN toe konsisten -> satu UNIT muka (single bench / tumpukan bench)."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+    ok = face & np.isfinite(H)
+    nx, ny = face.shape
+    ids = -np.ones(face.shape, np.int64)
+    n = int(ok.sum())
+    out = np.zeros(face.shape, np.int32)
+    if n == 0:
+        return out, 0
+    ids[ok] = np.arange(n)
+    zc_, zt_, H_ = zc[ok], zt[ok], H[ok]
+    rows, cols = [], []
+    for di, dj in ((0, 1), (1, 0), (1, 1), (1, -1)):
+        j0, j1 = max(0, -dj), ny - max(0, dj)
+        a = ids[0:nx - di, j0:j1]
+        b = ids[di:nx, j0 + dj:j1 + dj]
+        m = (a >= 0) & (b >= 0)
+        if not m.any():
+            continue
+        ia, ib = a[m], b[m]
+        tol = np.maximum(tol_abs, tol_rel * np.maximum(H_[ia], H_[ib]))
+        good = (np.abs(zc_[ia] - zc_[ib]) <= tol) & (np.abs(zt_[ia] - zt_[ib]) <= tol)
+        rows.append(ia[good]); cols.append(ib[good])
+    r = np.concatenate(rows) if rows else np.zeros(0, np.int64)
+    c = np.concatenate(cols) if cols else np.zeros(0, np.int64)
+    nc, lab = connected_components(coo_matrix((np.ones(len(r)), (r, c)), shape=(n, n)), directed=False)
+    out[ok] = lab + 1
+    return out, int(nc)
+
+
+def _bch5_unit_smooth(unit, vals, sigma_cells):
+    """Haluskan nilai di dalam tiap unit (normalized convolution per unit -> tidak bercampur antar bench)."""
+    out = np.full(unit.shape, np.nan)
+    if unit.max() <= 0:
+        return out
+    objs = ndi.find_objects(unit)
+    pad = int(np.ceil(3 * sigma_cells)) + 1
+    for k, sl in enumerate(objs, start=1):
+        if sl is None:
+            continue
+        s2 = tuple(slice(max(0, s.start - pad), s.stop + pad) for s in sl)
+        m = unit[s2] == k
+        v = np.where(m, vals[s2], 0.0)
+        mm = m & np.isfinite(vals[s2])
+        v = np.where(mm, v, 0.0)
+        num = ndi.gaussian_filter(v, sigma_cells, mode="constant")
+        den = ndi.gaussian_filter(mm.astype(float), sigma_cells, mode="constant")
+        r = np.where(mm & (den > 1e-6), num / np.maximum(den, 1e-6), np.nan)
+        sub = out[s2]
+        sub[m] = r[m]
+        out[s2] = sub
+    return out
+
+
 def _bch_analyze2(xs, ys, z, P=None):
-    """Klasifikasi berbasis GEOMETRI dengan ambang absolut (bukan Otsu): 1 Bench, 2 Ramp, 3 Muka bench, 4 Lereng antar-ramp/overall,
-    5 Berm sempit, 6 Bidang landai (belum pasti). Tinggi = elevasi crest - toe memakai cincin crest/toe terdekat di luar muka (bukan seluruh lereng)."""
-    from scipy import ndimage as ndi
+    """v5. Klasifikasi: 1 Bench, 2 Ramp, 3 Muka bench (single), 4 Muka tinggi/antar-ramp (multi-bench), 5 Berm sempit, 6 Tidak pasti.
+    Muka = lereng >= 'ir_deg' yang punya crest & toe terukur (garis kemiringan berakhir di bidang datar di KEDUA ujung)."""
     P = {**_BCH_DEF, **(P or {})}
-    xs = np.asarray(xs, float); ys = np.asarray(ys, float); z = np.asarray(z, float)
     S8 = np.ones((3, 3), bool)
+    xs = np.asarray(xs, float); ys = np.asarray(ys, float); z = np.asarray(z, float)
     valid = np.isfinite(z)
     zf = _bch_fill_nearest(z)
     dx, dy = float(abs(xs[1] - xs[0])), float(abs(ys[1] - ys[0]))
     cell = max(dx, dy)
     vm = ndi.binary_erosion(valid, structure=S8, iterations=1)
     zs = ndi.gaussian_filter(zf, P["smooth"]) if P["smooth"] > 0 else zf
-    gx, gy = np.gradient(zs, dx, dy)
-    tn = np.hypot(gx, gy)
-    slope = np.degrees(np.arctan(tn))
-    # ---------------- muka curam (histeresis dengan ambang ABSOLUT) ----------------
-    seeds = vm & (slope >= P["face_deg"])
-    low = vm & (slope >= P["grow_deg"])
-    lab_l, nl = ndi.label(low, structure=S8)
-    ok_l = np.isin(lab_l, np.unique(lab_l[seeds])) if nl else low
-    it_g = max(1, int(round(P["grow_m"] / cell)))
-    face = seeds | (ndi.binary_dilation(seeds, structure=S8, iterations=it_g) & low & ok_l)
-    face = ndi.binary_closing(face, structure=S8, iterations=1) & vm
-    # ---------------- pemisah: berm/ramp sempit di antara dua zona curam ----------------
-    dips = np.zeros(face.shape, bool)
-    if P["split"]:
-        zl = ndi.gaussian_filter(zf, 0.5)
-        gxl, gyl = np.gradient(zl, dx, dy)
-        sl_d = np.degrees(np.arctan(np.hypot(gxl, gyl)))
-        kmax = int(max(1, round(float(P["berm_w"]) / (2.0 * cell))))
-        for kk in range(1, kmax + 1):
-            for di, dj in ((1, 0), (0, 1), (1, 1), (1, -1)):
-                sp = _bch_shift(sl_d, kk * di, kk * dj, 0.0)
-                sm_ = _bch_shift(sl_d, -kk * di, -kk * dj, 0.0)
-                dips |= (sp >= P["face_deg"]) & (sm_ >= P["face_deg"]) & (sl_d < P["split_ratio"] * np.minimum(sp, sm_))
-        dips &= vm
-        dips = (ndi.binary_closing(dips, structure=S8, iterations=1) | dips) & vm
-        face &= ~dips
-    holes = ndi.binary_fill_holes(face) & ~face
-    if holes.any():
-        hl, hn = ndi.label(holes)
-        hsz = ndi.sum(holes, hl, index=np.arange(1, hn + 1))
-        face |= np.isin(hl, np.nonzero(hsz <= 12)[0] + 1)
-    face &= vm & ~dips
-    face = ndi.binary_opening(face, structure=S8, iterations=1) | (face & ndi.binary_dilation(seeds, iterations=1))
-    face &= ~dips
-    lab, n = ndi.label(face, structure=S8)
-    if n:
-        ar = ndi.sum(face, lab, index=np.arange(1, n + 1)) * dx * dy
-        face &= ~np.isin(lab, np.nonzero(ar < P["min_area"])[0] + 1)
-    # ---------------- lereng sedang yang lebar (antar-ramp/overall) ----------------
-    mod = vm & ~face & ~dips & (slope >= P["ir_deg"])
-    mod = _bch_open_w(mod, dx, dy, max(P["bench_min_w"], 3 * cell))
-    ml, mn = ndi.label(mod, structure=S8)
-    if mn:
-        ar = ndi.sum(mod, ml, index=np.arange(1, mn + 1)) * dx * dy
-        mod &= ~np.isin(ml, np.nonzero(ar < 2 * P["min_area"])[0] + 1)
-    sl = face | mod
-    # ---------------- platform (bidang datar) ----------------
-    # Pada DEM dari kontur, lantai bench datar yang elevasinya di antara dua level kontur tampak miring (<= interval/lebar) -> ambang 'datar' efektif
-    # dinaikkan sesuai interval kontur (hanya utk bidang yang menempel pada muka). Ramp dibedakan dari bench lewat ARAH kemiringan terhadap sumbu panjang bidang.
+    gx0, gy0 = np.gradient(zs, dx, dy)
+    slope = np.degrees(np.arctan(np.hypot(gx0, gy0)))
+    sd = max(1.5, 2.5 / cell)                                     # arah jalan: DEM lebih halus (TIN kontur bergerigi)
+    gxd, gyd = np.gradient(ndi.gaussian_filter(zf, sd), dx, dy)
+    thr = float(P["ir_deg"])                                       # lereng minimum yang dilacak sebagai muka
+    gap_m = float(max(P["berm_w"], 1.6 * cell)) if P.get("split", True) else 1e9
+    max_len = float(P.get("max_len", 250.0))
+    steep0 = vm & (slope >= thr)
+    ii, jj = np.nonzero(steep0)
+    n_all = len(ii)
+    max_rays = int(P.get("max_rays", 150000))
+    stp = max(1, int(np.ceil(n_all / max_rays)))
+    sel = np.arange(0, n_all, stp)
+    si, sj = ii[sel], jj[sel]
+    nrays = len(si)
+    Zc = np.full(z.shape, np.nan); Zt = np.full(z.shape, np.nan); Run = np.full(z.shape, np.nan)
+    sampled = np.zeros(z.shape, bool)
+    ray_ok = np.zeros(nrays, bool)
+    ru = rd = None
+    if nrays:
+        ru = _bch5_trace(zf, gxd, gyd, slope, vm, (si, sj), dx, dy, thr, gap_m, max_len, up=True)
+        rd = _bch5_trace(zf, gxd, gyd, slope, vm, (si, sj), dx, dy, thr, gap_m, max_len, up=False)
+        ray_ok = (ru["status"] == 1) & (rd["status"] == 1) & (ru["z"] - rd["z"] > 0.3)
+        sampled[si, sj] = True
+        Zc[si[ray_ok], sj[ray_ok]] = ru["z"][ray_ok]
+        Zt[si[ray_ok], sj[ray_ok]] = rd["z"][ray_ok]
+        Run[si[ray_ok], sj[ray_ok]] = np.hypot((ru["i"][ray_ok] - rd["i"][ray_ok]) * dx, (ru["j"][ray_ok] - rd["j"][ray_ok]) * dy)
+        if stp > 1:                                                # sel yang tidak ditembak: ambil dari sel tertembak terdekat
+            _, ix = ndi.distance_transform_edt(~sampled, return_indices=True)
+            Zc, Zt, Run = Zc[tuple(ix)], Zt[tuple(ix)], Run[tuple(ix)]
+    # Koreksi bias interval kontur: lantai bench hampir selalu berada DI ANTARA dua level kontur, sehingga ujung muka terbaca di level kontur
+    # terdekat (crest terlalu rendah, toe terlalu tinggi, rata-rata masing-masing ~ 1/2 interval). 'auto' = aktif bila lantai tampak miring-semu
+    # (pada DEM dari kontur); nonaktif bila lantai praktis datar persis (elevasi lantai = level kontur, mis. DXF desain).
+    cint = float(P.get("cint", 0) or 0)
+    cmode = str(P.get("cint_corr", "auto"))
+    pf_tilt = np.nan
+    plat_ = vm & (slope <= max(P["flat_deg"], 1.0)) & ~steep0
+    if plat_.sum() > 200:
+        pf_tilt = float(((slope > 0.8) & plat_).sum() / plat_.sum())
+    corr = 0.0
+    if cint > 0 and (cmode == "on" or (cmode == "auto" and np.isfinite(pf_tilt) and pf_tilt >= 0.35)):
+        corr = 0.5 * cint
+    Zc = Zc + corr; Zt = Zt - corr
+    Hraw = np.where(steep0, Zc - Zt, np.nan)
+    face0 = steep0 & np.isfinite(Hraw) & (Hraw > 0)
+    unit, nu = _bch5_units(face0, Zc, Zt, Hraw)
+    # --- saring unit: luas & tinggi minimum
+    if nu:
+        ids = np.arange(1, nu + 1)
+        ar = np.asarray(ndi.sum(np.ones(z.shape), unit, ids)) * dx * dy
+        hm = np.asarray(ndi.median(np.nan_to_num(Hraw, nan=0.0), unit, ids))
+        bad = ids[(ar < P["min_area"]) | (hm < P["min_h"])]
+        if len(bad):
+            unit = np.where(np.isin(unit, bad), 0, unit)
+        keep = np.unique(unit[unit > 0])
+        remap = np.zeros(nu + 2, np.int32)
+        remap[keep] = np.arange(1, len(keep) + 1)
+        unit = remap[unit]
+        nu = int(len(keep))
+    # --- haluskan crest/toe/tinggi DI DALAM unit (sigma ~ 5 m sepanjang strike)
+    hs_m = float(P.get("h_smooth_m", 5.0))
+    Zc_s = _bch5_unit_smooth(unit, Zc, max(0.8, hs_m / cell))
+    Zt_s = _bch5_unit_smooth(unit, Zt, max(0.8, hs_m / cell))
+    Run_s = _bch5_unit_smooth(unit, Run, max(0.8, hs_m / cell))
+    face = (unit > 0) & np.isfinite(Zc_s) & np.isfinite(Zt_s)
+    unit = np.where(face, unit, 0)
+    H = np.where(face, Zc_s - Zt_s, np.nan)
+    crest = np.where(face, Zc_s, np.nan); toe = np.where(face, Zt_s, np.nan)
+    ang = np.where(face, np.degrees(np.arctan2(H, np.maximum(Run_s, 1e-6))), np.nan)
+    unres = steep0 & ~face
+    unres = _bch_open_w(unres, dx, dy, 2 * cell) if unres.any() else unres
+    sl = face
+    dips = np.zeros(z.shape, bool)
+    # ---------------- platform (bidang datar) -- logika sama dgn v4 ----------------
     flat_eff = float(P["flat_deg"])
     if P.get("cint", 0) and P["cint"] > 0:
-        flat_eff = min(max(flat_eff, float(np.degrees(np.arctan(P["cint"] / max(P["bench_min_w"], 1e-6))))), P["grow_deg"] - 1.0)
-    fl = vm & ~sl & ~dips & (slope <= flat_eff)
+        flat_eff = min(max(flat_eff, float(np.degrees(np.arctan(P["cint"] / max(P["bench_min_w"], 1e-6))))), thr - 1.0)
+    gm0 = vm & ~sl & ~unres
+    fl = gm0 & (slope <= flat_eff)
     tru = fl & (slope <= P["flat_deg"])
     lf, nf = ndi.label(fl, structure=S8)
-    P0 = fl.copy()
-    notP = np.zeros(z.shape, bool)
-    app_flat = np.zeros(z.shape, bool)
+    P0 = fl.copy(); notP = np.zeros(z.shape, bool); app_flat = np.zeros(z.shape, bool)
     if nf and flat_eff > P["flat_deg"]:
         ix_ = np.arange(1, nf + 1)
-        touch = ndi.binary_dilation(sl | dips, structure=S8, iterations=2)
+        touch = ndi.binary_dilation(sl, structure=S8, iterations=2)
         share = np.asarray(ndi.mean(tru.astype(float), lf, index=ix_))
         touches = np.asarray(ndi.maximum((touch & fl).astype(float), lf, index=ix_)) > 0.5
-        keepc = (share >= 0.5) | touches
-        P0 = np.isin(lf, ix_[keepc])
+        P0 = np.isin(lf, ix_[(share >= 0.5) | touches])
         notP = fl & ~P0
         app_flat = P0 & np.isin(lf, ix_[share < 0.5])
     P1 = _bch_open_w(P0, dx, dy, P["bench_min_w"])
@@ -30418,12 +30424,12 @@ def _bch_analyze2(xs, ys, z, P=None):
     sg = max(1.0, 8.0 / cell)
     es = ndi.gaussian_filter(edt1, 1.0)
     ex, ey = np.gradient(es, dx, dy)
-    sj = max(1.0, 10.0 / cell)
-    Jxx, Jyy, Jxy = (ndi.gaussian_filter(np.where(P1, a_, 0.0), sj) for a_ in (ex * ex, ey * ey, ex * ey))
+    sj_ = max(1.0, 10.0 / cell)
+    Jxx, Jyy, Jxy = (ndi.gaussian_filter(np.where(P1, a_, 0.0), sj_) for a_ in (ex * ex, ey * ey, ex * ey))
     th = 0.5 * np.arctan2(2 * Jxy, Jxx - Jyy)
     coh = np.sqrt((Jxx - Jyy) ** 2 + 4 * Jxy ** 2) / np.maximum(Jxx + Jyy, 1e-9)
-    glong = 100.0 * np.abs(gx * (-np.sin(th)) + gy * np.cos(th))
-    gcross = 100.0 * np.abs(gx * np.cos(th) + gy * np.sin(th))
+    glong = 100.0 * np.abs(gx0 * (-np.sin(th)) + gy0 * np.cos(th))
+    gcross = 100.0 * np.abs(gx0 * np.cos(th) + gy0 * np.sin(th))
     den = ndi.gaussian_filter(P1.astype(float), sg)
     sm_ = lambda a_: np.where(den > 1e-3, ndi.gaussian_filter(np.where(P1, a_, 0.0), sg) / np.maximum(den, 1e-3), 0.0)
     g_loc, gx_loc, coh_s = sm_(glong), sm_(gcross), sm_(coh)
@@ -30432,7 +30438,6 @@ def _bch_analyze2(xs, ys, z, P=None):
     bench_like = P1 & ~ramp_like & ((g_loc < P["ramp_g_min"]) | (w_loc > P["ramp_w_max"]) | (~elong_ok & (g_loc <= P["ramp_g_max"])))
     gentle = (P1 & ~ramp_like & ~bench_like) | notP
     typ = np.zeros(z.shape, np.uint8)
-    # ramp: butuh bukti geometri (memanjang + cukup panjang)
     rl, rn = ndi.label(ramp_like, structure=S8)
     ramp_ok = np.zeros(z.shape, bool)
     if rn:
@@ -30441,8 +30446,8 @@ def _bch_analyze2(xs, ys, z, P=None):
         rdg = ridge & ramp_like
         wm = np.asarray(ndi.mean(np.where(rdg, 2.0 * edt1, np.nan), rl, rid_)) if rdg.any() else np.zeros(rn)
         wm = np.where(np.isfinite(wm) & (wm > 0), wm, np.maximum(P["ramp_w_min"], 1.0))
-        L = area_r / wm
-        good = rid_[(L >= P["ramp_min_len"]) & (L / wm >= P["ramp_elong"])]
+        Lr = area_r / wm
+        good = rid_[(Lr >= P["ramp_min_len"]) & (Lr / wm >= P["ramp_elong"])]
         ramp_ok = np.isin(rl, good)
     gentle |= ramp_like & ~ramp_ok
     bl, bn = ndi.label(bench_like, structure=S8)
@@ -30453,109 +30458,53 @@ def _bch_analyze2(xs, ys, z, P=None):
         bench_like = bench_like & ~small
     typ[bench_like] = 1
     typ[ramp_ok] = 2
-    # narrow berm: pemisah (dips) + bidang datar sempit yang cukup luas
     nl2, nn2 = ndi.label(narrow, structure=S8)
-    nar_ok = np.zeros(z.shape, bool)
     if nn2:
         ar = np.asarray(ndi.sum(narrow, nl2, np.arange(1, nn2 + 1))) * dx * dy
-        nar_ok = np.isin(nl2, np.nonzero(ar >= P["min_area"])[0] + 1)
-    typ[(dips | nar_ok) & vm & (typ == 0)] = 5
-    # ---------------- tinggi: cincin crest (lebih tinggi) / toe (lebih rendah) di luar muka ----------------
-    ring = ndi.binary_dilation(sl, structure=S8, iterations=2) & ~sl & vm
-    d_f, idx_f = ndi.distance_transform_edt(~sl, return_indices=True)
-    ci, cj = np.indices(z.shape)
-    vi = (ci - idx_f[0]) * dx
-    vj = (cj - idx_f[1]) * dy
-    dot = vi * gx[tuple(idx_f)] + vj * gy[tuple(idx_f)]       # cincin di sisi menanjak muka (crest) -> dot > 0
-    gmag = np.hypot(gx[tuple(idx_f)], gy[tuple(idx_f)])
-    cosa = dot / np.maximum(np.hypot(vi, vj) * gmag, 1e-9)    # 1 = tepat menanjak dari muka, -1 = tepat menurun, ~0 = tepi samping
-    up_ring = ring & (cosa > 0.5)                              # tepi samping (mis. bidang di elevasi tengah) TIDAK dipakai sbg crest/toe
-    lo_ring = ring & (cosa < -0.5)
-    # crest/toe = BIDANG DATAR terdekat yang searah menanjak/menurun (bukan sekadar tepi mask muka): bila muka hanya bagian curam dari lereng
-    # yang lebih panjang (tepi landai/membulat), tinggi tetap mengacu ke bidang datar sebenarnya.
-    cand = vm & ~sl & (P0 | dips | np.isin(typ, (1, 2, 5)))
-    up_r = cand & (cosa > 0.5)
-    lo_r = cand & (cosa < -0.5)
-    # elevasi platform datar = median bidang (bukan nilai tepi yang terdistorsi interpolasi antar-kontur)
-    zfix = zf.copy()
-    bm = (typ == 1) | (typ == 5)
-    if bm.any():
-        lb, nb = ndi.label(bm, structure=S8)
-        ixb = np.arange(1, nb + 1)
-        zmed = np.asarray(ndi.median(zf, lb, index=ixb))
-        zr = np.asarray(ndi.labeled_comprehension(zf, lb, ixb, lambda v: np.percentile(v, 95) - np.percentile(v, 5), float, 0.0))
-        okb = zr <= max(1.5 * float(P.get("cint", 0) or 0), 1.0) + 0.5
-        zfix = np.where((lb > 0) & np.isin(lb, ixb[okb]), zmed[np.maximum(lb - 1, 0)], zf)
-    def _near(m):
-        if not m.any():
-            return np.full(z.shape, np.nan), np.full(z.shape, np.inf)
-        d, ix = ndi.distance_transform_edt(~m, sampling=(dx, dy), return_indices=True)
-        return zfix[tuple(ix)], d
-    zc_, dc_ = _near(up_r)
-    zt_, dt_ = _near(lo_r)
-    zc2, dc2 = _near(up_ring)
-    zt2, dt2 = _near(lo_ring)
-    use2c = ~(dc_ <= 150.0)
-    use2t = ~(dt_ <= 150.0)
-    zc_ = np.where(use2c, zc2, zc_); dc_ = np.where(use2c, dc2, dc_)
-    zt_ = np.where(use2t, zt2, zt_); dt_ = np.where(use2t, dt2, dt_)
-    dmax = 150.0
-    Hraw = np.where(sl & (dc_ <= dmax) & (dt_ <= dmax), zc_ - zt_, np.nan)
-    crest = np.where(np.isfinite(Hraw), zc_, np.nan)
-    toe = np.where(np.isfinite(Hraw), zt_, np.nan)
-    sl &= np.isfinite(Hraw) & (Hraw > 0)
-    Hn = _bch_fill_nearest(np.where(sl, Hraw, np.nan))
-    Hm = ndi.median_filter(Hn, size=5)
-    H = np.where(sl, Hm, np.nan)
-    lab_s, ns = ndi.label(sl, structure=S8)
-    ids = np.arange(1, ns + 1)
-    if ns:
-        hmed = np.asarray(ndi.median(np.nan_to_num(H, nan=0.0), lab_s, index=ids))
-        drop = ids[hmed < P["min_h"]]
-        if len(drop):
-            sl &= ~np.isin(lab_s, drop)
-            lab_s, ns = ndi.label(sl, structure=S8)
-            ids = np.arange(1, ns + 1)
-    H = np.where(sl, H, np.nan); crest = np.where(sl, crest, np.nan); toe = np.where(sl, toe, np.nan)
-    # bidang landai belum pasti: platform tak lolos + lereng landai lebar (flat_deg..ir_deg) yang bukan muka
-    gm = vm & ~sl & (typ == 0) & (slope > flat_eff) & (slope < P["ir_deg"])
-    gm = _bch_open_w(gm, dx, dy, max(P["bench_min_w"], 3 * cell))
-    gl, gn = ndi.label(gm | gentle, structure=S8)
-    if gn:
-        ar = np.asarray(ndi.sum(gm | gentle, gl, np.arange(1, gn + 1))) * dx * dy
-        keep6 = np.isin(gl, np.nonzero(ar >= P["min_area"])[0] + 1)
-        typ[keep6 & (typ == 0) & ~sl] = 6
-    # muka -> tipe 3 / 4 menurut tinggi komponen
+        typ[np.isin(nl2, np.nonzero(ar >= P["min_area"])[0] + 1) & vm & (typ == 0)] = 5
+    # ---------------- jenis muka (3 single bench / 4 tinggi atau lereng sedang) + keyakinan per unit ----------------
     conf = np.zeros(z.shape, np.uint8)
-    sup = {}
-    if ns:
-        hmed = np.asarray(ndi.median(np.nan_to_num(H, nan=0.0), lab_s, index=ids))
-        cid = lab_s[tuple(idx_f)]
-        plat = (P0 | dips | (typ >= 1) & (typ <= 5))
-        rr = ring & (cid > 0)
-        cu = cid[rr & up_ring]; cl = cid[rr & lo_ring]
-        pu = cid[rr & up_ring & plat]; pl = cid[rr & lo_ring & plat]
-        nu = np.bincount(cu, minlength=ns + 1)[1:]; nl_ = np.bincount(cl, minlength=ns + 1)[1:]
-        su = np.bincount(pu, minlength=ns + 1)[1:] / np.maximum(nu, 1)
-        sd = np.bincount(pl, minlength=ns + 1)[1:] / np.maximum(nl_, 1)
-        sup_min = np.minimum(np.where(nu > 0, su, 0.0), np.where(nl_ > 0, sd, 0.0))
-        is_mod = np.asarray(ndi.mean(mod.astype(float), lab_s, index=ids)) > 0.5
-        c_c = np.where(sup_min >= 0.5, 1, np.where(sup_min >= 0.25, 2, 3))
-        pf = np.asarray(ndi.mean((~use2c & ~use2t & (dc_ <= 40.0) & (dt_ <= 40.0)).astype(float), lab_s, index=ids))
-        c_c = np.where((c_c == 3) & (pf >= 0.7), 2, c_c)          # crest & toe dijangkarkan ke bidang datar di dekatnya -> minimal 'sedang'
-        c_c = np.where(hmed > P["h_flag"], 3, c_c)
-        c_c = np.where((c_c == 1) & ((is_mod) | (cell > hmed / 4.0)), 2, c_c)
-        t_c = np.where((hmed > P["h_flag"]) | is_mod, 4, 3).astype(np.uint8)
-        lut_t = np.concatenate([[0], t_c]).astype(np.uint8)
-        lut_c = np.concatenate([[0], c_c]).astype(np.uint8)
-        typ[sl] = lut_t[lab_s[sl]]
-        conf[sl] = lut_c[lab_s[sl]]
-        sup = dict(up=su, dn=sd, hmed=hmed)
-    # ---------------- region (id unik per tipe) + statistik ----------------
+    uids = np.arange(1, nu + 1)
+    u_h = np.zeros(nu); u_c = np.zeros(nu); u_t = np.zeros(nu); u_a = np.zeros(nu); u_p10 = np.zeros(nu); u_p90 = np.zeros(nu)
+    u_type = np.full(nu, 3, np.uint8); u_conf = np.full(nu, 1, np.uint8); u_ray = np.zeros(nu)
+    if nu:
+        gmH = lambda a: np.asarray(ndi.mean(np.nan_to_num(a, nan=0.0), unit, uids))
+        u_h, u_c, u_t, u_a = gmH(H), gmH(crest), gmH(toe), gmH(ang)
+        Hc = np.where(face, Hraw, np.nan)
+        u_p10 = np.asarray(ndi.labeled_comprehension(np.nan_to_num(Hc, nan=0.0), unit, uids, lambda v: np.percentile(v, 10), float, 0.0))
+        u_p90 = np.asarray(ndi.labeled_comprehension(np.nan_to_num(Hc, nan=0.0), unit, uids, lambda v: np.percentile(v, 90), float, 0.0))
+        fr_steep = np.asarray(ndi.mean((slope >= P["face_deg"]).astype(float), unit, uids))
+        u_type = np.where((u_h > P["h_flag"]) | ((fr_steep < 0.25) & (u_a < P["face_deg"])), 4, 3).astype(np.uint8)
+        scat = (u_p90 - u_p10) / np.maximum(u_h, 0.5)
+        c1 = (scat <= 0.25) & (u_h <= P["h_flag"]) & (3.0 * cell <= u_h)
+        c2 = (scat <= 0.5) & (u_h <= P["h_flag"])
+        u_conf = np.where(c1, 1, np.where(c2, 2, 3)).astype(np.uint8)
+        typ[face] = np.concatenate([[0], u_type])[unit[face]]
+        conf[face] = np.concatenate([[0], u_conf])[unit[face]]
+    gm = gm0 & (typ == 0) & (slope > flat_eff) & (slope < thr)
+    gm = _bch_open_w(gm, dx, dy, max(P["bench_min_w"], 3 * cell)) if gm.any() else gm
+    gl, gn_ = ndi.label(gm | gentle | unres, structure=S8)
+    if gn_:
+        ar = np.asarray(ndi.sum(gm | gentle | unres, gl, np.arange(1, gn_ + 1))) * dx * dy
+        keep6 = np.isin(gl, np.nonzero(ar >= P["min_area"])[0] + 1)
+        typ[keep6 & (typ == 0) & ~face] = 6
+    # ---------------- region (id unik): muka = UNIT, platform = komponen ----------------
     rid = np.zeros(z.shape, np.int32)
     rtype = []
     off = 0
-    for t in range(1, 7):
+    for t in (3, 4):
+        m = np.isin(unit, uids[u_type == t]) & (unit > 0) if nu else np.zeros(z.shape, bool)
+        if m.any():
+            lab_t, ids_t = unit[m], np.unique(unit[m])
+            mp = np.zeros(nu + 1, np.int32); mp[ids_t] = np.arange(1, len(ids_t) + 1) + off
+            rid[m] = mp[lab_t]
+            rtype += [t] * len(ids_t); off += len(ids_t)
+    unit_to_rid = np.zeros(nu + 1, np.int32)
+    if nu:
+        for u in uids:
+            r0 = rid[unit == u]
+            unit_to_rid[u] = int(r0[0]) if r0.size else 0
+    for t in (1, 2, 5, 6):
         lt, nt = ndi.label(typ == t, structure=S8)
         if nt:
             rid[lt > 0] = lt[lt > 0] + off
@@ -30574,9 +30523,11 @@ def _bch_analyze2(xs, ys, z, P=None):
         reg["width"] = gm_(np.where(typ >= 1, w_loc, 0.0))
         for nm, arr in (("h", H), ("crest", crest), ("toe", toe)):
             reg[nm] = np.asarray(ndi.mean(np.nan_to_num(arr, nan=0.0), rid, index=ix))
+        reg["hcell"] = reg["h"].copy()
         reg["hmax"] = np.asarray(ndi.maximum(np.nan_to_num(H, nan=0.0), rid, index=ix))
         reg["hp10"] = np.asarray(ndi.labeled_comprehension(np.nan_to_num(H, nan=0.0), rid, ix, lambda v: np.percentile(v, 10), float, 0.0)) if N <= 6000 else reg["h"]
         reg["hp90"] = np.asarray(ndi.labeled_comprehension(np.nan_to_num(H, nan=0.0), rid, ix, lambda v: np.percentile(v, 90), float, 0.0)) if N <= 6000 else reg["h"]
+        reg["angle"] = np.asarray(ndi.mean(np.nan_to_num(ang, nan=0.0), rid, index=ix))
         cf = np.asarray(ndi.maximum(conf.astype(float), rid, index=ix)).astype(int)
         wmean = reg["width"]
         plat_cf = np.where(wmean >= 3.0 * cell, 1, 2)
@@ -30587,22 +30538,29 @@ def _bch_analyze2(xs, ys, z, P=None):
         reg["length"] = np.where(np.isin(rtype, (1, 2)), reg["area"] / np.maximum(wmean, 1e-6), 0.0)
         conf = cf[np.maximum(rid - 1, 0)].astype(np.uint8) * (rid > 0)
     typ_face = (typ == 3) | (typ == 4)
-    # ---- tinggi SATU nilai per bench: median per unit muka, lalu unit bertetangga dgn crest & toe sama digabung ----
-    Hu = H
-    if N and np.isin(rtype, (3, 4)).any():
-        fr = np.isin(rtype, (3, 4))
-        hmed_r = np.asarray(ndi.median(np.nan_to_num(H, nan=0.0), rid, index=ix))
-        hg = _bch_group_h(rid, rtype, reg["crest"], reg["toe"], hmed_r, reg["area"], max(1, int(round(3.0 * 1.0))))
-        reg["hcell"] = reg["h"].copy()
-        reg["h"] = np.where(fr, hg, reg["h"])
-        Hu = np.where(typ_face, hg[np.maximum(rid - 1, 0)], np.nan)
-    # titik crest/toe untuk overlay (hanya muka valid)
-    cr_pts = up_r & ndi.binary_dilation(typ_face, structure=S8, iterations=2)
-    to_pts = lo_r & ndi.binary_dilation(typ_face, structure=S8, iterations=2)
-    return dict(face=typ_face, H=np.where(typ_face, Hu, np.nan), crest=np.where(typ_face, crest, np.nan), toe=np.where(typ_face, toe, np.nan),
-                slope=slope, valid=valid, dx=dx, dy=dy, labels=np.where(typ_face, lab_s, 0), n_comp=int(len(np.unique(lab_s[typ_face]))),
+    # titik crest/toe hasil penelusuran (hanya dari sel yang masuk muka akhir) -- dipakai utk garis & overlay
+    cr_xyz = np.zeros((0, 4)); to_xyz = np.zeros((0, 4))
+    if nrays:
+        okm = ray_ok & face[si, sj]
+        u_ = unit[si[okm], sj[okm]].astype(float)
+        X0, Y0 = float(xs[0]), float(ys[0])
+        sx_, sy_ = float(xs[1] - xs[0]), float(ys[1] - ys[0])
+        cr_xyz = np.column_stack([X0 + ru["i"][okm] * sx_, Y0 + ru["j"][okm] * sy_, ru["z"][okm] + corr, u_])
+        to_xyz = np.column_stack([X0 + rd["i"][okm] * sx_, Y0 + rd["j"][okm] * sy_, rd["z"][okm] - corr, u_])
+    cr_pts = np.zeros(z.shape, bool); to_pts = np.zeros(z.shape, bool)
+    if len(cr_xyz):
+        for arr, m_ in ((cr_xyz, cr_pts), (to_xyz, to_pts)):
+            a_i = np.clip(np.round((arr[:, 0] - xs[0]) / (xs[1] - xs[0])).astype(int), 0, z.shape[0] - 1)
+            a_j = np.clip(np.round((arr[:, 1] - ys[0]) / (ys[1] - ys[0])).astype(int), 0, z.shape[1] - 1)
+            m_[a_i, a_j] = True
+    ray_stat = dict(corr=float(corr), tilt_share=float(pf_tilt) if np.isfinite(pf_tilt) else None, n_steep=int(n_all), n_rays=int(nrays), n_ok=int(ray_ok.sum()),
+                    n_edge=int(((ru["status"] == 2) | (rd["status"] == 2)).sum()) if nrays else 0,
+                    n_long=int(((ru["status"] == 3) | (rd["status"] == 3)).sum()) if nrays else 0, gap_m=float(gap_m), thr=float(thr), stride=int(stp))
+    return dict(face=typ_face, H=np.where(typ_face, H, np.nan), crest=np.where(typ_face, crest, np.nan), toe=np.where(typ_face, toe, np.nan),
+                slope=slope, valid=valid, dx=dx, dy=dy, labels=np.where(typ_face, unit, 0), n_comp=int(nu),
                 zs=zs, face_deg=float(P["face_deg"]), dips=(typ == 5) & vm, typ=typ, conf=conf, rid=rid, reg=reg, params=P, refined=0,
-                cr_pts=cr_pts, to_pts=to_pts, g_loc=g_loc, w_loc=w_loc, zf=zf, flat_eff=flat_eff)
+                cr_pts=cr_pts, to_pts=to_pts, g_loc=g_loc, w_loc=w_loc, zf=zf, flat_eff=flat_eff,
+                unit=unit, ang=np.where(typ_face, ang, np.nan), cr_xyz=cr_xyz, to_xyz=to_xyz, ray=ray_stat, unit_conf=u_conf, unit_type=u_type)
 
 
 def _bch_type_texture(typ, conf, valid, hs, max_px=1792, ncls=6, colors=None):
@@ -30706,88 +30664,22 @@ def _bch_vote(g, K, valid, sigma, min_cells):
     return out
 
 
-def _bch_clean_types(A, min_area=400.0, sigma_m=5.0, merge=True):
-    """Versi BERSIH peta jenis: bench+ramp (+berm sempit & bidang landai belum pasti) digabung jadi satu domain datar, muka bench & muka tinggi
-    tetap slope; sel tak terklasifikasi diisi dari tetangga terdekat, lalu dirapikan (voting + buang pulau kecil) sehingga membentuk zona/blok."""
+def _bch_clean_types(A, min_area=150.0, sigma_m=2.0, merge=True, tidy=True):
+    """Peta jenis versi bersih. Muka (hasil penelusuran) dipertahankan APA ADANYA; sel tak terklasifikasi diisi tetangga terdekat, lalu (tidy) dirapikan
+    dengan voting halus HANYA di luar muka sehingga batas muka tidak bergeser."""
     typ, valid = A["typ"], A["valid"]
     dx, dy = A["dx"], A["dy"]
     cell = max(dx, dy)
-    if merge:
-        lut = {1: 1, 2: 1, 5: 1, 6: 1, 3: 2, 4: 3}
-    else:
-        lut = {1: 1, 2: 2, 5: 1, 6: 1, 3: 3, 4: 4}
+    lut = {1: 1, 2: 1, 5: 1, 6: 1, 3: 2, 4: 3} if merge else {1: 1, 2: 2, 5: 1, 6: 1, 3: 3, 4: 4}
     g = np.zeros(typ.shape, int)
     for k, v in lut.items():
         g[typ == k] = v
     K = int(max(lut.values()))
+    face = (typ == 3) | (typ == 4)
     g = np.where(valid, _bch_nearest_fill_int(g, g > 0), 0)
-    out = _bch_vote(g, K, valid, max(1.0, sigma_m / cell), max(4, int(min_area / (dx * dy))))
+    out = _bch_vote(g, K, valid, max(0.8, sigma_m / cell), max(4, int(min_area / (dx * dy)))) if tidy else g
+    out = np.where(face, g, out)
     return out, K
-
-
-def _bch_clean_height(A, ctyp, brk, K, sigma_m=5.0, min_area=400.0, slope_classes=(2, 3)):
-    """Domain tinggi versi bersih: ekstensi = domain slope bersih; tiap sel memakai tinggi muka terdekat, dikelaskan, lalu dirapikan."""
-    from scipy import ndimage as ndi
-    dx, dy = A["dx"], A["dy"]
-    cell = max(dx, dy)
-    mask = np.isin(ctyp, slope_classes) & A["valid"]
-    Hr = np.where(A["face"] & np.isfinite(A["H"]), A["H"], np.nan)
-    if not np.isfinite(Hr).any() or not mask.any():
-        return np.zeros(ctyp.shape, int), Hr
-    ok = np.isfinite(Hr)
-    ix = ndi.distance_transform_edt(~ok, return_distances=False, return_indices=True)
-    Hx = Hr[tuple(ix)]
-    c0 = np.where(mask, (1 + np.searchsorted(np.asarray(brk), Hx, side="right")) if len(brk) else 1, 0)
-    c0 = np.where(mask, c0, 0)
-    out = np.zeros(ctyp.shape, int)
-    if K <= 1:
-        out = np.where(mask, 1, 0)
-    else:
-        out = _bch_vote(c0, K, mask, max(1.0, sigma_m / cell), max(4, int(min_area / (dx * dy))))
-        rg = A.get("reg")
-        if rg is not None and "area" in rg:
-            ra = np.concatenate([[0.0], rg["area"]])[A["rid"]]
-            keep = A["face"] & mask & (ra >= min_area)
-            out = np.where(keep, c0, out)       # tiap unit muka (bench) = satu kelas utuh
-    return out, np.where(mask, Hx, np.nan)
-
-
-def _bch_group_h(rid, rtype, crest, toe, hmed, area, r=3):
-    """Gabungkan unit muka yang bersebelahan (<= r sel) DAN punya crest & toe sama (toleransi) -> satu tinggi (rata-rata berbobot luas)."""
-    n = len(rtype)
-    parent = np.arange(n)
-    def find(a):
-        while parent[a] != a:
-            parent[a] = parent[parent[a]]
-            a = parent[a]
-        return a
-    isf = np.isin(rtype, (3, 4))
-    pairs = set()
-    for di in range(-r, r + 1):
-        for dj in range(-r, r + 1):
-            if di == 0 and dj == 0:
-                continue
-            b = _bch_shift(rid, di, dj, 0)
-            m = (rid > 0) & (b > 0) & (rid != b)
-            if m.any():
-                a_, b_ = rid[m] - 1, b[m] - 1
-                ok = isf[a_] & isf[b_]
-                code = np.unique(np.minimum(a_[ok], b_[ok]).astype(np.int64) * n + np.maximum(a_[ok], b_[ok]))
-                pairs.update(code.tolist())
-    for code in pairs:
-        a, b = divmod(int(code), n)
-        tol = max(1.5, 0.12 * max(hmed[a], hmed[b]))
-        if abs(crest[a] - crest[b]) <= tol and abs(toe[a] - toe[b]) <= tol:
-            ra, rb = find(a), find(b)
-            if ra != rb:
-                parent[rb] = ra
-    out = hmed.copy()
-    roots = np.array([find(i) for i in range(n)])
-    for rt in np.unique(roots[isf]):
-        mem = np.nonzero((roots == rt) & isf)[0]
-        if len(mem) > 1:
-            out[mem] = float(np.average(hmed[mem], weights=np.maximum(area[mem], 1e-6)))
-    return out
 
 
 def _bch_dp(xy, tol):
@@ -30816,70 +30708,54 @@ def _bch_dp(xy, tol):
     return np.nonzero(keep)[0]
 
 
-def _bch_ct_lines(A, xa, ya, tol=1.0, min_len=15.0, win_m=20.0, smooth_m=14.0, link_m=18.0, simp_m=1.0):
-    """Garis crest (tepi atas muka) & toe (tepi bawah): tepi muka (mask dihaluskan) -> sisi atas/bawah dari beda elevasi di kedua sisi tepi ->
-    elevasi dari crest/toe hasil hitung -> outlier elevasi dibuang -> potongan dirapikan (dihaluskan sepanjang garis), DISAMBUNG bila ujungnya
-    berdekatan & elevasinya sama, lalu disederhanakan (Douglas-Peucker) agar lurus/tidak bergerigi."""
-    from scipy import ndimage as ndi
-    from skimage import measure as _ms
-    face = A["face"]
-    res = dict(crest=[], toe=[], n_all=0, n_out=0)
-    if not face.any():
-        return res
-    dx, dy = float(xa[1] - xa[0]), float(ya[1] - ya[0])
-    cell = max(abs(dx), abs(dy))
-    nx, ny = face.shape
-    fs = ndi.gaussian_filter(face.astype(float), max(1.5, 4.0 / cell))
-    gmx, gmy = np.gradient(fs, abs(dx), abs(dy))
-    zs = A["zs"]
-    def nn(m):
-        ok = np.isfinite(m)
-        ix = ndi.distance_transform_edt(~ok, return_distances=False, return_indices=True)
-        return m[tuple(ix)]
-    cmap, tmap = nn(A["crest"]), nn(A["toe"])
-    d_off = max(2.0 * cell, 4.0)
-    step = max(cell, 1.0)
-    raw = {True: [], False: []}
-    for c in _ms.find_contours(fs, 0.5):
-        if len(c) < 8:
+def _bch5_path(P, link):
+    """Urutkan awan titik (N,3) menjadi polyline: MST + jalur terpanjang (diameter). Titik tak terhubung (> link m) -> potongan terpisah."""
+    from scipy.spatial import cKDTree
+    from scipy.sparse import csgraph, csr_matrix
+    n = len(P)
+    if n < 2:
+        return []
+    tr = cKDTree(P[:, :2])
+    D = tr.sparse_distance_matrix(tr, link, output_type="coo_matrix").tocsr()
+    nc, lab = csgraph.connected_components(D, directed=False)
+    pieces = []
+    for c in range(nc):
+        idx = np.nonzero(lab == c)[0]
+        if len(idx) < 3:
             continue
-        i, j = c[:, 0], c[:, 1]
-        smp = lambda a, ii, jj: ndi.map_coordinates(a, [np.clip(ii, 0, nx - 1), np.clip(jj, 0, ny - 1)], order=1, mode="nearest")
-        gxv, gyv = smp(gmx, i, j), smp(gmy, i, j)
-        nrm = np.hypot(gxv, gyv) + 1e-12
-        ox, oy = -gxv / nrm, -gyv / nrm                         # normal keluar muka
-        zo = smp(zs, i + ox * d_off / abs(dx), j + oy * d_off / abs(dy))
-        zi = smp(zs, i - ox * d_off / abs(dx), j - oy * d_off / abs(dy))
-        up = (zo - zi) > 0
-        up = ndi.median_filter(up.astype(int), size=max(9, int(round(10.0 / step)) | 1), mode="nearest") > 0
-        x = xa[0] + i * dx
-        y = ya[0] + j * dy
-        brk = np.nonzero(np.diff(up.astype(int)) != 0)[0] + 1
-        for seg in np.split(np.arange(len(i)), brk):
-            if len(seg) < 4:
-                continue
-            is_up = bool(up[seg[0]])
-            ii = np.clip(np.round(i[seg]).astype(int), 0, nx - 1)
-            jj = np.clip(np.round(j[seg]).astype(int), 0, ny - 1)
-            zz = (cmap if is_up else tmap)[ii, jj]
-            xs_, ys_ = x[seg], y[seg]
-            k = int(max(5, round(win_m / max(float(np.median(np.hypot(np.diff(xs_), np.diff(ys_)))), 1e-3)))) | 1
-            med = ndi.median_filter(zz, size=min(k, len(zz) | 1), mode="nearest")
-            keep = np.abs(zz - med) <= tol
-            res["n_all"] += len(seg)
-            res["n_out"] += int((~keep).sum())
-            kb = np.nonzero(np.diff(keep.astype(int)) != 0)[0] + 1
-            for piece in np.split(np.arange(len(seg)), kb):
-                if len(piece) < 3 or not keep[piece[0]]:
-                    continue
-                raw[is_up].append(np.column_stack([xs_[piece], ys_[piece], zz[piece]]))
+        sub = D[idx][:, idx]
+        mst = csgraph.minimum_spanning_tree(sub)
+        mst = mst + mst.T
+        d0 = csgraph.dijkstra(mst, directed=False, indices=0)
+        d0[~np.isfinite(d0)] = -1
+        a = int(np.argmax(d0))
+        da, pred = csgraph.dijkstra(mst, directed=False, indices=a, return_predecessors=True)
+        da[~np.isfinite(da)] = -1
+        b = int(np.argmax(da))
+        path = [b]
+        while path[-1] != a and pred[path[-1]] >= 0:
+            path.append(int(pred[path[-1]]))
+        pieces.append(P[idx[np.array(path[::-1])]])
+    return pieces
 
-    def smooth_line(P):
-        d = np.concatenate([[0.0], np.cumsum(np.hypot(np.diff(P[:, 0]), np.diff(P[:, 1])))])
+
+def _bch_ct_lines(A, xa, ya, tol=1.0, min_len=15.0, win_m=20.0, smooth_m=10.0, link_m=None, simp_m=1.0):
+    """Garis crest & toe v5: titik ujung penelusuran tiap unit muka -> buang outlier elevasi -> urutkan (MST/jalur terpanjang) -> haluskan sepanjang
+    garis -> sambung potongan satu unit yang ujungnya berdekatan & elevasinya sama -> sederhanakan (Douglas-Peucker). Crest & toe SELALU berasal dari
+    muka yang sama, sehingga tidak ada garis yatim."""
+    from scipy import ndimage as ndi
+    res = dict(crest=[], toe=[], n_all=0, n_out=0, crest_u=[], toe_u=[])
+    dx, dy = float(A["dx"]), float(A["dy"])
+    cell = max(dx, dy)
+    link = float(link_m) if link_m else max(4.0 * cell, 8.0)
+    step = max(cell, 1.0)
+
+    def smooth_line(Pl):
+        d = np.concatenate([[0.0], np.cumsum(np.hypot(np.diff(Pl[:, 0]), np.diff(Pl[:, 1])))])
         if d[-1] < 2 * step:
-            return P
+            return Pl
         t = np.arange(0.0, d[-1] + 1e-9, step)
-        Q = np.column_stack([np.interp(t, d, P[:, k]) for k in range(3)])
+        Q = np.column_stack([np.interp(t, d, Pl[:, k]) for k in range(3)])
         sg = max(1.0, smooth_m / step / 2.0)
         for k in range(2):
             Q[:, k] = ndi.gaussian_filter1d(Q[:, k], sg, mode="nearest")
@@ -30887,39 +30763,40 @@ def _bch_ct_lines(A, xa, ya, tol=1.0, min_len=15.0, win_m=20.0, smooth_m=14.0, l
         Q[:, 2] = ndi.gaussian_filter1d(Q[:, 2], sg, mode="nearest")
         return Q
 
-    def chain(lines):
-        lines = [l for l in lines]
-        zt = max(tol, 1.0)
-        while True:
-            best = None
-            n = len(lines)
-            for a in range(n):
-                for b in range(a + 1, n):
-                    for ea in (0, -1):
-                        for eb in (0, -1):
-                            pa, pb = lines[a][ea], lines[b][eb]
-                            dd = float(np.hypot(pa[0] - pb[0], pa[1] - pb[1]))
-                            if dd <= link_m and abs(pa[2] - pb[2]) <= zt and (best is None or dd < best[0]):
-                                best = (dd, a, b, ea, eb)
-            if best is None:
-                return lines
-            _, a, b, ea, eb = best
-            A_ = lines[a] if ea == -1 else lines[a][::-1]
-            B_ = lines[b] if eb == 0 else lines[b][::-1]
-            lines = [l for k, l in enumerate(lines) if k not in (a, b)] + [np.vstack([A_, B_])]
-
-    for is_up, key in ((True, "crest"), (False, "toe")):
-        L = [smooth_line(p) for p in raw[is_up]]
-        if len(L) > 400:
-            L = sorted(L, key=lambda p: -len(p))[:400]
-        L = chain(L)
-        for p in L:
-            p = smooth_line(p)
-            ln = float(np.hypot(np.diff(p[:, 0]), np.diff(p[:, 1])).sum())
-            if ln < min_len or len(p) < 2:
+    for key, arr in (("crest", A.get("cr_xyz")), ("toe", A.get("to_xyz"))):
+        if arr is None or not len(arr):
+            continue
+        for u in np.unique(arr[:, 3]):
+            Pu = arr[arr[:, 3] == u]
+            if len(Pu) < 5:
                 continue
-            idx = _bch_dp(p[:, :2], simp_m)
-            res[key].append(p[idx])
+            res["n_all"] += len(Pu)
+            # buang titik yang elevasinya menyimpang dari median lokal (pencilan penelusuran)
+            zmed = float(np.median(Pu[:, 2]))
+            keep = np.abs(Pu[:, 2] - zmed) <= tol * 2.5
+            # pencilan lokal: bandingkan dengan median tetangga terdekat
+            from scipy.spatial import cKDTree
+            tr = cKDTree(Pu[:, :2])
+            nb = tr.query_ball_point(Pu[:, :2], r=max(3 * cell, win_m))
+            zl = np.array([np.median(Pu[ix, 2]) for ix in nb])
+            keep &= np.abs(Pu[:, 2] - zl) <= tol
+            res["n_out"] += int((~keep).sum())
+            Pu = Pu[keep]
+            if len(Pu) < 5:
+                continue
+            # satu titik per sel grid (rapatkan)
+            q = np.round(Pu[:, :2] / (0.7 * cell)).astype(np.int64)
+            _, ui = np.unique(q, axis=0, return_index=True)
+            Pu = Pu[np.sort(ui)]
+            pieces = _bch5_path(Pu[:, :3], link)
+            for pc in pieces:
+                p = smooth_line(pc)
+                ln = float(np.hypot(np.diff(p[:, 0]), np.diff(p[:, 1])).sum())
+                if ln < min_len or len(p) < 2:
+                    continue
+                idx = _bch_dp(p[:, :2], simp_m)
+                res[key].append(p[idx])
+                res[key + "_u"].append(int(u))
     return res
 
 
@@ -31387,7 +31264,13 @@ def _bch_qc_table(R, seg, P, cell):
     if ct:
         rows.append(("Crest/toe", "Garis crest / toe (potongan) · panjang total (m)", f"{len(ct['crest'])} / {len(ct['toe'])} · " +
                      f"{sum(float(np.hypot(np.diff(l[:, 0]), np.diff(l[:, 1])).sum()) for l in ct['crest'] + ct['toe']):,.0f}", ""))
-        rows.append(("Crest/toe", "Titik outlier dibuang / total titik tepi", f"{ct['n_out']:,} / {ct['n_all']:,}", "garis diputus di titik outlier"))
+        rows.append(("Crest/toe", "Titik penelusuran dibuang (outlier) / total", f"{ct['n_out']:,} / {ct['n_all']:,}", "wajar bila < ~5%"))
+        ry = A.get("ray")
+        if ry:
+            rows.append(("Crest/toe", "Sel lereng dilacak / crest-toe terukur / menabrak tepi data", f"{ry['n_rays']:,} / {ry['n_ok']:,} / {ry['n_edge']:,}",
+                         "sel tepi data tak dihitung tingginya" if ry["n_edge"] > 0.2 * max(ry["n_rays"], 1) else "baik"))
+            rows.append(("Crest/toe", "Celah pemisah muka (m) · koreksi bias interval kontur (m per ujung)", f"{ry['gap_m']:.1f} · {ry['corr']:+.2f}",
+                         ("lantai tampak miring-semu -> koreksi aktif" if ry["corr"] else "koreksi mati (atau interval tak diketahui)")))
     cint = float(P.get("cint") or 0)
     if cint > 0 and fm.any():
         rows.append(("Peringatan" if cint > 0.25 * float(np.median(reg["h"][fm])) else "Permukaan", "Interval kontur (m) -> galat tinggi tiap muka ± interval/2",
@@ -31404,7 +31287,7 @@ def _bch_regions_df(A):
         rows.append(dict(ID=i + 1, Jenis=_BCH_TYPES[t][0], Elevasi_m=round(float(reg["z"][i]), 1), Tinggi_m=round(float(reg["h"][i]), 1) if t in (3, 4) else None,
                          Tinggi_P10_m=round(float(reg["hp10"][i]), 1) if t in (3, 4) else None, Tinggi_P90_m=round(float(reg["hp90"][i]), 1) if t in (3, 4) else None,
                          Crest_m=round(float(reg["crest"][i]), 1) if t in (3, 4) else None, Toe_m=round(float(reg["toe"][i]), 1) if t in (3, 4) else None,
-                         Sudut_deg=round(float(reg["slope"][i]), 1), Lebar_m=round(float(reg["width"][i]), 1) if t in (1, 2) else None,
+                         Sudut_deg=round(float(reg["angle"][i] if t in (3, 4) else reg["slope"][i]), 1), Lebar_m=round(float(reg["width"][i]), 1) if t in (1, 2) else None,
                          Panjang_m=round(float(reg["length"][i]), 0) if t in (1, 2) else None,
                          Grade_memanjang_pct=round(float(reg["grade"][i]), 1) if t in (1, 2) else None,
                          Luas_m2=round(float(reg["area"][i]), 0), Keyakinan=cfn.get(int(reg["conf"][i]), "-")))
@@ -31563,6 +31446,72 @@ def _bch_comp_hist(vals, title, lo, hi, unit):
     return fig
 
 
+_BCH_GUIDE_SVG = """<svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:760px;font-family:system-ui,Segoe UI,sans-serif;font-size:13px">
+<polyline points="30,290 150,290 190,215 300,215 340,140 450,140 490,65 640,65" fill="none" stroke="#3b82f6" stroke-width="3" stroke-linejoin="round"/>
+<line x1="150" y1="290" x2="490" y2="65" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="6 5"/>
+<circle cx="190" cy="215" r="6" fill="#d946ef"/><circle cx="340" cy="140" r="6" fill="#d946ef"/><circle cx="490" cy="65" r="6" fill="#d946ef"/>
+<circle cx="150" cy="290" r="6" fill="#f59e0b"/><circle cx="300" cy="215" r="6" fill="#f59e0b"/><circle cx="450" cy="140" r="6" fill="#f59e0b"/>
+<text x="196" y="205" fill="#d946ef" font-weight="700">CREST (bahu atas muka)</text>
+<text x="48" y="312" fill="#f59e0b" font-weight="700">TOE (kaki muka)</text>
+<text x="250" y="237" fill="#94a3b8">toe</text><text x="400" y="162" fill="#94a3b8">toe</text>
+<line x1="205" y1="215" x2="205" y2="290" stroke="#22c55e" stroke-width="2"/><text x="212" y="258" fill="#22c55e" font-weight="700">H = Z crest − Z toe</text>
+<text x="195" y="310" fill="#94a3b8">(tinggi single bench)</text>
+<text x="230" y="208" fill="#94a3b8" font-size="12">berm / catch bench (datar)</text>
+<path d="M 172,290 A 22,22 0 0 0 163,271" fill="none" stroke="#ef4444" stroke-width="2"/><text x="176" y="278" fill="#ef4444" font-weight="700">α</text>
+<text x="500" y="88" fill="#94a3b8">α = sudut muka = atan(H / jarak horizontal crest–toe)</text>
+<text x="395" y="205" fill="#94a3b8" font-size="12" transform="rotate(-33 395 205)">sudut antar-ramp / overall (garis putus)</text>
+<text x="40" y="40" fill="#94a3b8" font-size="12">Penampang dinding tambang (kiri = dasar pit, kanan = atas)</text>
+</svg>"""
+
+_BCH_GUIDE_ID = """
+**Istilah (dibaca dari penampang di atas)**
+
+- **Bench (jenjang)** = bidang datar tempat alat bekerja / menahan material jatuh (*catch bench*, berm).
+- **Muka bench (bench face)** = lereng curam di antara dua bench. Sudut muka nyata ± 45–80°.
+- **Crest** = tepi/bahu **atas** muka: titik tempat kemiringan **berubah dari datar (bench) menjadi curam** ketika Anda turun ke dinding.
+- **Toe** = **kaki** muka: titik tempat kemiringan **berubah dari curam menjadi datar** (bench di bawahnya).
+- **Tinggi single bench (H)** = Z crest − Z toe. **Sudut muka (α)** = atan(H / jarak horizontal crest–toe).
+- **Lebar catch bench** = jarak horizontal dari toe muka atas ke crest muka di bawahnya.
+- **Ramp** = jalan angkut miring (grade ± 8–12 %), memanjang, bukan muka. **Inter-ramp / overall slope** = sudut garis dari toe terbawah ke crest teratas sekelompok bench.
+
+**Domain slope yang benar** (klasifikasi *per muka*, bukan per piksel):
+1. **Bench / Ramp** = bidang datar atau miring landai yang lebar.
+2. **Slope — muka bench (single bench)**: crest & toe terukur, H ≤ batas tinggi single bench Anda.
+3. **Slope — tinggi / multi-bench**: H > batas, atau berm yang terlalu sempit (< *celah pemisah*) sehingga beberapa bench terbaca satu muka.
+4. Domain bench = muka + catch bench (lantai) di bawahnya.
+
+**Cara menentukan crest/toe di peta kontur secara manual**: (1) kontur *rapat* = muka, *jarang/lebar* = bench; (2) buat penampang **tegak lurus strike** (searah turunnya air); (3) crest = tempat kontur mulai merapat dari sisi atas, toe = tempat kontur mulai merenggang di sisi bawah; (4) H = beda elevasi keduanya; (5) hubungkan titik-titik itu sepanjang strike = garis crest / toe.
+
+**Cara aplikasi menentukannya (v5)**: (1) permukaan kontur → grid; (2) hitung sudut lereng; (3) dari **setiap sel muka**, jalan **menanjak dan menurun mengikuti garis kemiringan** selama lereng ≥ *lereng minimum*, melompati celah datar kecil (segitiga datar pada kontur) hingga ≤ *celah pemisah*; (4) titik berhenti di atas = **crest**, di bawah = **toe** → H dan α per sel; (5) sel dengan crest & toe konsisten disatukan menjadi satu **unit muka** (satu bench), tinggi dihaluskan *di dalam unit*; (6) titik crest/toe tiap unit diurutkan menjadi **satu garis menerus** (bukan sobekan tepi mask). Garis crest dan toe selalu berasal dari muka yang sama.
+
+**Batas ketelitian (jujur)**: lantai bench jarang tepat di level kontur, sehingga ujung muka terbaca ± ½ interval kontur (koreksi bias dipasang otomatis). Sudut muka pada DEM kontur tampak ± 5–10° lebih landai dari sudut desain. Berm lebih sempit dari *celah pemisah* tidak bisa dipisah. Tepi data (tanpa kontur di atas/bawah muka) tidak dihitung. Selalu cek beberapa penampang.
+"""
+
+_BCH_GUIDE_EN = """
+**Terms (read from the section above)**
+
+- **Bench** = flat floor where equipment works / that catches falling material (*catch bench*, berm).
+- **Bench face** = the steep slope between two benches. Real face angles ≈ 45–80°.
+- **Crest** = the **upper** edge of a face: where the grade **changes from flat (bench) to steep** as you go down the wall.
+- **Toe** = the **foot** of a face: where the grade **changes from steep to flat** (the bench below).
+- **Single-bench height (H)** = Z crest − Z toe. **Face angle (α)** = atan(H / horizontal crest–toe distance).
+- **Catch-bench width** = horizontal distance from the toe of the upper face to the crest of the face below.
+- **Ramp** = inclined haul road (≈ 8–12 % grade), elongated, not a face. **Inter-ramp / overall slope** = angle of the line from the lowest toe to the highest crest of a bench group.
+
+**Correct slope domains** (classified *per face*, not per pixel):
+1. **Bench / Ramp** = wide flat or gently inclined planes.
+2. **Slope — bench face (single bench)**: crest & toe measured, H ≤ your single-bench height limit.
+3. **Slope — tall / multi-bench**: H above the limit, or a berm narrower than the *separation gap* so several benches read as one face.
+4. Bench domain = face + the catch bench (floor) below it.
+
+**Finding crest/toe manually on a contour map**: (1) *dense* contours = face, *sparse/wide* = bench; (2) draw a section **perpendicular to strike**; (3) crest = where contours start to bunch up from the top side, toe = where they start to spread out below; (4) H = elevation difference; (5) join those points along strike = crest / toe line.
+
+**How the app finds them (v5)**: (1) contours → grid; (2) slope angle; (3) from **every face cell**, walk **uphill and downhill along the fall line** while slope ≥ *minimum slope*, jumping small flat gaps (flat contour triangles) up to the *separation gap*; (4) the stop point above = **crest**, below = **toe** → H and α per cell; (5) cells with consistent crest & toe elevations are merged into one **face unit** (one bench) and heights are smoothed *inside the unit*; (6) each unit's crest/toe points are ordered into **one continuous line** (not a ragged mask edge). Crest and toe lines always come from the same face.
+
+**Accuracy limits (honest)**: bench floors rarely sit exactly on a contour level, so face ends read ± ½ contour interval (a bias correction is applied automatically). Face angles on a contour DEM read ≈ 5–10° gentler than design. Berms narrower than the *separation gap* cannot be split. Data edges (no contours above/below a face) are not computed. Always check a few sections.
+"""
+
+
 def _bench_tab():
     _sub_header(_t("Domain Bench: Bench, Ramp & Slope", "Bench Domains: Bench, Ramp & Slope"))
     st.caption(_t(
@@ -31577,6 +31526,10 @@ def _bench_tab():
         "Defaults are GENERAL literature/practice values (Read & Stacey 2009; haul-road design practice), not Maptek figures (that page could not be accessed) and not a substitute for your mine standard -- adjust under 'Type thresholds'. "
         "Contours alone cannot prove bench positions: a bench floor lying between two contour levels looks inclined, so each face height can be off by about ± half the contour interval. "
         "Low-confidence areas are shown pale. Not a substitute for a point-cloud survey or an official design audit."))
+
+    with st.expander(_t("📘 Panduan: apa itu crest, toe, bench, slope — dan cara aplikasi menentukannya", "📘 Guide: what are crest, toe, bench, slope — and how the app finds them"), expanded=False):
+        st.markdown(_BCH_GUIDE_SVG, unsafe_allow_html=True)
+        st.markdown(_t(_BCH_GUIDE_ID, _BCH_GUIDE_EN))
 
     # ---------------- 1. sumber permukaan
     _sub_header(_t("1. Data permukaan", "1. Surface data"))
@@ -31669,11 +31622,14 @@ def _bench_tab():
         st.markdown(_t("**Slope (muka)**", "**Slope (faces)**"))
         a1, a2, a3, a4 = st.columns(4)
         face_deg = a1.number_input(_t("Muka bench ≥ (°)", "Bench face ≥ (°)"), 15.0, 85.0, float(D["face_deg"]), 1.0, key=f"bch_fd_{pk}",
-                                   help=_t("Sudut tegak. Muka bench nyata 45–80°, tetapi pada DEM hasil interpolasi kontur tampak lebih landai, sehingga ambang 35° dipakai agar tidak terlewat.",
-                                           "Steep angle. Real bench faces are 45–80°, but on a DEM interpolated from contours they look gentler, so 35° avoids missing them."))
-        grow_deg = a2.number_input(_t("Tepi muka tumbuh hingga (°)", "Face edge grows to (°)"), 10.0, 60.0, float(D["grow_deg"]), 1.0, key=f"bch_gd_{pk}")
-        ir_deg = a3.number_input(_t("Lereng antar-ramp/overall ≥ (°)", "Inter-ramp/overall slope ≥ (°)"), 10.0, 60.0, float(D["ir_deg"]), 1.0, key=f"bch_ir_{pk}",
-                                 help=_t("Lereng sedang yang lebar tanpa muka curam.", "Wide moderate slopes without a steep face."))
+                                   help=_t("Hanya untuk MENJENIS-kan: muka yang sebagian besar selnya ≥ sudut ini = 'Slope: muka bench'; yang lebih landai = 'lereng antar-ramp/overall'. Muka nyata 45–80°, pada DEM kontur tampak ±10° lebih landai.",
+                                           "Only for TYPING: faces mostly ≥ this angle = 'bench face'; gentler = 'inter-ramp/overall slope'. Real faces 45–80°, ≈10° gentler on a contour DEM."))
+        h_smooth = a2.number_input(_t("Haluskan tinggi sepanjang strike (m)", "Smooth height along strike (m)"), 1.0, 30.0, float(D["h_smooth_m"]), 1.0, key=f"bch_hsm_{pk}",
+                                   help=_t("Tinggi tiap sel muka dirata-ratakan di dalam muka yang SAMA pada jarak ini (tidak bercampur dengan bench lain). Kecil = detail, besar = mulus.",
+                                           "Each face cell height is averaged inside the SAME face over this distance (never mixed with other benches). Small = detailed, large = smooth."))
+        ir_deg = a3.number_input(_t("Lereng minimum yang dilacak sebagai muka (°)", "Minimum slope traced as a face (°)"), 10.0, 60.0, float(D["ir_deg"]), 1.0, key=f"bch_ir_{pk}",
+                                 help=_t("Penelusuran crest/toe berjalan selama lereng ≥ nilai ini. Crest/toe = titik tempat lereng turun di bawah nilai ini. ± setengah sudut muka (mis. 20–25° untuk muka 45–55°).",
+                                         "Crest/toe tracing continues while slope ≥ this value; crest/toe = where the slope drops below it. Roughly half the face angle (e.g. 20–25° for 45–55° faces)."))
         h_flag = a4.number_input(_t("Tinggi single bench wajar maks (m)", "Max plausible single-bench height (m)"), 5.0, 100.0, float(D["h_flag"]), 1.0, key=f"bch_hf_{pk}",
                                  help=_t("Muka lebih tinggi dari ini ditandai 'kemungkinan multi-bench' (keyakinan rendah). Single bench lazim 5–15 m.", "Faces taller than this are flagged 'possible multi-bench' (low confidence). Single benches are typically 5–15 m."))
         st.markdown(_t("**Bench & Ramp (bidang datar)**", "**Bench & Ramp (flat planes)**"))
@@ -31699,20 +31655,26 @@ def _bench_tab():
         cint_in = g4.number_input(_t("Interval kontur (m; 0 = otomatis)", "Contour interval (m; 0 = auto)"), 0.0, 50.0, 0.0, 0.5, key=f"bch_ci_{pk}",
                                   help=_t("Dipakai untuk memaklumi kemiringan semu lantai bench pada DEM dari kontur. DXF: terdeteksi otomatis. Segmen Erosion Map: isi manual.",
                                           "Used to allow for the apparent tilt of bench floors on a contour-derived DEM. DXF: auto-detected. Erosion Map segment: enter manually."))
-        sp1, sp2, sp3 = st.columns(3)
-        split_on = sp1.checkbox(_t("Pisahkan multi-bench di berm sempit", "Split multi-bench at narrow berms"), value=bool(D["split"]), key=f"bch_so_{pk}",
-                                help=_t("Berm/ramp sempit DI DALAM lereng curam dijadikan batas antar single bench.", "Narrow berms/ramps INSIDE steep slopes become boundaries between single benches."))
-        split_r = sp2.slider(_t("Sensitivitas pemisah", "Separator sensitivity"), 0.40, 0.95, float(D["split_ratio"]), 0.05, key=f"bch_sr_{pk}", disabled=not split_on)
-        berm_w = sp3.number_input(_t("Lebar berm sempit maks (m)", "Max narrow berm width (m)"), 2.0, 40.0, float(D["berm_w"]), 1.0, key=f"bch_bm_{pk}", disabled=not split_on)
+        sp1, sp2 = st.columns(2)
+        berm_w = sp1.number_input(_t("Celah pemisah muka (m)", "Face separation gap (m)"), 1.0, 20.0, float(D["berm_w"]), 0.5, key=f"bch_gap_{pk}",
+                                  help=_t("Bidang datar yang LEBIH LEBAR dari ini memisahkan dua muka (dua single bench). Yang lebih sempit tidak bisa dipisah -> digabung jadi satu muka TINGGI (multi-bench). Berm tambang nyata ≥ ~6 m; 3 m aman untuk kontur 1 m.",
+                                          "A flat strip WIDER than this separates two faces (two single benches). Narrower strips cannot be separated -> merged into one TALL face (multi-bench). Real catch benches ≥ ~6 m; 3 m is safe for 1 m contours."))
+        cint_corr = sp2.selectbox(_t("Koreksi bias interval kontur", "Contour-interval bias correction"), ["auto", "on", "off"], key=f"bch_cc_{pk}",
+                                  format_func=lambda v: {"auto": _t("Otomatis (disarankan)", "Automatic (recommended)"), "on": _t("Selalu aktif", "Always on"), "off": _t("Mati (tinggi apa adanya)", "Off (raw height)")}[v],
+                                  help=_t("Lantai bench hampir selalu berada DI ANTARA dua level kontur, sehingga crest terbaca terlalu rendah dan toe terlalu tinggi (rata-rata ½ interval masing-masing). Koreksi menambah ½ interval di tiap ujung agar tinggi tak bias. 'Otomatis' mati bila lantai tampak persis datar (mis. DXF desain).",
+                                          "Bench floors almost always lie BETWEEN two contour levels, so the crest reads too low and the toe too high (≈½ interval each). The correction adds ½ interval at each end for an unbiased height. 'Automatic' turns itself off when floors look exactly flat (e.g. a design DXF)."))
+        split_on = True
+        split_r = float(D["split_ratio"])
         zc1, zc2 = st.columns(2)
-        zone_on = zc1.checkbox(_t("Warnai berm/lantai terdekat pada tampilan tinggi", "Colour the nearest berm/floor in the height view"), value=True, key="bch_zone_on")
-        zone_m = zc2.number_input(_t("Jangkauan zona (m)", "Zone reach (m)"), 0.0, 200.0, 25.0, 5.0, key="bch_zone_m", disabled=not zone_on)
+        zone_on = zc1.checkbox(_t("Warnai catch bench (lantai di bawah muka) pada tampilan tinggi", "Colour the catch bench (floor below the face) in the height view"), value=False, key="bch_zone_on2",
+                               help=_t("Domain bench = muka + lantai di bawahnya. Lantai dikaitkan ke muka DI ATASNYA (elevasi lantai ≈ toe muka itu), bukan ke muka terdekat.", "Bench domain = face + the floor below it. The floor belongs to the face ABOVE it (floor elevation ≈ that face's toe), not the nearest face."))
+        zone_m = zc2.number_input(_t("Jangkauan zona (m)", "Zone reach (m)"), 0.0, 200.0, 15.0, 1.0, key="bch_zone_m2", disabled=not zone_on)
     with st.expander(_t("Kerapian domain (versi bersih)", "Domain tidiness (clean version)"), expanded=False):
         k1, k2, k3, k4 = st.columns(4)
         clean_on = k1.checkbox(_t("Domain bersih", "Clean domains"), value=True, key="bch_clean_on",
-                               help=_t("Menggabung bintik kecil ke zona sekitarnya sehingga domain berupa blok yang jelas antara slope dan bench/ramp.", "Merges small specks into the surrounding zone so domains are clear blocks of slope vs bench/ramp."))
-        clean_a = k2.number_input(_t("Luas domain minimum (m²)", "Minimum domain area (m²)"), 20.0, 50000.0, 400.0, 50.0, key="bch_clean_a", disabled=not clean_on)
-        clean_s = k3.number_input(_t("Kehalusan batas (m)", "Boundary smoothness (m)"), 1.0, 40.0, 5.0, 1.0, key="bch_clean_s", disabled=not clean_on)
+                               help=_t("Hanya memengaruhi tampilan 'Bersih' (bench/ramp vs slope): bintik di luar muka digabung ke sekitarnya. Muka hasil penelusuran TIDAK diubah.", "Only affects the 'Clean' view (bench/ramp vs slope): specks outside faces are merged into their surroundings. Traced faces are NOT altered."))
+        clean_a = k2.number_input(_t("Luas domain minimum (m²)", "Minimum domain area (m²)"), 20.0, 50000.0, 150.0, 25.0, key="bch_clean_a2", disabled=not clean_on)
+        clean_s = k3.number_input(_t("Kehalusan batas (m)", "Boundary smoothness (m)"), 1.0, 40.0, 2.0, 1.0, key="bch_clean_s2", disabled=not clean_on)
         clean_m = k4.checkbox(_t("Bench & Ramp satu domain", "Bench & Ramp one domain"), value=True, key="bch_clean_m", disabled=not clean_on)
         o1, o2 = st.columns(2)
         ct_tol = o1.number_input(_t("Toleransi outlier crest/toe (m)", "Crest/toe outlier tolerance (m)"), 0.2, 10.0, 1.0, 0.1, key="bch_ct_tol",
@@ -31733,7 +31695,7 @@ def _bench_tab():
     crit = dict(h_max=float(c_hmax), a_min=float(c_amin), a_max=float(c_amax), w_min=float(c_wmin), e_min=float(c_emin))
     cint_auto = float((seg.get("qc") or {}).get("cint") or 0.0)
     cint = float(cint_in) if cint_in > 0 else cint_auto
-    Pp = dict(face_deg=float(face_deg), grow_deg=min(float(grow_deg), float(face_deg) - 1.0), ir_deg=float(ir_deg), h_flag=float(h_flag), flat_deg=float(flat_deg), bench_min_w=float(bench_w),
+    Pp = dict(face_deg=float(face_deg), grow_deg=float(D["grow_deg"]), h_smooth_m=float(h_smooth), cint_corr=str(cint_corr), ir_deg=float(ir_deg), h_flag=float(h_flag), flat_deg=float(flat_deg), bench_min_w=float(bench_w),
               ramp_w_min=float(rw1), ramp_w_max=float(rw2), ramp_g_min=float(rg1), ramp_g_max=float(rg2), ramp_min_len=float(rlen), ramp_elong=float(rel), min_h=float(min_h),
               min_area=float(min_a), smooth=float(smo), cint=cint, split=bool(split_on), split_ratio=float(split_r), berm_w=float(berm_w))
 
@@ -31766,13 +31728,13 @@ def _bench_tab():
                         if cm == "auto":
                             info["note"] = _t(f"Kelas otomatis tiap {stp:g} m (tinggi muka P98 ≈ {hmx:.1f} m).", f"Automatic classes every {stp:g} m (face height P98 ≈ {hmx:.1f} m).")
                         K = len(names)
-                        ctyp, cK = _bch_clean_types(A, min_area=float(clean_a), sigma_m=float(clean_s), merge=bool(clean_m))
+                        ctyp, cK = _bch_clean_types(A, min_area=float(clean_a), sigma_m=float(clean_s), merge=bool(clean_m), tidy=bool(clean_on))
                         cm_ = bool(clean_m)
-                        if clean_on:
-                            cls, Hx = _bch_clean_height(A, ctyp, brk, K, sigma_m=float(clean_s), min_area=float(clean_a), slope_classes=((2, 3) if cm_ else (3, 4)))
-                        else:
-                            cls, Hx = _bch_clean(cls0, A["face"], K), A["H"]
-                        zone = _bch_zone(cls, A["valid"], A["dx"], A["dy"], float(zone_m)) if zone_on else np.zeros(cls.shape, int)
+                        # domain tinggi = HANYA sel muka (tiap muka satu nilai tinggi halus), tanpa menyebar ke lantai/bidang lain
+                        cls = _bch_clean(cls0, A["face"], K, sigma=1.0, min_cells=8)
+                        Hx = A["H"]
+                        zone = (_bch_zone(cls, A["valid"], A["dx"], A["dy"], float(zone_m), zf=A["zf"], toe=A["toe"], tol=max(1.5, 1.5 * float(cint or 0)))
+                                if zone_on else np.zeros(cls.shape, int))
                         dom = _bch_domains(cls, xa, ya, Hx, A["crest"], A["slope"], A["dx"], A["dy"], names)
                         hs = _bch_hillshade(xa, ya, za)
                         ct = _bch_ct_lines(A, xa, ya, tol=float(ct_tol), min_len=float(ct_len))
