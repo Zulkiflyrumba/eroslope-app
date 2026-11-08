@@ -30878,9 +30878,10 @@ def _bch_ct_lines(A, xa, ya, tol=1.0, min_len=15.0, win_m=20.0, smooth_m=10.0, l
 
 
 def _bch_refine_heights(A, ct, xa, ya, max_d=60.0, tz=1.0):
-    """Koreksi 'lereng tinggi palsu': pada sel muka yang penelusurannya melompati bench yang tak terbaca (crest/toe putus), tinggi dihitung ulang dari
-    garis crest TERDEKAT DI ATAS dan garis toe TERDEKAT DI BAWAH elevasi sel (garis yang sudah disambung). Hanya menurunkan tinggi yang jelas
-    terlalu besar; tinggi yang sudah wajar tidak diubah. Update H/crest/toe, jenis muka (3/4), statistik region, dan keyakinan."""
+    """Koreksi 'lereng tinggi palsu' (bench/toe tak terbaca sehingga penelusuran melompat ke crest/toe yang jauh). Untuk tiap sel muka dicari garis crest
+    TERDEKAT YANG ADA DI SISI ATAS (searah naik lereng & elevasi >= sel) dan garis toe TERDEKAT DI SISI BAWAH (searah turun lereng & elevasi <= sel);
+    tinggi = selisihnya. Arah naik/turun memakai gradien permukaan, sehingga toe muka di ATAS bench tidak pernah terpilih sebagai toe sel ini.
+    Hanya menurunkan tinggi yang jelas terlalu besar; yang sudah wajar tidak diubah."""
     from scipy import ndimage as ndi
     from scipy.spatial import cKDTree
     A["refined"] = 0
@@ -30906,18 +30907,29 @@ def _bch_refine_heights(A, ct, xa, ya, max_d=60.0, tz=1.0):
     ii, jj = np.nonzero(face)
     X = xa[0] + ii * (xa[1] - xa[0]); Y = ya[0] + jj * (ya[1] - ya[0])
     Zc = A["zf"][ii, jj]
-    k = 14
+    gs = ndi.gaussian_filter(A["zf"], max(1.5, 4.0 / max(dx, dy)))
+    gxm, gym = np.gradient(gs, dx, dy)
+    ux, uy = gxm[ii, jj], gym[ii, jj]
+    un = np.hypot(ux, uy) + 1e-12
+    ux, uy = ux / un, uy / un                                   # arah NAIK lereng
+    k = 16
+    XY = np.column_stack([X, Y])
 
-    def nearest(tr, V, cond):
-        d, ix = tr.query(np.column_stack([X, Y]), k=k, distance_upper_bound=max_d)
+    def nearest(tr, V, up):
+        d, ix = tr.query(XY, k=k, distance_upper_bound=max_d)
         ixc = np.minimum(ix, len(V) - 1)
         zz = V[ixc, 2]
-        ok = np.isfinite(d) & cond(zz)
+        vx = V[ixc, 0] - X[:, None]; vy = V[ixc, 1] - Y[:, None]
+        along = vx * ux[:, None] + vy * uy[:, None]              # >0 = di sisi naik-lereng
+        near_ = np.hypot(vx, vy) < 2.5 * step
+        side_ok = (along >= -0.5 * step) if up else (along <= 0.5 * step)
+        z_ok = (zz >= Zc[:, None] - tz) if up else (zz <= Zc[:, None] + tz)
+        ok = np.isfinite(d) & z_ok & (side_ok | near_)
         has = ok.any(axis=1)
         first = np.argmax(ok, axis=1)
         return np.where(has, zz[np.arange(len(X)), first], np.nan)
-    cl = nearest(trC, C, lambda zz: zz >= Zc[:, None] - tz)
-    tl = nearest(trT, T, lambda zz: zz <= Zc[:, None] + tz)
+    cl = nearest(trC, C, True)
+    tl = nearest(trT, T, False)
     Hn = cl - tl
     H0 = A["H"][ii, jj]
     fix = np.isfinite(Hn) & (Hn > 0.5) & (H0 > 1.25 * Hn + 1.0)
@@ -30928,7 +30940,6 @@ def _bch_refine_heights(A, ct, xa, ya, max_d=60.0, tz=1.0):
     conf[ii[fix], jj[fix]] = 2
     A["H"], A["crest"], A["toe"], A["conf"] = H, crest, toe, conf
     A["refined"] = int(fix.sum())
-    # statistik region & jenis ulang
     rid, reg, P = A["rid"], A["reg"], A["params"]
     typ = A["typ"].copy()
     fr = np.where(np.isin(reg["type"], (3, 4)))[0]
@@ -31054,6 +31065,17 @@ def _bch_compliance(A, xa, ya, ct, seg_len=20.0, reach=120.0):
         b_ = min(a_ + 3, len(dd))
         zt = float(np.median(ZP[si, a_:b_])) if b_ > a_ else float(ZP[si, i1])
         H = zc - zt
+        # sinkron dengan domain tinggi: bila penampang menembus bench yang tak terbaca (tinggi jauh > tinggi sel muka pada penampang yang sama), pakai tinggi sel
+        try:
+            hc_ = A["H"][FI[si, i0:i1 + 1], FJ[si, i0:i1 + 1]]
+            hc_ = hc_[np.isfinite(hc_)]
+            if hc_.size >= 2:
+                Hc = float(np.median(hc_))
+                if Hc > 0.5 and H > 1.25 * Hc + 1.0:
+                    H = Hc
+                    zt = zc - Hc
+        except Exception:
+            pass
         if H < 0.5:
             continue
         run = max(float(dd[i1] - dd[i0]), step)
@@ -31165,12 +31187,13 @@ function ptsObj(b,col){ if(!b) return null; var a=new Float32Array(b64(b).buffer
   var o=new T.Points(gg,new T.PointsMaterial({color:col,size:3,sizeAttenuation:false})); o.visible=false; grp.add(o); return o;}
 var oLn=lineObj(P.lines,0xffffff), oC=ptsObj(P.cpts,0xff00ff), oT=ptsObj(P.tpts,0xff8c00);
 function thick(b,col){ if(!b) return null; var a=new Float32Array(b64(b).buffer); var n=Math.floor(a.length/6); if(!n) return null;
-  var r=Math.max(X1-X0,Y1-Y0)*0.0006; var geo=new T.CylinderGeometry(r,r,1,5,1,false);
-  var im=new T.InstancedMesh(geo,new T.MeshBasicMaterial({color:col}),n);
-  var m=new T.Matrix4(),q=new T.Quaternion(),up=new T.Vector3(0,1,0),d=new T.Vector3(),p=new T.Vector3(),sc=new T.Vector3();
-  for(var i=0;i<n;i++){var o=i*6; d.set(a[o+3]-a[o],a[o+4]-a[o+1],a[o+5]-a[o+2]); var L=d.length(); if(L<1e-6){L=1e-6;d.set(0,1,0);} d.normalize(); q.setFromUnitVectors(up,d);
-    p.set((a[o]+a[o+3])/2,(a[o+1]+a[o+4])/2,(a[o+2]+a[o+5])/2); sc.set(1,L*1.03,1); m.compose(p,q,sc); im.setMatrixAt(i,m);}
-  im.instanceMatrix.needsUpdate=true; im.visible=false; grp.add(im); return im;}
+  var w=Math.max(X1-X0,Y1-Y0)*0.00045; var pos=new Float32Array(n*12), idx=new Uint32Array(n*6);
+  for(var i=0;i<n;i++){var o=i*6; var dx=a[o+3]-a[o], dz=a[o+5]-a[o+2]; var L=Math.hypot(dx,dz)||1e-6; var nx=-dz/L*w, nz=dx/L*w; var p=i*12;
+    pos[p]=a[o]-nx;pos[p+1]=a[o+1];pos[p+2]=a[o+2]-nz; pos[p+3]=a[o]+nx;pos[p+4]=a[o+1];pos[p+5]=a[o+2]+nz;
+    pos[p+6]=a[o+3]+nx;pos[p+7]=a[o+4];pos[p+8]=a[o+5]+nz; pos[p+9]=a[o+3]-nx;pos[p+10]=a[o+4];pos[p+11]=a[o+5]-nz;
+    var q=i*4, t=i*6; idx[t]=q;idx[t+1]=q+1;idx[t+2]=q+2;idx[t+3]=q;idx[t+4]=q+2;idx[t+5]=q+3;}
+  var g=new T.BufferGeometry(); g.setAttribute('position',new T.BufferAttribute(pos,3)); g.setIndex(new T.BufferAttribute(idx,1));
+  var m=new T.Mesh(g,new T.MeshBasicMaterial({color:col,side:T.DoubleSide})); m.visible=false; grp.add(m); return m;}
 var oCL=thick(P.cl,0xff00ff), oTL=thick(P.tl,0xff8c00); if(oCL)oCL.visible=true; if(oTL)oTL.visible=true;
 var cz=(P.zr[0]+P.zr[1])/2, size=Math.max(X1-X0,Y1-Y0);
 var th=0.9,ph=1.0,R=size*1.15,tg=new T.Vector3(0,0,0),ve=1;
